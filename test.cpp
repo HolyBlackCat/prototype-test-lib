@@ -5,6 +5,9 @@
 
 int sum(int a, int b, int c){return a + b + c;}
 
+// Turn `a` and `b` into `integral_constant`s with the same __COUNTER__ value, compare them in the macro to check if we're nested or not? Could work.
+#define TA_VARIANT(...) (int a = 1) if (int b = 1) {} else
+
 int main()
 {
     // TA_CHECK($(1 + $(2) ) + TA_ARG(3) == 7);
@@ -20,11 +23,11 @@ int main()
     //     using T = TA_VALUE;
     // };
 
-    // TA_VARIANT(foo)
+    // if TA_VARIANT(foo)
     // {
 
     // }
-    // TA_OR_VARIANT(bar)
+    // else if TA_VARIANT(bar)
     // {
 
     // }
