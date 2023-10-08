@@ -70,11 +70,123 @@ namespace ta_test
         }
     };
 
+    // Text color.
+    // The values are the foreground text colors. Add 10 to make background colors.
+    enum class TextColor
+    {
+        none = 39,
+        dark_black = 30,
+        dark_red = 31,
+        dark_green = 32,
+        dark_yellow = 33,
+        dark_blue = 34,
+        dark_magenta = 35,
+        dark_cyan = 36,
+        dark_white = 37,
+        light_black = 90,
+        light_red = 91,
+        light_green = 92,
+        light_yellow = 93,
+        light_blue = 94,
+        light_magenta = 95,
+        light_cyan = 96,
+        light_white = 97,
+    };
+    // Text style.
+    struct TextStyle
+    {
+        TextColor color = TextColor::none;
+        TextColor bg_color = TextColor::none;
+        bool bold = false;
+        bool italic = false;
+        bool underline = false;
+
+        friend bool operator==(const TextStyle &, const TextStyle &) = default;
+
+        // Printing this string resets the styles. It's always null-terminated.
+        [[nodiscard]] static std::string_view ResetString()
+        {
+            return "\033[0m";
+        }
+
+        // If `prev` differs from `*this`, calls `func`, which is `(std::string_view string) -> void`,
+        //   with a string printing which performs the requested style change. The string is always null-terminated.
+        template <typename F>
+        void DeltaString(const TextStyle &prev, F &&func) const
+        {
+            // Should be large enough.
+            char buffer[100];
+            std::strcpy(buffer, "\033[");
+            char *cur = buffer + 2;
+            if (color != prev.color)
+                cur += std::sprintf(cur, "%d;", int(color));
+            if (bg_color != prev.bg_color)
+                cur += std::sprintf(cur, "%d;", int(bg_color) + 10);
+            if (bold != prev.bold)
+                cur += std::sprintf(cur, "%s;", bold ? "1" : "22"); // Bold text is a little weird.
+            if (italic != prev.italic)
+                cur += std::sprintf(cur, "%s3;", italic ? "" : "2");
+            if (underline != prev.underline)
+                cur += std::sprintf(cur, "%s4;", underline ? "" : "2");
+            if (cur != buffer + 2)
+            {
+                // `sprintf` automatically null-terminates the buffer.
+                cur[-1] = 'm';
+                std::forward<F>(func)(std::string_view(buffer, cur));
+            }
+        }
+    };
+
+    struct GlobalConfig
+    {
+        TextStyle style_expr_normal;
+        // Punctuation.
+        TextStyle style_expr_punct = {.bold = true};
+        // Numbers.
+        TextStyle style_expr_number = {.color = TextColor::dark_green, .bold = true};
+        // User-defined literal on a number, starting with `_`. For my sanity, literals not starting with `_` are colored like the rest of the number.
+        TextStyle style_expr_number_suffix = {.color = TextColor::dark_green};
+        // A string literal; everything between the quotes inclusive.
+        TextStyle style_expr_string = {.color = TextColor::dark_cyan, .bold = true};
+        // Stuff before the opening `"`.
+        TextStyle style_expr_string_prefix = {.color = TextColor::dark_cyan};
+        // Stuff after the closing `"`.
+        TextStyle style_expr_string_suffix = {.color = TextColor::dark_cyan};
+        // A character literal.
+        TextStyle style_expr_char = {.color = TextColor::dark_yellow, .bold = true};
+        TextStyle style_expr_char_prefix = {.color = TextColor::dark_yellow};
+        TextStyle style_expr_char_suffix = {.color = TextColor::dark_yellow};
+        // A raw string literal; everything between the parentheses exclusive.
+        TextStyle style_expr_raw_string = {.color = TextColor::light_blue, .bold = true};
+        // Stuff before the opening `"`.
+        TextStyle style_expr_raw_string_prefix = {.color = TextColor::dark_magenta};
+        // Stuff after the closing `"`.
+        TextStyle style_expr_raw_string_suffix = {.color = TextColor::dark_magenta};
+        // Quotes, parentheses, and everything between them.
+        TextStyle style_expr_raw_string_delimiters = {.color = TextColor::dark_magenta, .bold = true};
+
+        char ch_underline = '~';
+        char ch_underline_start = '^';
+        char ch_bar = '|';
+    };
+    inline GlobalConfig config;
+
     namespace detail
     {
         [[nodiscard]] constexpr bool IsWhitespace(char ch)
         {
             return ch == ' ' || ch == '\t';
+        }
+        [[nodiscard]] constexpr bool IsAlpha(char ch)
+        {
+            return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+        }
+        // Whether `ch` is a letter or an other non-digit identifier character.
+        [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
+        {
+            if (ch == '$')
+                return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
+            return ch == '_' || IsAlpha(ch);
         }
         [[nodiscard]] constexpr bool IsDigit(char ch)
         {
@@ -83,9 +195,7 @@ namespace ta_test
         // Whether `ch` can be a part of an identifier.
         [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
         {
-            if (ch == '$')
-                return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
-            return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || IsDigit(ch);
+            return IsNonDigitIdentifierChar(ch) || IsDigit(ch);
         }
         // Returns true if `name` is `"TA_ARG"` or one of its aliases.
         [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
@@ -99,72 +209,6 @@ namespace ta_test
             return false;
         }
 
-        // Text color.
-        // The values are the foreground text colors. Add 10 to make background colors.
-        enum class TextColor
-        {
-            none = 39,
-            dark_black = 30,
-            dark_red = 31,
-            dark_green = 32,
-            dark_yellow = 33,
-            dark_blue = 34,
-            dark_magenta = 35,
-            dark_cyan = 36,
-            dark_white = 37,
-            light_black = 90,
-            light_red = 91,
-            light_green = 92,
-            light_yellow = 93,
-            light_blue = 94,
-            light_magenta = 95,
-            light_cyan = 96,
-            light_white = 97,
-        };
-        // Text style.
-        struct TextStyle
-        {
-            TextColor color = TextColor::none;
-            TextColor bg_color = TextColor::none;
-            bool bold = false;
-            bool italic = false;
-            bool underline = false;
-
-            friend bool operator==(const TextStyle &, const TextStyle &) = default;
-
-            // Printing this string resets the styles. It's always null-terminated.
-            [[nodiscard]] static std::string_view ResetString()
-            {
-                return "\033[0m";
-            }
-
-            // If `prev` differs from `*this`, calls `func`, which is `(std::string_view string) -> void`,
-            //   with a string printing which performs the requested style change. The string is always null-terminated.
-            template <typename F>
-            void DeltaString(const TextStyle &prev, F &&func) const
-            {
-                // Should be large enough.
-                char buffer[100];
-                std::strcpy(buffer, "\033[");
-                char *cur = buffer + 2;
-                if (color != prev.color)
-                    cur += std::sprintf(cur, "%d;", int(color));
-                if (bg_color != prev.bg_color)
-                    cur += std::sprintf(cur, "%d;", int(bg_color) + 10);
-                if (bold != prev.bold)
-                    cur += std::sprintf(cur, "%s;", bold ? "1" : "22"); // Bold text is a little weird.
-                if (italic != prev.italic)
-                    cur += std::sprintf(cur, "%s3;", italic ? "" : "2");
-                if (underline != prev.underline)
-                    cur += std::sprintf(cur, "%s4;", underline ? "" : "2");
-                if (cur != buffer + 2)
-                {
-                    // `sprintf` automatically null-terminates the buffer.
-                    cur[-1] = 'm';
-                    std::forward<F>(func)(std::string_view(buffer, cur));
-                }
-            }
-        };
         // Describes a cell in a 2D canvas.
         struct CellInfo
         {
@@ -203,6 +247,9 @@ namespace ta_test
                     std::size_t segment_start = 0;
                     for (std::size_t i = 0; i < line.text.size(); i++)
                     {
+                        if (line.text[i] == ' ')
+                            continue;
+
                         line.info[i].style.DeltaString(cur_style, [&](std::string_view escape)
                         {
                             if (i != segment_start)
@@ -262,15 +309,17 @@ namespace ta_test
                     lines[line].info[i] = info;
             }
 
-            // Draws a text with custom styling for each character. `func` is `(std::size_t i) -> CellInfo`.
-            template <typename F>
-            void DrawRichText(std::size_t line, std::size_t start, std::string_view text, F &&func)
+            // Accesses the cell info for the specified cell. The cell must exist.
+            [[nodiscard]] CellInfo &CellInfoAt(std::size_t line, std::size_t pos)
             {
-                EnsureNumLines(line + 1);
-                EnsureLineSize(line, start + text.size());
-                std::copy(text.begin(), text.end(), lines[line].text.begin() + start);
-                for (std::size_t i = 0; i < text.size(); i++)
-                    lines[line].info[start + i] = func(std::size_t(i));
+                if (line >= lines.size())
+                    std::terminate(); // Out of range.
+
+                Line &this_line = lines[line];
+                if (pos >= this_line.info.size())
+                    std::terminate(); // Out of range.
+
+                return this_line.info[pos];
             }
 
             // Draws a `^~~~` underline, starting at `(line, start)` of length `size`.
@@ -285,7 +334,7 @@ namespace ta_test
                 for (std::size_t i = start; i < start + size; i++)
                 {
                     Line &this_line = lines[line];
-                    this_line.text[i] = i == start ? '^' : '~';
+                    this_line.text[i] = i == start ? config.ch_underline_start : config.ch_underline;
                     this_line.info[i] = info;
                 }
             }
@@ -306,7 +355,7 @@ namespace ta_test
                     EnsureLineSize(i, hor_pos + 1);
 
                     Line &line = lines[i];
-                    line.text[hor_pos] = '|';
+                    line.text[hor_pos] = config.ch_bar;
 
                     CellInfo &info = line.info[hor_pos];
                     info.style = style;
@@ -315,11 +364,15 @@ namespace ta_test
             }
         };
 
-        enum CharKind
+        enum class CharKind
         {
             normal,
-            string, // A string or character literal, or a raw string.
-            number, // A numeric literal.
+            string, // A string literal (not raw), not including things outside quotes.
+            character, // A character literal, not including things outside quotes.
+            string_escape_slash, // Escaping slashes in a string literal.
+            character_escape_slash, // Escaping slashes in a character literal.
+            raw_string, // A raw string literal, starting from `(` and until the closing `"` inclusive.
+            raw_string_initial_sep // A raw string literal, from the opening `"` to the `(` exclusive.
         };
 
         // `emit_char` is `(char ch, CharKind kind) -> void`.
@@ -330,22 +383,12 @@ namespace ta_test
         template <typename EmitCharFunc, typename FunctionCallFunc>
         constexpr void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, FunctionCallFunc &&function_call)
         {
-            enum class State
-            {
-                normal,
-                string_literal, // String or character literal, but not a raw string literal.
-                escape_seq, // Escape sequence in a `string_literal`.
-                raw_string_initial_sep, // Reading the initial separator of a raw string.
-                raw_string, // In the middle of a raw string.
-            };
-            State state = State::normal;
+            CharKind state = CharKind::normal;
 
             // The previous character.
             char prev_ch = '\0';
             // The current identifier. Only makes sense in `state == normal`.
             std::string_view identifier;
-            // Either `"` or `'` that ends the current string/char literal.
-            char string_literal_end_quote{};
             // Points at the start of the initial separator of a raw string.
             const char *raw_string_sep_start = nullptr;
             // The separator at the end of the raw string.
@@ -364,20 +407,25 @@ namespace ta_test
 
             for (const char &ch : expr)
             {
-                const State prev_state = state;
+                const CharKind prev_state = state;
 
                 switch (state)
                 {
-                  case State::normal:
+                  case CharKind::normal:
                     if (ch == '"' && prev_ch == 'R')
                     {
-                        state = State::raw_string_initial_sep;
+                        state = CharKind::raw_string_initial_sep;
                         raw_string_sep_start = &ch + 1;
                     }
-                    else if (ch == '"' || ch == '\'')
+                    else if (ch == '"')
                     {
-                        state = State::string_literal;
-                        string_literal_end_quote = ch;
+                        state = CharKind::string;
+                    }
+                    else if (ch == '\'')
+                    {
+                        // This condition handles `'` digit separators.
+                        if (identifier.empty() || &identifier.back() + 1 != &ch || !IsDigit(identifier.front()))
+                            state = CharKind::character;
                     }
                     else if (IsIdentifierChar(ch))
                     {
@@ -410,46 +458,220 @@ namespace ta_test
                         }
                     }
                     break;
-                  case State::string_literal:
-                    if (ch == string_literal_end_quote)
-                        state = State::normal;
+                  case CharKind::string:
+                    if (ch == '"')
+                        state = CharKind::normal;
                     else if (ch == '\\')
-                        state = State::escape_seq;
+                        state = CharKind::string_escape_slash;
                     break;
-                  case State::escape_seq:
-                    state = State::string_literal;
+                  case CharKind::character:
+                    if (ch == '\'')
+                        state = CharKind::normal;
+                    else if (ch == '\\')
+                        state = CharKind::character_escape_slash;
                     break;
-                  case State::raw_string_initial_sep:
+                  case CharKind::string_escape_slash:
+                    state = CharKind::string;
+                    break;
+                  case CharKind::character_escape_slash:
+                    state = CharKind::character;
+                    break;
+                  case CharKind::raw_string_initial_sep:
                     if (ch == '(')
                     {
-                        state = State::raw_string;
+                        state = CharKind::raw_string;
                         raw_string_sep = {raw_string_sep_start, &ch};
                     }
                     break;
-                  case State::raw_string:
+                  case CharKind::raw_string:
                     if (ch == '"')
                     {
                         std::string_view content(raw_string_sep_start, &ch);
                         if (content.size() >/*sic*/ raw_string_sep.size() && content[content.size() - raw_string_sep.size() - 1] == ')' && content.ends_with(raw_string_sep))
-                            state = State::normal;
+                            state = CharKind::normal;
                     }
                     break;
                 }
 
-                if (prev_state != State::normal && state == State::normal)
+                if (prev_state != CharKind::normal && state == CharKind::normal)
                     identifier = {};
 
-                CharKind kind = CharKind::normal;
-                if (state != State::normal || (state == State::normal && (prev_state == State::string_literal || prev_state == State::raw_string)))
-                    kind = CharKind::string;
-                else if (!identifier.empty() && IsDigit(identifier.front()))
-                    kind = CharKind::number;
+                CharKind fixed_state = state;
+                if (prev_state == CharKind::string || prev_state == CharKind::character || prev_state == CharKind::raw_string)
+                    fixed_state = prev_state;
 
                 if constexpr (!std::is_null_pointer_v<EmitCharFunc>)
-                    emit_char(ch, kind);
+                    emit_char(ch, fixed_state);
 
                 prev_ch = ch;
             }
+        }
+
+        // Pretty-prints an expression to a canvas.
+        inline void DrawExprToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr)
+        {
+            canvas.DrawText(line, start, expr);
+            std::size_t i = 0;
+            CharKind prev_kind = CharKind::normal;
+            bool is_number = false;
+            bool is_number_suffix = false;
+            bool is_string_suffix = false;
+            std::size_t raw_string_separator_len = 0;
+
+            CharKind prev_string_kind{}; // One of: `string`, `character`, `raw_string`.
+
+            auto lambda = [&](char ch, CharKind kind)
+            {
+                CellInfo &info = canvas.CellInfoAt(line, start + i);
+                bool is_punct = !IsIdentifierChar(ch);
+
+                if (kind != CharKind::normal)
+                {
+                    is_number = false;
+                    is_number_suffix = false;
+                    is_string_suffix = false;
+                }
+
+                // When exiting raw string, backtrack and color the closing sequence.
+                if (prev_kind == CharKind::raw_string && kind != CharKind::raw_string)
+                {
+                    for (std::size_t j = 0; j < raw_string_separator_len; j++)
+                        canvas.CellInfoAt(line, start + i - j - 1).style = config.style_expr_raw_string_delimiters;
+                }
+
+                switch (kind)
+                {
+                  case CharKind::normal:
+                    if (is_string_suffix && !IsIdentifierChar(ch))
+                        is_string_suffix = false;
+                    if ((prev_kind == CharKind::string || prev_kind == CharKind::character || prev_kind == CharKind::raw_string) && IsIdentifierChar(ch))
+                        is_string_suffix = true;
+
+                    if (is_number_suffix && !IsIdentifierChar(ch))
+                        is_number_suffix = false;
+
+                    if (!is_number)
+                    {
+                        if (!is_string_suffix && !is_number_suffix && IsDigit(ch))
+                        {
+                            is_number = true;
+
+                            // Backtrack and make the leading `.` a number too, if it's there.
+                            if (i > 0 && expr[i-1] == '.')
+                                canvas.CellInfoAt(line, start + i - 1).style = config.style_expr_number;
+                        }
+                    }
+                    else
+                    {
+                        if (!(IsDigit(ch) || IsAlpha(ch) || ch == '.' || ch == '-' || ch == '+' || ch == '\''))
+                        {
+                            is_number = false;
+                            if (ch == '_')
+                                is_number_suffix = true;
+                        }
+                    }
+
+                    if (is_string_suffix)
+                    {
+                        switch (prev_string_kind)
+                        {
+                          case CharKind::string:
+                            info.style = config.style_expr_string_suffix;
+                            break;
+                          case CharKind::character:
+                            info.style = config.style_expr_char_suffix;
+                            break;
+                          case CharKind::raw_string:
+                            info.style = config.style_expr_raw_string_suffix;
+                            break;
+                          default:
+                            std::terminate(); // Internal lexer error during pretty-printing.
+                            break;
+                        }
+                    }
+                    else if (is_number_suffix)
+                        info.style = config.style_expr_number_suffix;
+                    else if (is_number)
+                        info.style = config.style_expr_number;
+                    else if (is_punct)
+                        info.style = config.style_expr_punct;
+                    else
+                        info.style = config.style_expr_normal;
+                    break;
+                  case CharKind::string:
+                  case CharKind::character:
+                  case CharKind::raw_string:
+                  case CharKind::raw_string_initial_sep:
+                    if (prev_kind != kind && prev_kind != CharKind::raw_string_initial_sep)
+                    {
+                        if (kind == CharKind::raw_string_initial_sep)
+                            prev_string_kind = CharKind::raw_string;
+                        else
+                            prev_string_kind = kind;
+
+                        // Backtrack and color the prefix.
+                        std::size_t j = i;
+                        while (j-- > 0 && (IsAlpha(expr[j]) || IsDigit(expr[j])))
+                        {
+                            TextStyle &target_style = canvas.CellInfoAt(line, start + j).style;
+                            switch (prev_string_kind)
+                            {
+                              case CharKind::string:
+                                target_style = config.style_expr_string_prefix;
+                                break;
+                              case CharKind::character:
+                                target_style = config.style_expr_char_prefix;
+                                break;
+                              case CharKind::raw_string:
+                                target_style = config.style_expr_raw_string_prefix;
+                                break;
+                              default:
+                                std::terminate(); // Internal lexer error during pretty-printing.
+                                break;
+                            }
+                        }
+                    }
+
+                    if (kind == CharKind::raw_string_initial_sep)
+                    {
+                        if (prev_kind != CharKind::raw_string_initial_sep)
+                            raw_string_separator_len = 1;
+                        raw_string_separator_len++;
+                    }
+
+                    switch (kind)
+                    {
+                      case CharKind::string:
+                        info.style = config.style_expr_string;
+                        break;
+                      case CharKind::character:
+                        info.style = config.style_expr_char;
+                        break;
+                      case CharKind::raw_string:
+                      case CharKind::raw_string_initial_sep:
+                        if (kind == CharKind::raw_string_initial_sep || prev_kind == CharKind::raw_string_initial_sep)
+                            info.style = config.style_expr_raw_string_delimiters;
+                        else
+                            info.style = config.style_expr_raw_string;
+                        break;
+                      default:
+                        std::terminate(); // Internal lexer error during pretty-printing.
+                        break;
+                    }
+                    break;
+                  case CharKind::string_escape_slash:
+                    info.style = config.style_expr_string;
+                    break;
+                  case CharKind::character_escape_slash:
+                    info.style = config.style_expr_char;
+                    break;
+                }
+
+                prev_kind = kind;
+
+                i++;
+            };
+            ParseExpr(expr, lambda, nullptr);
         }
 
         // A compile-time string.
