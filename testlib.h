@@ -16,8 +16,22 @@
 #include <vector>
 
 // Override to change what we call to terminate the application.
-#ifndef DETAIL_TA_FAIL
-#define DETAIL_TA_FAIL() std::terminate()
+// The logic is mostly copied from `SDL_TriggerBreakpoint()`.
+// This can be empty, we follow up by a forced termination anyway.
+#ifndef DETAIL_TA_BREAKPOINT
+#if defined(_MSC_VER) // MSVC.
+#define DETAIL_TA_BREAKPOINT() __debugbreak()
+#elif __has_builtin(__builtin_debugtrap) // Clang?
+#define DETAIL_TA_BREAKPOINT() __builtin_debugtrap()
+#elif defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)) // x86-64 GCC?
+#define DETAIL_TA_BREAKPOINT() __asm__ __volatile__ ( "int $3\n\t" )
+#elif defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__)) // Apple stuff?
+#define DETAIL_TA_BREAKPOINT() __asm__ __volatile__ ( "brk #22\n\t" )
+#elif defined(__APPLE__) && defined(__arm__) // More Apple stuff?
+#define DETAIL_TA_BREAKPOINT() __asm__ __volatile__ ( "bkpt #22\n\t" )
+#else
+#define DETAIL_TA_BREAKPOINT() // Shrug.
+#endif
 #endif
 
 // Whether to define `$(...)` as an alias for `TA_ARG(...)`.
@@ -49,7 +63,7 @@
 #define TA_CHECK(...) DETAIL_TA_CHECK(#__VA_ARGS__, __VA_ARGS__)
 #define DETAIL_TA_CHECK(x, ...) \
     /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (::ta_test::detail::AssertWrapper<x, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {DETAIL_TA_FAIL();}
+    if (::ta_test::detail::AssertWrapper<x, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {DETAIL_TA_BREAKPOINT(); std::terminate();}
 
 #define TA_ARG(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
 #if DETAIL_TA_USE_DOLLAR
@@ -102,43 +116,18 @@ namespace ta_test
         bool underline = false;
 
         friend bool operator==(const TextStyle &, const TextStyle &) = default;
-
-        // Printing this string resets the styles. It's always null-terminated.
-        [[nodiscard]] static std::string_view ResetString()
-        {
-            return "\033[0m";
-        }
-
-        // If `prev` differs from `*this`, calls `func`, which is `(std::string_view string) -> void`,
-        //   with a string printing which performs the requested style change. The string is always null-terminated.
-        template <typename F>
-        void DeltaString(const TextStyle &prev, F &&func) const
-        {
-            // Should be large enough.
-            char buffer[100];
-            std::strcpy(buffer, "\033[");
-            char *cur = buffer + 2;
-            if (color != prev.color)
-                cur += std::sprintf(cur, "%d;", int(color));
-            if (bg_color != prev.bg_color)
-                cur += std::sprintf(cur, "%d;", int(bg_color) + 10);
-            if (bold != prev.bold)
-                cur += std::sprintf(cur, "%s;", bold ? "1" : "22"); // Bold text is a little weird.
-            if (italic != prev.italic)
-                cur += std::sprintf(cur, "%s3;", italic ? "" : "2");
-            if (underline != prev.underline)
-                cur += std::sprintf(cur, "%s4;", underline ? "" : "2");
-            if (cur != buffer + 2)
-            {
-                // `sprintf` automatically null-terminates the buffer.
-                cur[-1] = 'm';
-                std::forward<F>(func)(std::string_view(buffer, cur));
-            }
-        }
     };
 
     struct GlobalConfig
     {
+        // The output stream for all our messages.
+        // If null, starting tests initializes it to `stdout`.
+        FILE *output_stream = nullptr;
+
+        // Use ANSI sequences to change the text style.
+        // If empty, initializing the tests will try to guess it.
+        std::optional<bool> text_color;
+
         TextStyle style_expr_normal;
         // Punctuation.
         TextStyle style_expr_punct = {.bold = true};
@@ -164,6 +153,8 @@ namespace ta_test
         TextStyle style_expr_raw_string_suffix = {.color = TextColor::dark_magenta};
         // Quotes, parentheses, and everything between them.
         TextStyle style_expr_raw_string_delimiters = {.color = TextColor::dark_magenta, .bold = true};
+        // Internal error messages.
+        TextStyle style_internal_error = {.color = TextColor::light_white, .bg_color = TextColor::dark_red, .bold = true};
 
         char ch_underline = '~';
         char ch_underline_start = '^';
@@ -173,6 +164,83 @@ namespace ta_test
 
     namespace detail
     {
+        // Printing this string resets the text styles. It's always null-terminated.
+        [[nodiscard]] inline std::string_view AnsiResetString()
+        {
+            if (config.text_color.value())
+                return "\033[0m";
+            else
+                return "";
+        }
+
+        // Produces a string to switch between text styles, from `prev` to `cur`.
+        // If the styles are the same, does nothing.
+        // Otherwise calls `func`, which is `(std::string_view string) -> void`,
+        //   with a string printing which performs the requested style change. The string is always null-terminated.
+        template <typename F>
+        void AnsiDeltaString(const TextStyle &prev, const TextStyle &cur, F &&func)
+        {
+            if (!config.text_color.value())
+                return;
+
+            // Should be large enough.
+            char buffer[100];
+            std::strcpy(buffer, "\033[");
+            char *ptr = buffer + 2;
+            if (cur.color != prev.color)
+                ptr += std::sprintf(ptr, "%d;", int(cur.color));
+            if (cur.bg_color != prev.bg_color)
+                ptr += std::sprintf(ptr, "%d;", int(cur.bg_color) + 10);
+            if (cur.bold != prev.bold)
+                ptr += std::sprintf(ptr, "%s;", cur.bold ? "1" : "22"); // Bold text is a little weird.
+            if (cur.italic != prev.italic)
+                ptr += std::sprintf(ptr, "%s3;", cur.italic ? "" : "2");
+            if (cur.underline != prev.underline)
+                ptr += std::sprintf(ptr, "%s4;", cur.underline ? "" : "2");
+
+            if (ptr != buffer + 2)
+            {
+                // `sprintf` automatically null-terminates the buffer.
+                ptr[-1] = 'm';
+                std::forward<F>(func)(std::string_view(buffer, ptr));
+            }
+        }
+
+        // Aborts the application with an internal error.
+        inline void InternalError(std::string_view message)
+        {
+            // A threadsafe once flag.
+            bool once = false;
+            [[maybe_unused]] static const auto once_trigger = [&]
+            {
+                once = true;
+                return nullptr;
+            }();
+
+            if (!once)
+                return; // We've already been there.
+
+            FILE *stream = config.output_stream;
+            if (!stream)
+                stream = stdout;
+            if (!config.text_color)
+                config.text_color = false;
+
+            // Set style.
+            AnsiDeltaString({}, config.style_internal_error, [&](std::string_view str)
+            {
+                std::fprintf(stream, "%s%s", AnsiResetString().data(), str.data());
+            });
+            // Write message.
+            std::fprintf(stream, " Internal error: %.*s ", int(message.size()), message.data());
+            // Reset style.
+            std::fprintf(stream, "%s\n", AnsiResetString().data());
+
+            // Stop.
+            DETAIL_TA_BREAKPOINT();
+            std::terminate();
+        }
+
         [[nodiscard]] constexpr bool IsWhitespace(char ch)
         {
             return ch == ' ' || ch == '\t';
@@ -250,7 +318,7 @@ namespace ta_test
                         if (line.text[i] == ' ')
                             continue;
 
-                        line.info[i].style.DeltaString(cur_style, [&](std::string_view escape)
+                        AnsiDeltaString(cur_style, line.info[i].style, [&](std::string_view escape)
                         {
                             if (i != segment_start)
                             {
@@ -268,8 +336,8 @@ namespace ta_test
                     func(std::string_view("\n"));
                 }
 
-                if (cur_style != TextStyle{})
-                    func(TextStyle::ResetString());
+                if (enable_style && cur_style != TextStyle{})
+                    func(AnsiResetString());
             }
 
             // Prints to a C stream.
@@ -289,7 +357,7 @@ namespace ta_test
             void EnsureLineSize(std::size_t line_number, std::size_t size)
             {
                 if (line_number >= lines.size())
-                    std::terminate(); // Line index is out of range.
+                    InternalError("Line index is out of range.");
 
                 Line &line = lines[line_number];
                 if (line.text.size() < size)
@@ -313,11 +381,11 @@ namespace ta_test
             [[nodiscard]] CellInfo &CellInfoAt(std::size_t line, std::size_t pos)
             {
                 if (line >= lines.size())
-                    std::terminate(); // Out of range.
+                    InternalError("Line index is out of range.");
 
                 Line &this_line = lines[line];
                 if (pos >= this_line.info.size())
-                    std::terminate(); // Out of range.
+                    InternalError("Character index is out of range.");
 
                 return this_line.info[pos];
             }
@@ -585,7 +653,7 @@ namespace ta_test
                             info.style = config.style_expr_raw_string_suffix;
                             break;
                           default:
-                            std::terminate(); // Internal lexer error during pretty-printing.
+                            InternalError("Internal lexer error during pretty-printing.");
                             break;
                         }
                     }
@@ -626,7 +694,7 @@ namespace ta_test
                                 target_style = config.style_expr_raw_string_prefix;
                                 break;
                               default:
-                                std::terminate(); // Internal lexer error during pretty-printing.
+                                InternalError("Internal lexer error during pretty-printing.");
                                 break;
                             }
                         }
@@ -655,7 +723,7 @@ namespace ta_test
                             info.style = config.style_expr_raw_string;
                         break;
                       default:
-                        std::terminate(); // Internal lexer error during pretty-printing.
+                        InternalError("Internal lexer error during pretty-printing.");
                         break;
                     }
                     break;
@@ -686,7 +754,7 @@ namespace ta_test
             consteval ConstString(const char (&new_str)[N])
             {
                 if (new_str[N-1] != '\0')
-                    std::terminate(); // The input string must be null-terminated.
+                    InternalError("The input string must be null-terminated.");
                 std::copy_n(new_str, size, str);
             }
 
@@ -752,7 +820,7 @@ namespace ta_test
                         return *ptr;
                 }
 
-                std::terminate(); // Unknown argument.
+                InternalError("Unknown argument.");
             }
         };
         inline thread_local ThreadState thread_state;
@@ -818,10 +886,8 @@ namespace ta_test
 
                 auto &stack = thread_state.assert_stack;
                 if (stack.empty() || stack.back() != this)
-                {
-                    // Something is wrong. Did you `co_await` inside of an assertion?
-                    std::terminate();
-                }
+                    InternalError("Something is wrong with `TA_CHECK`. Did you `co_await` inside of an assertion?");
+
                 stack.pop_back();
 
                 return value;
@@ -867,7 +933,7 @@ namespace ta_test
                         else if (ch == ',')
                             break;
                         else
-                            std::terminate(); // Parsing error, unexpected character.
+                            InternalError("Lexer error: Unexpected character after the counter macro.");
                     }
                 });
 

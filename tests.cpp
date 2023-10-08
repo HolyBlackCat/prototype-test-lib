@@ -14,6 +14,9 @@ int main()
     // int a = 1, b = 2, c = 3;
     // TA_CHECK($(sum($(a), $(b), $(c))) == 7);
 
+    ta_test::config.output_stream = stdout;
+    ta_test::config.text_color = true;
+
     ta_test::detail::TextCanvas canv;
     ta_test::detail::DrawExprToCanvas(canv, 1, 3, "foo(42, .5f,.5f, 5.f, 5.4f, 42_lit, 42lit, 42_foo42_bar, +42,-42, 123'456'789, 0x123'456, 0123'456)");
     ta_test::detail::DrawExprToCanvas(canv, 2, 3, "foo(12e5,12e+5,12e-5,12.3e5,12.3e+5,12.3e-5,0x1p2,0x1p+2,0x1p-2,0x12.34p2)");
