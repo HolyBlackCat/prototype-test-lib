@@ -5,6 +5,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <initializer_list>
 #include <optional>
@@ -97,6 +98,222 @@ namespace ta_test
 
             return false;
         }
+
+        // Text color.
+        // The values are the foreground text colors. Add 10 to make background colors.
+        enum class TextColor
+        {
+            none = 39,
+            dark_black = 30,
+            dark_red = 31,
+            dark_green = 32,
+            dark_yellow = 33,
+            dark_blue = 34,
+            dark_magenta = 35,
+            dark_cyan = 36,
+            dark_white = 37,
+            light_black = 90,
+            light_red = 91,
+            light_green = 92,
+            light_yellow = 93,
+            light_blue = 94,
+            light_magenta = 95,
+            light_cyan = 96,
+            light_white = 97,
+        };
+        // Text style.
+        struct TextStyle
+        {
+            TextColor color = TextColor::none;
+            TextColor bg_color = TextColor::none;
+            bool bold = false;
+            bool italic = false;
+            bool underline = false;
+
+            friend bool operator==(const TextStyle &, const TextStyle &) = default;
+
+            // Printing this string resets the styles. It's always null-terminated.
+            [[nodiscard]] static std::string_view ResetString()
+            {
+                return "\033[0m";
+            }
+
+            // If `prev` differs from `*this`, calls `func`, which is `(std::string_view string) -> void`,
+            //   with a string printing which performs the requested style change. The string is always null-terminated.
+            template <typename F>
+            void DeltaString(const TextStyle &prev, F &&func) const
+            {
+                // Should be large enough.
+                char buffer[100];
+                std::strcpy(buffer, "\033[");
+                char *cur = buffer + 2;
+                if (color != prev.color)
+                    cur += std::sprintf(cur, "%d;", int(color));
+                if (bg_color != prev.bg_color)
+                    cur += std::sprintf(cur, "%d;", int(bg_color) + 10);
+                if (bold != prev.bold)
+                    cur += std::sprintf(cur, "%s;", bold ? "1" : "22"); // Bold text is a little weird.
+                if (italic != prev.italic)
+                    cur += std::sprintf(cur, "%s3;", italic ? "" : "2");
+                if (underline != prev.underline)
+                    cur += std::sprintf(cur, "%s4;", underline ? "" : "2");
+                if (cur != buffer + 2)
+                {
+                    // `sprintf` automatically null-terminates the buffer.
+                    cur[-1] = 'm';
+                    std::forward<F>(func)(std::string_view(buffer, cur));
+                }
+            }
+        };
+        // Describes a cell in a 2D canvas.
+        struct CellInfo
+        {
+            TextStyle style;
+            bool important = false; // If this is true, will avoid overwriting this cell.
+        };
+
+        // A class for composing 2D ASCII graphics.
+        class TextCanvas
+        {
+            struct Line
+            {
+                std::string text;
+                std::vector<CellInfo> info;
+            };
+            std::vector<Line> lines;
+
+          public:
+            TextCanvas() {}
+
+            // Prints the canvas to a callback `func`, which is `(std::string_view string) -> void`.
+            template <typename F>
+            void PrintToCallback(bool enable_style, F &&func) const
+            {
+                TextStyle cur_style;
+
+                for (const Line &line : lines)
+                {
+                    if (!enable_style)
+                    {
+                        func(std::string_view(line.text));
+                        func(std::string_view("\n"));
+                        continue;
+                    }
+
+                    std::size_t segment_start = 0;
+                    for (std::size_t i = 0; i < line.text.size(); i++)
+                    {
+                        line.info[i].style.DeltaString(cur_style, [&](std::string_view escape)
+                        {
+                            if (i != segment_start)
+                            {
+                                func(std::string_view(line.text.c_str() + segment_start, i - segment_start));
+                                segment_start = i;
+                            }
+                            func(escape);
+                            cur_style = line.info[i].style;
+                        });
+                    }
+
+                    if (segment_start != line.text.size())
+                        func(std::string_view(line.text.c_str() + segment_start, line.text.size() - segment_start));
+
+                    func(std::string_view("\n"));
+                }
+
+                if (cur_style != TextStyle{})
+                    func(TextStyle::ResetString());
+            }
+
+            // Prints to a C stream.
+            void Print(bool enable_style, FILE *file) const
+            {
+                PrintToCallback(enable_style, [&](std::string_view string){fwrite(string.data(), string.size(), 1, file);});
+            }
+
+            // Resize the canvas to have at least the specified number of lines.
+            void EnsureNumLines(std::size_t size)
+            {
+                if (lines.size() < size)
+                    lines.resize(size);
+            }
+
+            // Resize the line to have at least the specified number of characters.
+            void EnsureLineSize(std::size_t line_number, std::size_t size)
+            {
+                if (line_number >= lines.size())
+                    std::terminate(); // Line index is out of range.
+
+                Line &line = lines[line_number];
+                if (line.text.size() < size)
+                {
+                    line.text.resize(size, ' ');
+                    line.info.resize(size);
+                }
+            }
+
+            // Draws a text.
+            void DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true})
+            {
+                EnsureNumLines(line + 1);
+                EnsureLineSize(line, start + text.size());
+                std::copy(text.begin(), text.end(), lines[line].text.begin() + start);
+                for (std::size_t i = start; i < start + text.size(); i++)
+                    lines[line].info[i] = info;
+            }
+
+            // Draws a text with custom styling for each character. `func` is `(std::size_t i) -> CellInfo`.
+            template <typename F>
+            void DrawRichText(std::size_t line, std::size_t start, std::string_view text, F &&func)
+            {
+                EnsureNumLines(line + 1);
+                EnsureLineSize(line, start + text.size());
+                std::copy(text.begin(), text.end(), lines[line].text.begin() + start);
+                for (std::size_t i = 0; i < text.size(); i++)
+                    lines[line].info[start + i] = func(std::size_t(i));
+            }
+
+            // Draws a `^~~~` underline, starting at `(line, start)` of length `size`.
+            void DrawUnderline(std::size_t line, std::size_t start, std::size_t size, const CellInfo &info = {.style = {}, .important = true})
+            {
+                if (size == 0)
+                    return;
+
+                EnsureNumLines(line + 1);
+                EnsureLineSize(line, start + size);
+
+                for (std::size_t i = start; i < start + size; i++)
+                {
+                    Line &this_line = lines[line];
+                    this_line.text[i] = i == start ? '^' : '~';
+                    this_line.info[i] = info;
+                }
+            }
+
+            // Draws a vertical `|` column, starting at `(hor_pos, line_start)`, of height `height`.
+            // The bottom `important_bottom_height` characters will have `.important == true`. If it's larger than the height, all characters will have it.
+            void DrawColumn(std::size_t line_start, std::size_t hor_pos, std::size_t height, std::size_t important_bottom_height = std::size_t(-1), const TextStyle &style = {})
+            {
+                if (height == 0)
+                    return;
+                if (important_bottom_height > height)
+                    important_bottom_height = height;
+
+                EnsureNumLines(line_start + height);
+
+                for (std::size_t i = line_start; i < line_start + height; i++)
+                {
+                    EnsureLineSize(i, hor_pos + 1);
+
+                    Line &line = lines[i];
+                    line.text[hor_pos] = '|';
+
+                    CellInfo &info = line.info[hor_pos];
+                    info.style = style;
+                    info.important = i + important_bottom_height >= line_start + height;
+                }
+            }
+        };
 
         enum CharKind
         {

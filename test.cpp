@@ -11,8 +11,15 @@ int sum(int a, int b, int c){return a + b + c;}
 int main()
 {
     // TA_CHECK($(1 + $(2) ) + TA_ARG(3) == 7);
-    int a = 1, b = 2, c = 3;
-    TA_CHECK($(sum($(a), $(b), $(c))) == 7);
+    // int a = 1, b = 2, c = 3;
+    // TA_CHECK($(sum($(a), $(b), $(c))) == 7);
+
+    ta_test::detail::TextCanvas canv;
+    canv.DrawText(0, 0, "Hello!");
+    canv.DrawText(0, 7, "World!", {.style = {.color = ta_test::detail::TextColor::dark_blue}});
+    canv.DrawUnderline(1, 7, 6, {.style = {.color = ta_test::detail::TextColor::light_green, .bold = true}});
+    canv.DrawColumn(2, 12, 3, 1, {.color = ta_test::detail::TextColor::dark_red});
+    canv.Print(true, stdout);
 
     // TA_FOR_TYPES(int, float, double)
     // {
@@ -42,5 +49,5 @@ int main()
 }
 
 
-// * Replace `emit_char` to emit blocks of characters.
+// * Replace `emit_char` to emit blocks of characters. Or not?
 // * Replace `std::terminate` calls with something saner.
