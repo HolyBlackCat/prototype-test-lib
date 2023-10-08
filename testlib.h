@@ -8,6 +8,7 @@
 #include <cstring>
 #include <exception>
 #include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <string_view>
 #include <string>
@@ -15,31 +16,50 @@
 #include <utility>
 #include <vector>
 
+// C++ standard release date.
+#ifndef CFG_TA_CXX_STANDARD_DATE
+#ifdef _MSC_VER
+#define CFG_TA_CXX_STANDARD_DATE _MSVC_LANG // D:<
+#else
+#define CFG_TA_CXX_STANDARD_DATE __cplusplus
+#endif
+#endif
+// C++ version number.
+#ifndef CFG_TA_CXX_STANDARD
+#if CFG_TA_CXX_STANDARD_DATE >= 202302
+#define CFG_TA_CXX_STANDARD 20
+#elif CFG_TA_CXX_STANDARD_DATE >= 202002
+#define CFG_TA_CXX_STANDARD 20
+#else
+#error Need C++20 or newer.
+#endif
+#endif
+
 // Override to change what we call to terminate the application.
 // The logic is mostly copied from `SDL_TriggerBreakpoint()`.
 // This can be empty, we follow up by a forced termination anyway.
-#ifndef DETAIL_TA_BREAKPOINT
+#ifndef CFG_TA_BREAKPOINT
 #if defined(_MSC_VER) // MSVC.
-#define DETAIL_TA_BREAKPOINT() __debugbreak()
+#define CFG_TA_BREAKPOINT() __debugbreak()
 #elif __has_builtin(__builtin_debugtrap) // Clang?
-#define DETAIL_TA_BREAKPOINT() __builtin_debugtrap()
+#define CFG_TA_BREAKPOINT() __builtin_debugtrap()
 #elif defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)) // x86-64 GCC?
-#define DETAIL_TA_BREAKPOINT() __asm__ __volatile__ ( "int $3\n\t" )
+#define CFG_TA_BREAKPOINT() __asm__ __volatile__ ( "int $3\n\t" )
 #elif defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__)) // Apple stuff?
-#define DETAIL_TA_BREAKPOINT() __asm__ __volatile__ ( "brk #22\n\t" )
+#define CFG_TA_BREAKPOINT() __asm__ __volatile__ ( "brk #22\n\t" )
 #elif defined(__APPLE__) && defined(__arm__) // More Apple stuff?
-#define DETAIL_TA_BREAKPOINT() __asm__ __volatile__ ( "bkpt #22\n\t" )
+#define CFG_TA_BREAKPOINT() __asm__ __volatile__ ( "bkpt #22\n\t" )
 #else
-#define DETAIL_TA_BREAKPOINT() // Shrug.
+#define CFG_TA_BREAKPOINT() // Shrug.
 #endif
 #endif
 
 // Whether to define `$(...)` as an alias for `TA_ARG(...)`.
-#ifndef DETAIL_TA_USE_DOLLAR
-#define DETAIL_TA_USE_DOLLAR 1
+#ifndef CFG_TA_USE_DOLLAR
+#define CFG_TA_USE_DOLLAR 1
 #endif
 
-#if DETAIL_TA_USE_DOLLAR
+#if CFG_TA_USE_DOLLAR
 #ifdef __clang__
 // We can't `push` and `pop` this, since it has to extend to the user code. And inline `_Pragma` in the macro doesn't work too.
 #pragma clang diagnostic ignored "-Wdollar-in-identifier-extension"
@@ -47,29 +67,46 @@
 #endif
 
 // A comma-separated list of macro names defined to be equivalent to `TA_ARG`.
-#ifndef DETAIL_TA_ARG_MACROS
-#if DETAIL_TA_USE_DOLLAR
-#define DETAIL_TA_ARG_MACROS "TA_ARG", "$"
+// `TA_ARG` itself and optionally `$` are added automatically.
+#ifndef CFG_TA_EXTRA_ARG_MACROS
+#define CFG_TA_EXTRA_ARG_MACROS
+#endif
+
+// Whether to use libfmt.
+#ifndef CFG_TA_USE_LIBFMT
+#define CFG_TA_USE_LIBFMT 0
+#endif
+
+// Which formatting function to use.
+#ifndef CFG_TA_FORMAT
+#if CFG_TA_USE_LIBFMT
+#include <fmt/format.h>
+#define CFG_TA_FORMAT(...) ::fmt::format(__VA_ARGS__)
 #else
-#define DETAIL_TA_ARG_MACROS "TA_ARG"
-#endif
-#endif
-
-#if 1
 #include <format>
-#define DETAIL_TL_FORMAT(...) ::std::format(__VA_ARGS__)
+#define CFG_TA_FORMAT(...) ::std::format(__VA_ARGS__)
+#endif
 #endif
 
-#define TA_CHECK(...) DETAIL_TA_CHECK(#__VA_ARGS__, __VA_ARGS__)
-#define DETAIL_TA_CHECK(x, ...) \
-    /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (::ta_test::detail::AssertWrapper<x, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {DETAIL_TA_BREAKPOINT(); std::terminate();}
+// Whether `{:?}` is a valid format string for strings and characters.
+#ifndef CFG_TA_FORMAT_SUPPORTS_QUOTED
+#if CFG_TA_CXX_STANDARD >= 23 || CFG_TA_USE_LIBFMT
+#define CFG_TA_FORMAT_SUPPORTS_QUOTED 1
+#else
+#define CFG_TA_FORMAT_SUPPORTS_QUOTED 0
+#endif
+#endif
 
-#define TA_ARG(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
-#if DETAIL_TA_USE_DOLLAR
+#define TA_CHECK(...) CFG_TA_CHECK(#__VA_ARGS__, __VA_ARGS__)
+#define CFG_TA_CHECK(x, ...) \
+    /* Using `? :` to force the contextual conversion to `bool`. */\
+    if (::ta_test::detail::AssertWrapper<x, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {CFG_TA_BREAKPOINT(); std::terminate();}
+
+#define TA_ARG(...) CFG_TA_ARG(__COUNTER__, __VA_ARGS__)
+#if CFG_TA_USE_DOLLAR
 #define $(...) TA_ARG(__VA_ARGS__)
 #endif
-#define DETAIL_TA_ARG(counter, ...) \
+#define CFG_TA_ARG(counter, ...) \
     /* Passing `counter` the second time is redundant, but helps with our parsing. */\
     ::ta_test::detail::ArgWrapper(__FILE__, __LINE__, counter)._ta_handle_arg_(counter, __VA_ARGS__)
 
@@ -80,9 +117,90 @@ namespace ta_test
     {
         std::string operator()(const T &value) const
         {
-            return DETAIL_TL_FORMAT("{}", value);
+            #if CFG_TA_FORMAT_SUPPORTS_QUOTED
+            if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
+            {
+                return CFG_TA_FORMAT("{:?}", value);
+            }
+            else
+            #endif
+            {
+                return CFG_TA_FORMAT("{}", value);
+            }
         }
     };
+
+    // Manually support quoting strings if the formatting library can't do that.
+    #if !CFG_TA_FORMAT_SUPPORTS_QUOTED
+    namespace detail::formatting
+    {
+        // Escapes a string, writes the result to `out_iter`. Includes quotes automatically.
+        template <typename It>
+        constexpr void EscapeString(std::string_view source, It out_iter, bool double_quotes)
+        {
+            *out_iter++ = "'\""[double_quotes];
+
+            for (unsigned char ch : source)
+            {
+                bool should_escape = (ch < ' ') || ch == 0x7f || (ch == (double_quotes ? '"' : '\''));
+
+                if (!should_escape)
+                {
+                    *out_iter++ = ch;
+                    continue;
+                }
+
+                switch (ch)
+                {
+                    case '\0': *out_iter++ = '\\'; *out_iter++ = '0'; break;
+                    case '\'': *out_iter++ = '\\'; *out_iter++ = '\''; break;
+                    case '\"': *out_iter++ = '\\'; *out_iter++ = '"'; break;
+                    case '\\': *out_iter++ = '\\'; *out_iter++ = '\\'; break;
+                    case '\a': *out_iter++ = '\\'; *out_iter++ = 'a'; break;
+                    case '\b': *out_iter++ = '\\'; *out_iter++ = 'b'; break;
+                    case '\f': *out_iter++ = '\\'; *out_iter++ = 'f'; break;
+                    case '\n': *out_iter++ = '\\'; *out_iter++ = 'n'; break;
+                    case '\r': *out_iter++ = '\\'; *out_iter++ = 'r'; break;
+                    case '\t': *out_iter++ = '\\'; *out_iter++ = 't'; break;
+                    case '\v': *out_iter++ = '\\'; *out_iter++ = 'v'; break;
+
+                  default:
+                    // The syntax with braces is from C++23. Without braces the escapes could consume extra characters on the right.
+                    // Octal escapes don't do that, but they're just inherently ugly.
+                    char buffer[7]; // 7 bytes for: \ x { N N } \0
+                    std::snprintf(buffer, sizeof buffer, "\\x{%02x}", ch);
+                    for (char *ptr = buffer; *ptr;)
+                        *out_iter++ = *ptr++;
+                    break;
+                }
+            }
+
+            *out_iter++ = "'\""[double_quotes];
+        }
+    }
+
+    template <typename Void>
+    struct ToString<std::string, Void>
+    {
+        std::string operator()(const std::string &value) const
+        {
+            std::string ret;
+            ret.reserve(value.size() + 2); // +2 for quotes.
+            detail::formatting::EscapeString(value, std::back_inserter(ret), true);
+            return ret;
+        }
+    };
+    template <typename Void>
+    struct ToString<char, Void>
+    {
+        std::string operator()(char value) const
+        {
+            char ret[12]; // Should be at most 9: `'\x??'\0`, but throwing in a little extra space.
+            detail::formatting::EscapeString({&value, 1}, ret, false);
+            return ret;
+        }
+    };
+    #endif
 
     // Text color.
     // The values are the foreground text colors. Add 10 to make background colors.
@@ -128,6 +246,43 @@ namespace ta_test
         // If empty, initializing the tests will try to guess it.
         std::optional<bool> text_color;
 
+
+        // --- Visual options ---
+
+        // When printing an assertion macro with all the argument values, it's indented by this amount of spaces.
+        std::size_t assertion_macro_indentation = 4;
+
+        // How we call the assertion macro when printing it. You can redefine those if you rename the macro.
+        std::string assertion_macro_prefix = "TA_CHECK( ";
+        std::string assertion_macro_suffix = " )";
+
+        // When printing a path in a stack, this comes before the path.
+        std::string filename_prefix = "  at:  ";
+        // When printing a path, separates it from the line number.
+        std::string filename_linenumber_separator =
+        #ifdef _MSC_VER
+            "(";
+        #else
+            ":";
+        #endif
+        // When printing a path with a line number, this comes after the line number.
+        std::string filename_linenumber_suffix =
+        #ifdef _MSC_VER
+            ") :"; // Huh.
+        #else
+            ":";
+        #endif
+
+        // Error messages.
+        TextStyle style_error = {.color = TextColor::light_red, .bold = true};
+        // Paths in the stack traces.
+        TextStyle style_stack_path = {.color = TextColor::light_black};
+        // The color of `filename_prefix`.
+        TextStyle style_stack_path_prefix = {.color = TextColor::light_black, .bold = true};
+
+        // When printing an assertion macro failure, the macro name itself (and parentheses) will use this style.
+        TextStyle style_expr_assertion_macro = {.color = TextColor::light_red, .bold = true};
+        // A piece of an expression that doesn't fit into the categories below.
         TextStyle style_expr_normal;
         // Punctuation.
         TextStyle style_expr_punct = {.bold = true};
@@ -207,7 +362,7 @@ namespace ta_test
         }
 
         // Aborts the application with an internal error.
-        inline void InternalError(std::string_view message)
+        [[noreturn]] inline void InternalError(std::string_view message)
         {
             // A threadsafe once flag.
             bool once = false;
@@ -218,7 +373,7 @@ namespace ta_test
             }();
 
             if (!once)
-                return; // We've already been there.
+                std::terminate(); // We've already been there.
 
             FILE *stream = config.output_stream;
             if (!stream)
@@ -237,7 +392,7 @@ namespace ta_test
             std::fprintf(stream, "%s\n", AnsiResetString().data());
 
             // Stop.
-            DETAIL_TA_BREAKPOINT();
+            CFG_TA_BREAKPOINT();
             std::terminate();
         }
 
@@ -268,7 +423,13 @@ namespace ta_test
         // Returns true if `name` is `"TA_ARG"` or one of its aliases.
         [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
         {
-            for (std::string_view alias : std::initializer_list<std::string_view>{DETAIL_TA_ARG_MACROS})
+            for (std::string_view alias : std::initializer_list<std::string_view>{
+                "TA_ARG",
+                #if CFG_TA_USE_DOLLAR
+                "$"
+                #endif
+                CFG_TA_EXTRA_ARG_MACROS
+            })
             {
                 if (alias == name)
                     return true;
@@ -299,8 +460,10 @@ namespace ta_test
 
             // Prints the canvas to a callback `func`, which is `(std::string_view string) -> void`.
             template <typename F>
-            void PrintToCallback(bool enable_style, F &&func) const
+            void PrintToCallback(F &&func) const
             {
+                const bool enable_style = config.text_color.value();
+
                 TextStyle cur_style;
 
                 for (const Line &line : lines)
@@ -333,17 +496,20 @@ namespace ta_test
                     if (segment_start != line.text.size())
                         func(std::string_view(line.text.c_str() + segment_start, line.text.size() - segment_start));
 
+                    // Reset the style after the last line.
+                    // Must do it before the line feed, otherwise the "core dumped" message also gets colored.
+                    if (enable_style && &line == &lines.back() && cur_style != TextStyle{})
+                        func(AnsiResetString());
+
                     func(std::string_view("\n"));
                 }
-
-                if (enable_style && cur_style != TextStyle{})
-                    func(AnsiResetString());
             }
 
-            // Prints to a C stream.
-            void Print(bool enable_style, FILE *file) const
+            // Prints to the current output stream.
+            void Print() const
             {
-                PrintToCallback(enable_style, [&](std::string_view string){fwrite(string.data(), string.size(), 1, file);});
+                FILE *stream = config.output_stream;
+                PrintToCallback([&](std::string_view string){fwrite(string.data(), string.size(), 1, stream);});
             }
 
             // Resize the canvas to have at least the specified number of lines.
@@ -367,14 +533,63 @@ namespace ta_test
                 }
             }
 
+            // Checks if the space is free in the canvas.
+            // Examines a single line (at number `line`), starting at `column - gap`, checking `width + gap*2` characters.
+            // Returns false if at least one character has `.important == true`.
+            [[nodiscard]] bool IsFreeSpace(std::size_t line, std::size_t column, std::size_t width, std::size_t gap) const
+            {
+                // Apply `gap` to `column` and `width`.
+                column = gap < column ? column - gap : 0;
+                width += gap * 2;
+
+                if (line >= lines.size())
+                    return true; // This space is below the canvas height.
+
+                const Line &this_line = lines[line];
+                if (this_line.info.empty())
+                    return true; // This line is completely empty.
+
+                std::size_t last_column = column + width;
+                if (last_column >= this_line.info.size())
+                    last_column = this_line.info.size() - 1; // `line.info` can't be empty here.
+
+                bool ok = true;
+                for (std::size_t i = column; i < last_column; i++)
+                {
+                    if (this_line.info[i].important)
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                return ok;
+            }
+
+            // Looks for a free space in the canvas.
+            // Searches for `width + gap*2` consecutive cells with `.important == false`.
+            // Starts looking at `(column - gap, starting_line)`, and proceeds downwards until it finds the free space,
+            // which could be below the canvas.
+            [[nodiscard]] std::size_t FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t width, std::size_t gap) const
+            {
+                while (true)
+                {
+                    if (IsFreeSpace(starting_line, column, width, gap))
+                        return starting_line;
+
+                    starting_line++; // Try the next line.
+                }
+            }
+
             // Draws a text.
-            void DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true})
+            // Returns `text.size()`.
+            std::size_t DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true})
             {
                 EnsureNumLines(line + 1);
                 EnsureLineSize(line, start + text.size());
                 std::copy(text.begin(), text.end(), lines[line].text.begin() + start);
                 for (std::size_t i = start; i < start + text.size(); i++)
                     lines[line].info[i] = info;
+                return text.size();
             }
 
             // Accesses the cell info for the specified cell. The cell must exist.
@@ -471,7 +686,9 @@ namespace ta_test
             };
 
             // A stack of `()` parentheses.
-            std::vector<Entry> parens_stack;
+            // This should be a vector, by my Clang 16 can't handle them in constexpr calls yet...
+            Entry parens_stack[256];
+            std::size_t parens_stack_pos = 0;
 
             for (const char &ch : expr)
             {
@@ -513,15 +730,17 @@ namespace ta_test
                         {
                             if (ch == '(')
                             {
-                                parens_stack.push_back({
+                                if (parens_stack_pos >= std::size(parens_stack))
+                                    InternalError("Too many nested parentheses.");
+                                parens_stack[parens_stack_pos++] = {
                                     .ident = identifier,
                                     .args = &ch + 1,
-                                });
+                                };
                             }
-                            else if (ch == ')' && !parens_stack.empty())
+                            else if (ch == ')' && parens_stack_pos > 0)
                             {
-                                function_call(parens_stack.back().ident, {parens_stack.back().args, &ch});
-                                parens_stack.pop_back();
+                                parens_stack_pos--;
+                                function_call(parens_stack[parens_stack_pos].ident, {parens_stack[parens_stack_pos].args, &ch});
                             }
                         }
                     }
@@ -576,7 +795,8 @@ namespace ta_test
         }
 
         // Pretty-prints an expression to a canvas.
-        inline void DrawExprToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr)
+        // Returns `expr.size()`.
+        inline std::size_t DrawExprToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr)
         {
             canvas.DrawText(line, start, expr);
             std::size_t i = 0;
@@ -740,6 +960,8 @@ namespace ta_test
                 i++;
             };
             ParseExpr(expr, lambda, nullptr);
+
+            return expr.size();
         }
 
         // A compile-time string.
@@ -850,6 +1072,85 @@ namespace ta_test
             }
         };
 
+        // Fails an assertion. `AssertWrapper` uses this.
+        inline void PrintAssertionFailure(std::string_view raw_expr, const StoredArg *stored_args, std::size_t num_stored_args, std::string_view file_name, int line_number)
+        {
+            TextCanvas canvas;
+            int line_counter = 0;
+
+            { // The file path.
+                CellInfo cell_info = {.style = config.style_stack_path, .important = true};
+                std::size_t column = 0;
+                column += canvas.DrawText(line_counter, column, config.filename_prefix, {.style = config.style_stack_path_prefix, .important = true});
+                column += canvas.DrawText(line_counter, column, file_name, cell_info);
+                column += canvas.DrawText(line_counter, column, config.filename_linenumber_separator, cell_info);
+                column += canvas.DrawText(line_counter, column, std::to_string(line_number), cell_info);
+                column += canvas.DrawText(line_counter, column, config.filename_linenumber_suffix, cell_info);
+                line_counter++;
+            }
+
+            canvas.DrawText(line_counter++, 0, "ASSERTION FAILED:", {.style = config.style_error, .important = true});
+            line_counter++;
+
+            { // The assertion call.
+                std::size_t column = config.assertion_macro_indentation;
+
+                const CellInfo assertion_macro_cell_info = {.style = config.style_expr_assertion_macro, .important = true};
+                column += canvas.DrawText(line_counter, column, config.assertion_macro_prefix, assertion_macro_cell_info);
+                column += DrawExprToCanvas(canvas, line_counter, column, raw_expr);
+                column += canvas.DrawText(line_counter, column, config.assertion_macro_suffix, assertion_macro_cell_info);
+                line_counter++;
+            }
+
+            std::size_t expr_column = config.assertion_macro_indentation + config.assertion_macro_prefix.size();
+
+            std::size_t pos = 0;
+            ParseExpr(raw_expr, nullptr, [&](std::string_view name, std::string_view args)
+            {
+                if (!IsArgMacroName(name))
+                    return;
+
+                if (pos >= num_stored_args)
+                    InternalError("More `TA_ARG`s than expected.");
+
+                const StoredArg &this_arg = stored_args[pos++];
+
+                if (this_arg.state == StoredArg::State::not_started)
+                    return; // This argument wasn't computed.
+
+                bool incomplete = this_arg.state == StoredArg::State::in_progress;
+                std::string_view this_value;
+                if (incomplete) // Trying to use a `? :` here leads to a dangling `std::string_view`.
+                    this_value = "...";
+                else
+                    this_value = this_arg.value;
+
+                std::size_t underline_x = args.data() - raw_expr.data() + expr_column;
+                std::size_t underline_width = args.size();
+
+                std::size_t value_x;
+                if (this_value.size() > underline_width)
+                    value_x = underline_x;
+                else
+                    value_x = underline_x + (underline_width - this_value.size()) / 2;
+
+                std::size_t underline_y = canvas.FindFreeSpace(line_counter, underline_x, underline_width, 1);
+                std::size_t value_y = canvas.FindFreeSpace(underline_y + 1, value_x, this_value.size(), 1);
+
+                canvas.DrawUnderline(underline_y, underline_x, underline_width);
+                canvas.DrawText(value_y, value_x, incomplete ? "..." : this_value);
+
+                // if (this_arg)
+                //     std::printf("not computed\n");
+                // else if (this_arg.state == StoredArg::State::in_progress)
+                //     std::printf("...\n");
+                // else
+                //     std::printf("`%s`\n", this_arg.value.c_str());
+            });
+
+            canvas.Print();
+        }
+
         // Returns `value` as is. But before that, prints an error message if it's false.
         template <ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
         struct AssertWrapper : BasicAssert
@@ -865,24 +1166,7 @@ namespace ta_test
             bool operator()(bool value) &&
             {
                 if (!value)
-                {
-                    int pos = 0;
-                    ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args)
-                    {
-                        if (!IsArgMacroName(name))
-                            return;
-
-                        std::printf("[%.*s] -> ", int(args.size()), args.data());
-                        if (stored_args[pos].state == StoredArg::State::not_started)
-                            std::printf("not computed\n");
-                        else if (stored_args[pos].state == StoredArg::State::in_progress)
-                            std::printf("...\n");
-                        else
-                            std::printf("`%s`\n", stored_args[pos].value.c_str());
-
-                        pos++;
-                    });
-                }
+                    PrintAssertionFailure(RawString.view(), stored_args.data(), num_args, FileName.view(), LineNumber);
 
                 auto &stack = thread_state.assert_stack;
                 if (stack.empty() || stack.back() != this)
@@ -922,6 +1206,9 @@ namespace ta_test
                 {
                     if (name != "_ta_handle_arg_")
                         return;
+
+                    if (pos >= num_args)
+                        InternalError("More `TA_ARG`s than expected.");
 
                     CounterIndexPair &new_pair = ret[pos];
                     new_pair.index = pos++;
