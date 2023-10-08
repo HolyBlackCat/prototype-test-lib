@@ -255,24 +255,24 @@ namespace ta_test
         std::size_t assertion_macro_indentation = 4;
 
         // How we call the assertion macro when printing it. You can redefine those if you rename the macro.
-        std::string assertion_macro_prefix = "TA_CHECK( ";
-        std::string assertion_macro_suffix = " )";
+        std::u32string assertion_macro_prefix = U"TA_CHECK( ";
+        std::u32string assertion_macro_suffix = U" )";
 
         // When printing a path in a stack, this comes before the path.
-        std::string filename_prefix = "  at:  ";
+        std::u32string filename_prefix = U"  at:  ";
         // When printing a path, separates it from the line number.
-        std::string filename_linenumber_separator =
+        std::u32string filename_linenumber_separator =
         #ifdef _MSC_VER
-            "(";
+            U"(";
         #else
-            ":";
+            U":";
         #endif
         // When printing a path with a line number, this comes after the line number.
-        std::string filename_linenumber_suffix =
+        std::u32string filename_linenumber_suffix =
         #ifdef _MSC_VER
-            ") :"; // Huh.
+            U") :"; // Huh.
         #else
-            ":";
+            U":";
         #endif
 
         // Error messages.
@@ -316,11 +316,11 @@ namespace ta_test
         struct Chars
         {
             // Vertical bars, either standalone or in brackets.
-            char bar = '|';
+            char32_t bar = '|';
             // Other parts of brackets.
-            char bracket_bottom = '_';
-            char bracket_corner_left = '|';
-            char bracket_corner_right = '|';
+            char32_t bracket_bottom = '_';
+            char32_t bracket_corner_left = '|';
+            char32_t bracket_corner_right = '|';
 
             void SetAscii()
             {
@@ -335,6 +335,209 @@ namespace ta_test
 
     namespace detail
     {
+        // A mini unicode library.
+        namespace uni
+        {
+            // A placeholder value for invalid characters.
+            constexpr char32_t default_char = 0xfffd;
+
+            // Max bytes per character.
+            constexpr std::size_t max_char_len = 4;
+
+            // Given a byte, checks if it's the first byte of a multibyte character, or is a single-byte character.
+            // Even if this function returns true, `byte` can be an invalid first byte.
+            // To check for the byte validity, use `FirstByteToCharacterLength`.
+            [[nodiscard]] inline bool IsFirstByte(char byte)
+            {
+                return (byte & 0b11000000) != 0b10000000;
+            }
+
+            // Given the first byte of a multibyte character (or a single-byte character), returns the amount of bytes occupied by the character.
+            // Returns 0 if this is not a valid first byte, or not a first byte at all.
+            [[nodiscard]] inline std::size_t FirstByteToCharacterLength(char first_byte)
+            {
+                if ((first_byte & 0b10000000) == 0b00000000) return 1; // Note the different bit pattern in this one.
+                if ((first_byte & 0b11100000) == 0b11000000) return 2;
+                if ((first_byte & 0b11110000) == 0b11100000) return 3;
+                if ((first_byte & 0b11111000) == 0b11110000) return 4;
+                return 0;
+            }
+
+            // Returns true if `ch` is a valid unicode ch (aka 'codepoint').
+            [[nodiscard]] inline bool IsValidCharacterCode(char32_t ch)
+            {
+                return ch <= 0x10ffff;
+            }
+
+            // Returns the amount of bytes needed to represent a character.
+            // If the character is invalid (use `IsValidCharacterCode` to check for validity) returns 4, which is the maximum possible length
+            [[nodiscard]] inline std::size_t CharacterCodeToLength(char32_t ch)
+            {
+                if (ch <= 0x7f) return 1;
+                if (ch <= 0x7ff) return 2;
+                if (ch <= 0xffff) return 3;
+                // Here `ch <= 0x10ffff`, or the character is invalid.
+                // Mathematically the cap should be `0x1fffff`, but Unicode defines the max value to be lower.
+                return 4;
+            }
+
+            // Encodes a character into UTF8.
+            // The minimal buffer length can be determined with `CharacterCodeToLength`.
+            // If the character is invalid, writes `default_char` instead.
+            // No null-terminator is added.
+            // Returns the amount of bytes written, equal to what `CharacterCodeToLength` would return.
+            inline std::size_t Encode(char32_t ch, char *buffer)
+            {
+                if (!IsValidCharacterCode(ch))
+                    return Encode(default_char, buffer);
+
+                std::size_t len = CharacterCodeToLength(ch);
+                switch (len)
+                {
+                  case 1:
+                    *buffer = char(ch);
+                    break;
+                  case 2:
+                    *buffer++ = char(0b11000000 | (ch >> 6));
+                    *buffer   = char(0b10000000 | (ch & 0b00111111));
+                    break;
+                  case 3:
+                    *buffer++ = char(0b11100000 |  (ch >> 12));
+                    *buffer++ = char(0b10000000 | ((ch >>  6) & 0b00111111));
+                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
+                    break;
+                  case 4:
+                    *buffer++ = char(0b11110000 |  (ch >> 18));
+                    *buffer++ = char(0b10000000 | ((ch >> 12) & 0b00111111));
+                    *buffer++ = char(0b10000000 | ((ch >> 6 ) & 0b00111111));
+                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
+                    break;
+                }
+
+                return len;
+            }
+
+            // Same as `std::size_t Encode(Char ch, char *buffer)`, but appends the data to a string.
+            inline std::size_t Encode(char32_t ch, std::string &str)
+            {
+                char buf[max_char_len];
+                std::size_t len = Encode(ch, buf);
+                str.append(buf, len);
+                return len;
+            }
+
+            // Encodes one string into another.
+            inline void Encode(std::u32string_view view, std::string &str)
+            {
+                str.clear();
+                str.reserve(view.size() * max_char_len);
+                for (char32_t ch : view)
+                    Encode(ch, str);
+            }
+
+            // Decodes a UTF8 character.
+            // Returns a pointer to the first byte of the next character.
+            // If `end` is not null, it'll stop reading at `end`. In this case `end` will be returned.
+            [[nodiscard]] inline const char *FindNextCharacter(const char *data, const char *end = nullptr)
+            {
+                do
+                    data++;
+                while (data != end && !IsFirstByte(*data));
+
+                return data;
+            }
+
+            // Returns a decoded character or `default_char` on failure.
+            // If `end` is not null, it won't attempt to read past it.
+            // If `next_char` is not null, it will be set to point to the next byte after the current character.
+            // If `data == end`, returns '\0'. (If `end != 0` and `data > end`, also returns '\0'.)
+            // If `data == 0`, returns '\0'.
+            inline char32_t Decode(const char *data, const char *end = nullptr, const char **next_char = nullptr)
+            {
+                // Stop if `data` is a null pointer.
+                if (!data)
+                {
+                    if (next_char)
+                        *next_char = nullptr;
+                    return 0;
+                }
+
+                // Stop if we have an empty string.
+                if (end && data >= end) // For `data >= end` to be well-defined, `end` has to be not null if `data` is not null.
+                {
+                    if (next_char)
+                        *next_char = data;
+                    return 0;
+                }
+
+                // Get character length.
+                std::size_t len = FirstByteToCharacterLength(*data);
+
+                // Stop if this is not a valid first byte.
+                if (len == 0)
+                {
+                    if (next_char)
+                        *next_char = FindNextCharacter(data, end);
+                    return default_char;
+                }
+
+                // Handle single byte characters.
+                if (len == 1)
+                {
+                    if (next_char)
+                        *next_char = data+1;
+                    return (unsigned char)*data;
+                }
+
+                // Stop if there is not enough characters left in `data`.
+                if (end && end - data < std::ptrdiff_t(len))
+                {
+                    if (next_char)
+                        *next_char = end;
+                    return default_char;
+                }
+
+                // Extract bits from the first byte.
+                char32_t ret = (unsigned char)*data & (0xff >> len); // `len + 1` would have the same effect as `len`, but it's longer to type.
+
+                // For each remaining byte...
+                for (std::size_t i = 1; i < len; i++)
+                {
+                    // Stop if it's a first byte of some character.
+                    if (IsFirstByte(data[i]))
+                    {
+                        if (next_char)
+                            *next_char = data + i;
+                        return default_char;
+                    }
+
+                    // Extract bits and append them to the code.
+                    ret = ret << 6 | ((unsigned char)data[i] & 0b00111111);
+                }
+
+                // Get next character position.
+                if (next_char)
+                    *next_char = data + len;
+
+                return ret;
+            }
+
+            // Decodes one string into another.
+            inline void Decode(std::string_view view, std::u32string &str)
+            {
+                str.clear();
+                str.reserve(view.size());
+                for (const char *cur = view.data(); cur - view.data() < std::ptrdiff_t(view.size());)
+                    str += uni::Decode(cur, view.data() + view.size(), &cur);
+            }
+            [[nodiscard]] inline std::u32string Decode(std::string_view view)
+            {
+                std::u32string ret;
+                uni::Decode(view, ret);
+                return ret;
+            }
+        }
+
         // Printing this string resets the text styles. It's always null-terminated.
         [[nodiscard]] inline std::string_view AnsiResetString()
         {
@@ -466,7 +669,7 @@ namespace ta_test
         {
             struct Line
             {
-                std::string text;
+                std::u32string text;
                 std::vector<CellInfo> info;
             };
             std::vector<Line> lines;
@@ -482,35 +685,39 @@ namespace ta_test
 
                 TextStyle cur_style;
 
+                std::string buffer;
+
                 for (const Line &line : lines)
                 {
-                    if (!enable_style)
-                    {
-                        func(std::string_view(line.text));
-                        func(std::string_view("\n"));
-                        continue;
-                    }
-
                     std::size_t segment_start = 0;
-                    for (std::size_t i = 0; i < line.text.size(); i++)
-                    {
-                        if (line.text[i] == ' ')
-                            continue;
 
-                        AnsiDeltaString(cur_style, line.info[i].style, [&](std::string_view escape)
+                    auto FlushSegment = [&](std::size_t end_pos)
+                    {
+                        if (segment_start == end_pos)
+                            return;
+
+                        uni::Encode(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
+                        func(std::string_view(buffer));
+                        segment_start = end_pos;
+                    };
+
+                    if (enable_style)
+                    {
+                        for (std::size_t i = 0; i < line.text.size(); i++)
                         {
-                            if (i != segment_start)
+                            if (line.text[i] == ' ')
+                                continue;
+
+                            AnsiDeltaString(cur_style, line.info[i].style, [&](std::string_view escape)
                             {
-                                func(std::string_view(line.text.c_str() + segment_start, i - segment_start));
-                                segment_start = i;
-                            }
-                            func(escape);
-                            cur_style = line.info[i].style;
-                        });
+                                FlushSegment(i);
+                                func(escape);
+                                cur_style = line.info[i].style;
+                            });
+                        }
                     }
 
-                    if (segment_start != line.text.size())
-                        func(std::string_view(line.text.c_str() + segment_start, line.text.size() - segment_start));
+                    FlushSegment(line.text.size());
 
                     // Reset the style after the last line.
                     // Must do it before the line feed, otherwise the "core dumped" message also gets colored.
@@ -642,7 +849,7 @@ namespace ta_test
 
             // Draws a text.
             // Returns `text.size()`.
-            std::size_t DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true})
+            std::size_t DrawText(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info = {.style = {}, .important = true})
             {
                 EnsureNumLines(line + 1);
                 EnsureLineSize(line, start + text.size());
@@ -651,11 +858,17 @@ namespace ta_test
                     lines[line].info[i] = info;
                 return text.size();
             }
+            // Draws a UTF8 text. Returns the text size after converting to UTF32.
+            std::size_t DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true})
+            {
+                std::u32string decoded_text = uni::Decode(text);
+                return DrawText(line, start, decoded_text, info);
+            }
 
             // Draws a horizontal row of `ch`, starting at `(column, line_start)`, of width `width`.
             // If `skip_important == true`, don't overwrite important cells.
             // Returns `width`.
-            std::size_t DrawRow(char ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info = {.style = {}, .important = true})
+            std::size_t DrawRow(char32_t ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info = {.style = {}, .important = true})
             {
                 EnsureNumLines(line + 1);
                 EnsureLineSize(line, column + width);
@@ -673,7 +886,7 @@ namespace ta_test
 
             // Draws a vertical column of `ch`, starting at `(column, line_start)`, of height `height`.
             // If `skip_important == true`, don't overwrite important cells.
-            void DrawColumn(char ch, std::size_t line_start, std::size_t column, std::size_t height, bool skip_important, const CellInfo &info = {.style = {}, .important = true})
+            void DrawColumn(char32_t ch, std::size_t line_start, std::size_t column, std::size_t height, bool skip_important, const CellInfo &info = {.style = {}, .important = true})
             {
                 if (height == 0)
                     return;
@@ -1199,6 +1412,8 @@ namespace ta_test
 
             std::size_t expr_column = config.assertion_macro_indentation + config.assertion_macro_prefix.size();
 
+            std::u32string this_value;
+
             for (std::size_t i = 0; i < num_args; i++)
             {
                 const std::size_t arg_index = args_in_draw_order[i];
@@ -1209,11 +1424,10 @@ namespace ta_test
                     return; // This argument wasn't computed.
 
                 bool incomplete = this_arg.state == StoredArg::State::in_progress;
-                std::string_view this_value;
                 if (incomplete) // Trying to use a `? :` here leads to a dangling `std::string_view`.
-                    this_value = "...";
+                    this_value = U"...";
                 else
-                    this_value = this_arg.value;
+                    this_value = uni::Decode(this_arg.value);
 
                 std::size_t value_x = expr_column + this_info.expr_offset + this_info.expr_size / 2 - this_value.size() / 2;
                 // Make sure `value_x` didn't underflow.

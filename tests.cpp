@@ -17,7 +17,7 @@ int main()
     // int a = 1, b = 2, c = 3;
     // TA_CHECK($(sum($(a), $(b), $(c))) == 7);
 
-    std::string a = "42", b = "4\n\0333";
+    std::string a = "мур", b = "4\n\0333";
     char c = 'e';
     TA_CHECK($(sum($(a), $(b), $(c))) == true);
 
