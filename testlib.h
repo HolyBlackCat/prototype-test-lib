@@ -275,6 +275,18 @@ namespace ta_test
             U":";
         #endif
 
+        // The argument colors. They are cycled in this order.
+        std::vector<TextStyle> style_arguments = {
+            {.color = TextColor::light_cyan, .bold = true},
+            {.color = TextColor::light_green, .bold = true},
+            {.color = TextColor::light_yellow, .bold = true},
+            {.color = TextColor::light_blue, .bold = true},
+            {.color = TextColor::light_magenta, .bold = true},
+            {.color = TextColor::light_red, .bold = true},
+        };
+        // This is used to dim the unwanted parts of expressions.
+        TextColor color_dim = TextColor::light_black;
+
         // Error messages.
         TextStyle style_error = {.color = TextColor::light_red, .bold = true};
         // Paths in the stack traces.
@@ -316,11 +328,11 @@ namespace ta_test
         struct Chars
         {
             // Vertical bars, either standalone or in brackets.
-            char32_t bar = '|';
+            char32_t bar = 0x2502; // BOX DRAWINGS LIGHT VERTICAL
             // Other parts of brackets.
-            char32_t bracket_bottom = '_';
-            char32_t bracket_corner_left = '|';
-            char32_t bracket_corner_right = '|';
+            char32_t bracket_bottom = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
+            char32_t bracket_corner_left = 0x2570; // BOX DRAWINGS LIGHT ARC UP AND RIGHT
+            char32_t bracket_corner_right = 0x256f; // BOX DRAWINGS LIGHT ARC UP AND LEFT
 
             void SetAscii()
             {
@@ -799,36 +811,25 @@ namespace ta_test
                 return ok;
             }
 
-            #if 0
-            // Applies `IsLineFree` to several lines.
-            [[nodiscard]] bool IsRectFree(std::size_t line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap)
-            {
-                if (line >= lines.size())
-                    return true; // Completely below the canvas.
-
-                // Fix `height` to remove redundant comparisons below the canvas.
-                if (line + height >/*sic*/ lines.size())
-                    height = lines.size() - line;
-
-                for (std::size_t y = line; y < line + height; y++)
-                {
-                    if (!IsLineFree(y, column, width, gap))
-                        return false;
-                }
-                return true;
-            }
-            #endif
-
             // Looks for a free space in the canvas.
             // Searches for `width + gap*2` consecutive cells with `.important == false`.
             // Starts looking at `(column - gap, starting_line)`, and proceeds downwards until it finds the free space,
             // which could be below the canvas.
-            [[nodiscard]] std::size_t FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t width, std::size_t gap) const
+            [[nodiscard]] std::size_t FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap) const
             {
+                std::size_t num_free_lines = 0;
                 while (true)
                 {
-                    if (IsLineFree(starting_line, column, width, gap))
-                        return starting_line;
+                    if (!IsLineFree(starting_line, column, width, gap))
+                    {
+                        num_free_lines = 0;
+                    }
+                    else
+                    {
+                        num_free_lines++;
+                        if (num_free_lines >= height)
+                            return starting_line - height + 1;
+                    }
 
                     starting_line++; // Try the next line.
                 }
@@ -1304,6 +1305,9 @@ namespace ta_test
             // Where this argument is located in the raw expression string.
             std::size_t expr_offset = 0;
             std::size_t expr_size = 0;
+            // This is where the argument macro name is located in the raw expression string.
+            std::size_t ident_offset = 0;
+            std::size_t ident_size = 0;
 
             // Whether this argument has a complex enough spelling to require drawing a horizontal bracket.
             // This should be automatically true for all arguments with nested arguments.
@@ -1429,31 +1433,54 @@ namespace ta_test
                 else
                     this_value = uni::Decode(this_arg.value);
 
-                std::size_t value_x = expr_column + this_info.expr_offset + this_info.expr_size / 2 - this_value.size() / 2;
+                std::size_t value_x = expr_column + this_info.expr_offset + this_info.expr_size / 2 - this_value.size() / 2 + 1;
                 // Make sure `value_x` didn't underflow.
                 if (value_x > std::size_t(-1) / 2)
                     value_x = 0;
+
+                const CellInfo this_cell_info = {.style = config.style_arguments[i % config.style_arguments.size()], .important = true};
 
                 if (!this_info.need_bracket)
                 {
                     std::size_t column_x = expr_column + this_info.expr_offset + this_info.expr_size / 2;
 
-                    std::size_t value_y = canvas.FindFreeSpace(line_counter + 1, value_x, this_value.size(), 1);
-                    canvas.DrawText(value_y, value_x, this_value);
-                    canvas.DrawColumn(config.chars.bar, line_counter, column_x, value_y - line_counter, true);
+                    std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1) + 1;
+                    canvas.DrawText(value_y, value_x, this_value, this_cell_info);
+                    canvas.DrawColumn(config.chars.bar, line_counter, column_x, value_y - line_counter, true, this_cell_info);
+
+                    // Dim the parentheses.
+                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = config.color_dim;
+                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = config.color_dim;
+                    // Color the contents.
+                    for (std::size_t i = 0; i < this_info.expr_size; i++)
+                    {
+                        TextStyle &style = canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + i).style;
+                        style.color = this_cell_info.style.color;
+                        style.bold = true;
+                    }
                 }
                 else
                 {
                     std::size_t bracket_left_x = expr_column + this_info.expr_offset;
-                    std::size_t bracket_right_x = bracket_left_x + this_info.expr_size;
+                    std::size_t bracket_right_x = bracket_left_x + this_info.expr_size + 1;
                     if (bracket_left_x > 0)
                         bracket_left_x--;
 
-                    std::size_t bracket_y = canvas.FindFreeSpace(line_counter + 1, bracket_left_x, bracket_right_x - bracket_left_x, 0);
+                    std::size_t bracket_y = line_counter;
+                    if (!canvas.IsLineFree(bracket_y, bracket_left_x, bracket_right_x - bracket_left_x, 0))
+                        bracket_y = canvas.FindFreeSpace(line_counter, bracket_left_x, 2, bracket_right_x - bracket_left_x, 0) + 1;
 
-                    canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x);
-                    canvas.DrawText(bracket_y + 1, value_x, this_value);
+                    canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x, this_cell_info);
+                    canvas.DrawText(bracket_y + 1, value_x, this_value, this_cell_info);
+
+                    // Color the parentheses with the argument color.
+                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = this_cell_info.style.color;
+                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = this_cell_info.style.color;
                 }
+
+                // Dim the macro name.
+                for (std::size_t i = 0; i < this_info.ident_size; i++)
+                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.ident_offset + i).style.color = config.color_dim;
             }
 
             canvas.Print();
@@ -1570,7 +1597,18 @@ namespace ta_test
                     this_info.expr_offset = std::size_t(args.data() - RawString.view().data());
                     this_info.expr_size = args.size();
 
-                    for (char ch : args)
+                    this_info.ident_offset = std::size_t(name.data() - RawString.view().data());
+                    this_info.ident_size = name.size();
+
+                    // Trim side whitespace from `args`.
+                    std::string_view trimmed_args = args;
+                    while (!trimmed_args.empty() && IsWhitespace(trimmed_args.front()))
+                        trimmed_args.remove_prefix(1);
+                    while (!trimmed_args.empty() && IsWhitespace(trimmed_args.back()))
+                        trimmed_args.remove_suffix(1);
+
+                    // Decide if we should draw a bracket for this argument.
+                    for (char ch : trimmed_args)
                     {
                         // Whatever the condition is, it should trigger for all arguments with nested arguments.
                         if (!IsIdentifierChar(ch))

@@ -17,9 +17,12 @@ int main()
     // int a = 1, b = 2, c = 3;
     // TA_CHECK($(sum($(a), $(b), $(c))) == 7);
 
-    std::string a = "мур", b = "4\n\0333";
-    char c = 'e';
-    TA_CHECK($(sum($(a), $(b), $(c))) == true);
+    // std::string a = "мур", b = "4\n\0333";
+    // char c = 'e';
+    // TA_CHECK($ (sum($(a), $(b), $( c )) ) == true);
+
+    int alpha = 10, beta = 19;
+    TA_CHECK($($(alpha) + $(beta)) == 30);
 
     // TA_FOR_TYPES(int, float, double)
     // {
