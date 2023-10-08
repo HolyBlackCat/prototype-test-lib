@@ -140,13 +140,15 @@ namespace ta_test
         {
             *out_iter++ = "'\""[double_quotes];
 
-            for (unsigned char ch : source)
+            for (char signed_ch : source)
             {
+                unsigned char ch = (unsigned char)signed_ch;
+
                 bool should_escape = (ch < ' ') || ch == 0x7f || (ch == (double_quotes ? '"' : '\''));
 
                 if (!should_escape)
                 {
-                    *out_iter++ = ch;
+                    *out_iter++ = signed_ch;
                     continue;
                 }
 
@@ -185,7 +187,7 @@ namespace ta_test
         std::string operator()(const std::string &value) const
         {
             std::string ret;
-            ret.reserve(value.size() + 2); // +2 for quotes.
+            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
             detail::formatting::EscapeString(value, std::back_inserter(ret), true);
             return ret;
         }
@@ -311,9 +313,23 @@ namespace ta_test
         // Internal error messages.
         TextStyle style_internal_error = {.color = TextColor::light_white, .bg_color = TextColor::dark_red, .bold = true};
 
-        char ch_underline = '~';
-        char ch_underline_start = '^';
-        char ch_bar = '|';
+        struct Chars
+        {
+            // Vertical bars, either standalone or in brackets.
+            char bar = '|';
+            // Other parts of brackets.
+            char bracket_bottom = '_';
+            char bracket_corner_left = '|';
+            char bracket_corner_right = '|';
+
+            void SetAscii()
+            {
+                bar = '|';
+                bracket_bottom = '_';
+                bracket_corner_left = bracket_corner_right = '|';
+            }
+        };
+        Chars chars;
     };
     inline GlobalConfig config;
 
@@ -533,10 +549,21 @@ namespace ta_test
                 }
             }
 
+            // Whether a cell is free, aka has `.important == false`.
+            [[nodiscard]] bool IsCellFree(std::size_t line, std::size_t column) const
+            {
+                if (line >= lines.size())
+                    return true;
+                const Line &this_line = lines[line];
+                if (column >= this_line.info.size())
+                    return true;
+                return !this_line.info[column].important;
+            }
+
             // Checks if the space is free in the canvas.
             // Examines a single line (at number `line`), starting at `column - gap`, checking `width + gap*2` characters.
             // Returns false if at least one character has `.important == true`.
-            [[nodiscard]] bool IsFreeSpace(std::size_t line, std::size_t column, std::size_t width, std::size_t gap) const
+            [[nodiscard]] bool IsLineFree(std::size_t line, std::size_t column, std::size_t width, std::size_t gap) const
             {
                 // Apply `gap` to `column` and `width`.
                 column = gap < column ? column - gap : 0;
@@ -565,6 +592,26 @@ namespace ta_test
                 return ok;
             }
 
+            #if 0
+            // Applies `IsLineFree` to several lines.
+            [[nodiscard]] bool IsRectFree(std::size_t line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap)
+            {
+                if (line >= lines.size())
+                    return true; // Completely below the canvas.
+
+                // Fix `height` to remove redundant comparisons below the canvas.
+                if (line + height >/*sic*/ lines.size())
+                    height = lines.size() - line;
+
+                for (std::size_t y = line; y < line + height; y++)
+                {
+                    if (!IsLineFree(y, column, width, gap))
+                        return false;
+                }
+                return true;
+            }
+            #endif
+
             // Looks for a free space in the canvas.
             // Searches for `width + gap*2` consecutive cells with `.important == false`.
             // Starts looking at `(column - gap, starting_line)`, and proceeds downwards until it finds the free space,
@@ -573,23 +620,11 @@ namespace ta_test
             {
                 while (true)
                 {
-                    if (IsFreeSpace(starting_line, column, width, gap))
+                    if (IsLineFree(starting_line, column, width, gap))
                         return starting_line;
 
                     starting_line++; // Try the next line.
                 }
-            }
-
-            // Draws a text.
-            // Returns `text.size()`.
-            std::size_t DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true})
-            {
-                EnsureNumLines(line + 1);
-                EnsureLineSize(line, start + text.size());
-                std::copy(text.begin(), text.end(), lines[line].text.begin() + start);
-                for (std::size_t i = start; i < start + text.size(); i++)
-                    lines[line].info[i] = info;
-                return text.size();
             }
 
             // Accesses the cell info for the specified cell. The cell must exist.
@@ -605,45 +640,79 @@ namespace ta_test
                 return this_line.info[pos];
             }
 
-            // Draws a `^~~~` underline, starting at `(line, start)` of length `size`.
-            void DrawUnderline(std::size_t line, std::size_t start, std::size_t size, const CellInfo &info = {.style = {}, .important = true})
+            // Draws a text.
+            // Returns `text.size()`.
+            std::size_t DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true})
             {
-                if (size == 0)
-                    return;
-
                 EnsureNumLines(line + 1);
-                EnsureLineSize(line, start + size);
-
-                for (std::size_t i = start; i < start + size; i++)
-                {
-                    Line &this_line = lines[line];
-                    this_line.text[i] = i == start ? config.ch_underline_start : config.ch_underline;
-                    this_line.info[i] = info;
-                }
+                EnsureLineSize(line, start + text.size());
+                std::copy(text.begin(), text.end(), lines[line].text.begin() + (std::ptrdiff_t)start);
+                for (std::size_t i = start; i < start + text.size(); i++)
+                    lines[line].info[i] = info;
+                return text.size();
             }
 
-            // Draws a vertical `|` column, starting at `(hor_pos, line_start)`, of height `height`.
-            // The bottom `important_bottom_height` characters will have `.important == true`. If it's larger than the height, all characters will have it.
-            void DrawColumn(std::size_t line_start, std::size_t hor_pos, std::size_t height, std::size_t important_bottom_height = std::size_t(-1), const TextStyle &style = {})
+            // Draws a horizontal row of `ch`, starting at `(column, line_start)`, of width `width`.
+            // If `skip_important == true`, don't overwrite important cells.
+            // Returns `width`.
+            std::size_t DrawRow(char ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info = {.style = {}, .important = true})
+            {
+                EnsureNumLines(line + 1);
+                EnsureLineSize(line, column + width);
+                for (std::size_t i = column; i < column + width; i++)
+                {
+                    if (skip_important && !IsCellFree(line, i))
+                        continue;
+
+                    lines[line].text[i] = ch;
+                    lines[line].info[i] = info;
+                }
+
+                return width;
+            }
+
+            // Draws a vertical column of `ch`, starting at `(column, line_start)`, of height `height`.
+            // If `skip_important == true`, don't overwrite important cells.
+            void DrawColumn(char ch, std::size_t line_start, std::size_t column, std::size_t height, bool skip_important, const CellInfo &info = {.style = {}, .important = true})
             {
                 if (height == 0)
                     return;
-                if (important_bottom_height > height)
-                    important_bottom_height = height;
 
                 EnsureNumLines(line_start + height);
 
                 for (std::size_t i = line_start; i < line_start + height; i++)
                 {
-                    EnsureLineSize(i, hor_pos + 1);
+                    if (skip_important && !IsCellFree(i, column))
+                        continue;
+
+                    EnsureLineSize(i, column + 1);
 
                     Line &line = lines[i];
-                    line.text[hor_pos] = config.ch_bar;
-
-                    CellInfo &info = line.info[hor_pos];
-                    info.style = style;
-                    info.important = i + important_bottom_height >= line_start + height;
+                    line.text[column] = ch;
+                    line.info[column] = info;
                 }
+            }
+
+            // Draws a horziontal bracket: `|___|`. Vertical columns skip important cells, but the bottom bar doesn't.
+            void DrawHorBracket(std::size_t line_start, std::size_t column_start, std::size_t height, std::size_t width, const CellInfo &info = {.style = {}, .important = true})
+            {
+                if (width < 2 || height < 1)
+                    return;
+
+                // Sides.
+                if (height > 1)
+                {
+                    DrawColumn(config.chars.bar, line_start, column_start, height - 1, true, info);
+                    DrawColumn(config.chars.bar, line_start, column_start + width - 1, height - 1, true, info);
+                }
+
+                // Bottom.
+                if (width > 2)
+                    DrawRow(config.chars.bracket_bottom, line_start + height - 1, column_start + 1, width - 2, false, info);
+
+                // Corners.
+                DrawRow(config.chars.bracket_corner_left, line_start + height - 1, column_start, 1, false, info);
+                DrawRow(config.chars.bracket_corner_right, line_start + height - 1, column_start + width - 1, 1, false, info);
             }
         };
 
@@ -660,9 +729,10 @@ namespace ta_test
 
         // `emit_char` is `(char ch, CharKind kind) -> void`.
         // It's called for every character, classifying it.
-        // `function_call` is `(std::string_view name, std::string_view args) -> void`.
+        // `function_call` is `(std::string_view name, std::string_view args, std::size_t depth) -> void`.
         // It's called for every pair of parentheses. `args` is the contents of parentheses, possibly with leading and trailing whitespace.
         // `name` is the identifier preceding the `(`, without whitespace. It can be empty, or otherwise invalid.
+        // `depth` is the parentheses nesting depth, starting at 0.
         template <typename EmitCharFunc, typename FunctionCallFunc>
         constexpr void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, FunctionCallFunc &&function_call)
         {
@@ -740,7 +810,7 @@ namespace ta_test
                             else if (ch == ')' && parens_stack_pos > 0)
                             {
                                 parens_stack_pos--;
-                                function_call(parens_stack[parens_stack_pos].ident, {parens_stack[parens_stack_pos].args, &ch});
+                                function_call(parens_stack[parens_stack_pos].ident, std::string_view(parens_stack[parens_stack_pos].args, &ch), parens_stack_pos);
                             }
                         }
                     }
@@ -1010,6 +1080,23 @@ namespace ta_test
             std::string value;
         };
 
+        // Misc information about an argument.
+        struct ArgInfo
+        {
+            // The value of `__COUNTER__`.
+            int counter = 0;
+            // Parentheses nesting depth.
+            std::size_t depth = 0;
+
+            // Where this argument is located in the raw expression string.
+            std::size_t expr_offset = 0;
+            std::size_t expr_size = 0;
+
+            // Whether this argument has a complex enough spelling to require drawing a horizontal bracket.
+            // This should be automatically true for all arguments with nested arguments.
+            bool need_bracket = false;
+        };
+
         // A common base for `AssertWrapper<T>` instantiations.
         // Describes an assertion that's currently being computed.
         struct BasicAssert
@@ -1073,10 +1160,18 @@ namespace ta_test
         };
 
         // Fails an assertion. `AssertWrapper` uses this.
-        inline void PrintAssertionFailure(std::string_view raw_expr, const StoredArg *stored_args, std::size_t num_stored_args, std::string_view file_name, int line_number)
+        inline void PrintAssertionFailure(
+            std::string_view raw_expr,
+            std::size_t num_args,
+            const ArgInfo *arg_info,
+            const std::size_t *args_in_draw_order,
+            const StoredArg *stored_args,
+            std::string_view file_name,
+            int line_number
+        )
         {
             TextCanvas canvas;
-            int line_counter = 0;
+            std::size_t line_counter = 0;
 
             { // The file path.
                 CellInfo cell_info = {.style = config.style_stack_path, .important = true};
@@ -1104,16 +1199,11 @@ namespace ta_test
 
             std::size_t expr_column = config.assertion_macro_indentation + config.assertion_macro_prefix.size();
 
-            std::size_t pos = 0;
-            ParseExpr(raw_expr, nullptr, [&](std::string_view name, std::string_view args)
+            for (std::size_t i = 0; i < num_args; i++)
             {
-                if (!IsArgMacroName(name))
-                    return;
-
-                if (pos >= num_stored_args)
-                    InternalError("More `TA_ARG`s than expected.");
-
-                const StoredArg &this_arg = stored_args[pos++];
+                const std::size_t arg_index = args_in_draw_order[i];
+                const StoredArg &this_arg = stored_args[arg_index];
+                const ArgInfo &this_info = arg_info[arg_index];
 
                 if (this_arg.state == StoredArg::State::not_started)
                     return; // This argument wasn't computed.
@@ -1125,28 +1215,32 @@ namespace ta_test
                 else
                     this_value = this_arg.value;
 
-                std::size_t underline_x = args.data() - raw_expr.data() + expr_column;
-                std::size_t underline_width = args.size();
+                std::size_t value_x = expr_column + this_info.expr_offset + this_info.expr_size / 2 - this_value.size() / 2;
+                // Make sure `value_x` didn't underflow.
+                if (value_x > std::size_t(-1) / 2)
+                    value_x = 0;
 
-                std::size_t value_x;
-                if (this_value.size() > underline_width)
-                    value_x = underline_x;
+                if (!this_info.need_bracket)
+                {
+                    std::size_t column_x = expr_column + this_info.expr_offset + this_info.expr_size / 2;
+
+                    std::size_t value_y = canvas.FindFreeSpace(line_counter + 1, value_x, this_value.size(), 1);
+                    canvas.DrawText(value_y, value_x, this_value);
+                    canvas.DrawColumn(config.chars.bar, line_counter, column_x, value_y - line_counter, true);
+                }
                 else
-                    value_x = underline_x + (underline_width - this_value.size()) / 2;
+                {
+                    std::size_t bracket_left_x = expr_column + this_info.expr_offset;
+                    std::size_t bracket_right_x = bracket_left_x + this_info.expr_size;
+                    if (bracket_left_x > 0)
+                        bracket_left_x--;
 
-                std::size_t underline_y = canvas.FindFreeSpace(line_counter, underline_x, underline_width, 1);
-                std::size_t value_y = canvas.FindFreeSpace(underline_y + 1, value_x, this_value.size(), 1);
+                    std::size_t bracket_y = canvas.FindFreeSpace(line_counter + 1, bracket_left_x, bracket_right_x - bracket_left_x, 0);
 
-                canvas.DrawUnderline(underline_y, underline_x, underline_width);
-                canvas.DrawText(value_y, value_x, incomplete ? "..." : this_value);
-
-                // if (this_arg)
-                //     std::printf("not computed\n");
-                // else if (this_arg.state == StoredArg::State::in_progress)
-                //     std::printf("...\n");
-                // else
-                //     std::printf("`%s`\n", this_arg.value.c_str());
-            });
+                    canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x);
+                    canvas.DrawText(bracket_y + 1, value_x, this_value);
+                }
+            }
 
             canvas.Print();
         }
@@ -1166,7 +1260,7 @@ namespace ta_test
             bool operator()(bool value) &&
             {
                 if (!value)
-                    PrintAssertionFailure(RawString.view(), stored_args.data(), num_args, FileName.view(), LineNumber);
+                    PrintAssertionFailure(RawString.view(), num_args, arg_data.info.data(), arg_data.args_in_draw_order.data(), stored_args.data(), FileName.view(), LineNumber);
 
                 auto &stack = thread_state.assert_stack;
                 if (stack.empty() || stack.back() != this)
@@ -1178,11 +1272,12 @@ namespace ta_test
             }
 
             // The number of arguments.
-            static constexpr int num_args = []{
-                int ret = 0;
-                ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args)
+            static constexpr std::size_t num_args = []{
+                std::size_t ret = 0;
+                ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
                 {
                     (void)args;
+                    (void)depth;
                     if (IsArgMacroName(name))
                         ret++;
                 });
@@ -1195,14 +1290,28 @@ namespace ta_test
             struct CounterIndexPair
             {
                 int counter = 0;
-                int index = 0;
+                std::size_t index = 0;
             };
-            // Maps `__COUNTER__` values to argument indices.
-            static constexpr std::array<CounterIndexPair, num_args> counter_to_arg_index = []{
-                std::array<CounterIndexPair, num_args> ret;
 
-                int pos = 0;
-                ParseExpr(ExpandedString.view(), nullptr, [&](std::string_view name, std::string_view args)
+            // Information about the arguments.
+            struct ArgData
+            {
+                // Information about each individual argument.
+                std::array<ArgInfo, num_args> info;
+
+                // Maps `__COUNTER__` values to argument indices. Sorted by counter, but the values might not be consecutive.
+                std::array<CounterIndexPair, num_args> counter_to_arg_index;
+
+                // Arguments in the order they should be printed. Which is: highest depth first, then larger counter values first.
+                std::array<std::size_t, num_args> args_in_draw_order{};
+            };
+
+            static constexpr ArgData arg_data = []{
+                ArgData ret;
+
+                // Parse expanded string.
+                std::size_t pos = 0;
+                ParseExpr(ExpandedString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
                 {
                     if (name != "_ta_handle_arg_")
                         return;
@@ -1210,22 +1319,73 @@ namespace ta_test
                     if (pos >= num_args)
                         InternalError("More `TA_ARG`s than expected.");
 
-                    CounterIndexPair &new_pair = ret[pos];
-                    new_pair.index = pos++;
+                    ArgInfo &new_info = ret.info[pos];
+                    new_info.depth = depth;
 
                     for (const char &ch : args)
                     {
                         if (IsDigit(ch))
-                            new_pair.counter = new_pair.counter * 10 + (ch - '0');
+                            new_info.counter = new_info.counter * 10 + (ch - '0');
                         else if (ch == ',')
                             break;
                         else
                             InternalError("Lexer error: Unexpected character after the counter macro.");
                     }
+
+                    CounterIndexPair &new_pair = ret.counter_to_arg_index[pos];
+                    new_pair.index = pos;
+                    new_pair.counter = new_info.counter;
+
+                    pos++;
                 });
 
+                // Parse raw string.
+                pos = 0;
+                ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
+                {
+                    (void)depth;
+
+                    if (!IsArgMacroName(name))
+                        return;
+
+                    if (pos >= num_args)
+                        InternalError("More `TA_ARG`s than expected.");
+
+                    ArgInfo &this_info = ret.info[pos];
+
+                    this_info.expr_offset = std::size_t(args.data() - RawString.view().data());
+                    this_info.expr_size = args.size();
+
+                    for (char ch : args)
+                    {
+                        // Whatever the condition is, it should trigger for all arguments with nested arguments.
+                        if (!IsIdentifierChar(ch))
+                        {
+                            this_info.need_bracket = true;
+                            break;
+                        }
+                    }
+
+                    pos++;
+                });
+
+                // Sort `counter_to_arg_index` by counter, to allow binary search.
                 // Sorting is necessary when the arguments are nested.
-                std::sort(ret.begin(), ret.end(), [](const CounterIndexPair &a, const CounterIndexPair &b){return a.counter < b.counter;});
+                std::sort(ret.counter_to_arg_index.begin(), ret.counter_to_arg_index.end(),
+                    [](const CounterIndexPair &a, const CounterIndexPair &b){return a.counter < b.counter;}
+                );
+
+                // Fill and sort `args_in_draw_order`.
+                for (std::size_t i = 0; i < num_args; i++)
+                    ret.args_in_draw_order[i] = i;
+                std::sort(ret.args_in_draw_order.begin(), ret.args_in_draw_order.end(), [&](std::size_t a, std::size_t b)
+                {
+                    if (auto d = ret.info[a].depth <=> ret.info[b].depth; d != 0)
+                        return d > 0;
+                    if (auto d = ret.info[a].counter <=> ret.info[b].counter; d != 0)
+                        return d > 0;
+                    return false;
+                });
 
                 return ret;
             }();
@@ -1235,8 +1395,10 @@ namespace ta_test
                 if (loc.line != LineNumber || loc.file != FileName.view())
                     return nullptr;
 
-                auto it = std::partition_point(counter_to_arg_index.begin(), counter_to_arg_index.end(), [&](const CounterIndexPair &pair){return pair.counter < loc.counter;});
-                if (it == counter_to_arg_index.end() || it->counter != loc.counter)
+                auto it = std::partition_point(arg_data.counter_to_arg_index.begin(), arg_data.counter_to_arg_index.end(),
+                    [&](const CounterIndexPair &pair){return pair.counter < loc.counter;}
+                );
+                if (it == arg_data.counter_to_arg_index.end() || it->counter != loc.counter)
                     return nullptr;
 
                 return &stored_args[it->index];

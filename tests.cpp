@@ -19,7 +19,7 @@ int main()
 
     std::string a = "42", b = "4\n\0333";
     char c = 'e';
-    TA_CHECK($(sum($(a), $(b), $(c))) == 7);
+    TA_CHECK($(sum($(a), $(b), $(c))) == true);
 
     // TA_FOR_TYPES(int, float, double)
     // {
@@ -48,9 +48,9 @@ int main()
     // }
 }
 
+// Test that we can handle spaces in `$ ( x )`.
 
-// * Replace `emit_char` to emit blocks of characters. Or not?
-// * Replace `std::terminate` calls with something saner.
+
 
 /* Pending tests:
 
