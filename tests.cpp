@@ -23,7 +23,7 @@ int main()
 
     std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oo\nf", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     // TA_CHECK( (first + second).ends_with(suffix) );
-    TA_CHECK( $($(first) + second).ends_with($($(suffix.c_str()) + extra)) );
+    TA_CHECK( $($(first) + $(second)).ends_with($($(suffix.c_str()) + $(extra) + $("123") + $("456"))) );
 
     // TA_FOR_TYPES(int, float, double)
     // {

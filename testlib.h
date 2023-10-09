@@ -297,7 +297,7 @@ namespace ta_test
             {.color = TextColor::light_blue, .bold = true},
             {.color = TextColor::light_magenta, .bold = true},
             {.color = TextColor::light_red, .bold = true},
-            {.color = TextColor::light_cyan, .bold = true},
+            {.color = TextColor::dark_cyan, .bold = true},
         };
         // This is used to dim the unwanted parts of expressions.
         TextColor color_dim = TextColor::light_black;
