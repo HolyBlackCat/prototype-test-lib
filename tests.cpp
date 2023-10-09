@@ -21,9 +21,9 @@ int main()
     // char c = 'e';
     // TA_CHECK($ (sum($(a), $(b), $( c )) ) == true);
 
-    // int alpha = 10, beta = 19;
-    // TA_CHECK($($(alpha) + $(beta)) == 30 && $(alpha) == 10);
-    TA_CHECK($((void *)1) == $((void *)45));
+    std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oo\nf", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    // TA_CHECK( (first + second).ends_with(suffix) );
+    TA_CHECK( $($(first) + second).ends_with($($(suffix.c_str()) + extra)) );
 
     // TA_FOR_TYPES(int, float, double)
     // {
@@ -52,8 +52,15 @@ int main()
     // }
 }
 
+// Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
+// Move text around to fit into the bracket.
 // Test that we can handle spaces in `$ ( x )`.
 
+// A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
+
+// Length cap on serialized values, configurable
+
+// Color the keywords. Separately color `true`, `false`, `nullptr` (same as numbers?).
 
 
 /* Pending tests:

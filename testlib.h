@@ -184,6 +184,16 @@ namespace ta_test
     }
 
     template <typename Void>
+    struct ToString<char, Void>
+    {
+        std::string operator()(char value) const
+        {
+            char ret[12]; // Should be at most 9: `'\x??'\0`, but throwing in a little extra space.
+            detail::formatting::EscapeString({&value, 1}, ret, false);
+            return ret;
+        }
+    };
+    template <typename Void>
     struct ToString<std::string, Void>
     {
         std::string operator()(const std::string &value) const
@@ -195,15 +205,18 @@ namespace ta_test
         }
     };
     template <typename Void>
-    struct ToString<char, Void>
+    struct ToString<std::string_view, Void>
     {
-        std::string operator()(char value) const
+        std::string operator()(const std::string_view &value) const
         {
-            char ret[12]; // Should be at most 9: `'\x??'\0`, but throwing in a little extra space.
-            detail::formatting::EscapeString({&value, 1}, ret, false);
+            std::string ret;
+            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
+            detail::formatting::EscapeString(value, std::back_inserter(ret), true);
             return ret;
         }
     };
+    template <typename Void> struct ToString<      char *, Void> {std::string operator()(      char *value) const {return ToString<std::string_view>{}(value);}};
+    template <typename Void> struct ToString<const char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
     #endif
 
     // Text color.
@@ -820,23 +833,28 @@ namespace ta_test
             // Searches for `width + gap*2` consecutive cells with `.important == false`.
             // Starts looking at `(column - gap, starting_line)`, and proceeds downwards until it finds the free space,
             // which could be below the canvas.
-            [[nodiscard]] std::size_t FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap) const
+            // Moves down in increments of `vertical_step`.
+            [[nodiscard]] std::size_t FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap, std::size_t vertical_step) const
             {
                 std::size_t num_free_lines = 0;
+                std::size_t line = starting_line;
                 while (true)
                 {
-                    if (!IsLineFree(starting_line, column, width, gap))
+                    if (num_free_lines > 0 || (line - starting_line) % vertical_step == 0)
                     {
-                        num_free_lines = 0;
-                    }
-                    else
-                    {
-                        num_free_lines++;
-                        if (num_free_lines >= height)
-                            return starting_line - height + 1;
+                        if (!IsLineFree(line, column, width, gap))
+                        {
+                            num_free_lines = 0;
+                        }
+                        else
+                        {
+                            num_free_lines++;
+                            if (num_free_lines >= height)
+                                return line - height + 1;
+                        }
                     }
 
-                    starting_line++; // Try the next line.
+                    line++; // Try the next line.
                 }
             }
 
@@ -1464,7 +1482,7 @@ namespace ta_test
 
                     if (!this_info.need_bracket)
                     {
-                        std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1) + 1;
+                        std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1, 2) + 1;
                         canvas.DrawText(value_y, value_x, this_value, this_cell_info);
                         canvas.DrawColumn(config.chars.bar, line_counter, center_x, value_y - line_counter, true, this_cell_info);
 
@@ -1483,16 +1501,18 @@ namespace ta_test
                         if (bracket_left_x > 0)
                             bracket_left_x--;
 
-                        std::size_t bracket_y = line_counter;
-                        if (!canvas.IsLineFree(bracket_y, bracket_left_x, bracket_right_x - bracket_left_x, 0))
-                            bracket_y = canvas.FindFreeSpace(line_counter, bracket_left_x, 2, bracket_right_x - bracket_left_x, 0) + 1;
+                        std::size_t bracket_y = canvas.FindFreeSpace(line_counter, bracket_left_x, 2, bracket_right_x - bracket_left_x, 0, 2);
+                        std::size_t value_y = canvas.FindFreeSpace(bracket_y + 1, value_x, 1, this_value.size(), 1, 2);
 
                         canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x, this_cell_info);
-                        canvas.DrawText(bracket_y + 1, value_x, this_value, this_cell_info);
+                        canvas.DrawText(value_y, value_x, this_value, this_cell_info);
 
                         // Add the tail to the bracket.
                         if (center_x > bracket_left_x && center_x + 1 < bracket_right_x)
                             canvas.CharAt(bracket_y, center_x) = config.chars.bracket_bottom_tail;
+
+                        // Draw the column connecting us to the text, if it's not directly below.
+                        canvas.DrawColumn(config.chars.bar, bracket_y + 1, center_x, value_y - bracket_y - 1, true, this_cell_info);
 
                         // Color the parentheses with the argument color.
                         dim_parentheses = false;
