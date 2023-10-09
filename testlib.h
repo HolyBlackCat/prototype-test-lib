@@ -1424,63 +1424,70 @@ namespace ta_test
                 const StoredArg &this_arg = stored_args[arg_index];
                 const ArgInfo &this_info = arg_info[arg_index];
 
-                if (this_arg.state == StoredArg::State::not_started)
-                    return; // This argument wasn't computed.
+                bool dim_parentheses = true;
 
-                bool incomplete = this_arg.state == StoredArg::State::in_progress;
-                if (incomplete) // Trying to use a `? :` here leads to a dangling `std::string_view`.
-                    this_value = U"...";
-                else
-                    this_value = uni::Decode(this_arg.value);
-
-                std::size_t value_x = expr_column + this_info.expr_offset + this_info.expr_size / 2 - this_value.size() / 2 + 1;
-                // Make sure `value_x` didn't underflow.
-                if (value_x > std::size_t(-1) / 2)
-                    value_x = 0;
-
-                const CellInfo this_cell_info = {.style = config.style_arguments[i % config.style_arguments.size()], .important = true};
-
-                if (!this_info.need_bracket)
+                if (this_arg.state != StoredArg::State::not_started)
                 {
-                    std::size_t column_x = expr_column + this_info.expr_offset + this_info.expr_size / 2;
+                    bool incomplete = this_arg.state == StoredArg::State::in_progress;
+                    if (incomplete) // Trying to use a `? :` here leads to a dangling `std::string_view`.
+                        this_value = U"...";
+                    else
+                        this_value = uni::Decode(this_arg.value);
 
-                    std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1) + 1;
-                    canvas.DrawText(value_y, value_x, this_value, this_cell_info);
-                    canvas.DrawColumn(config.chars.bar, line_counter, column_x, value_y - line_counter, true, this_cell_info);
+                    std::size_t value_x = expr_column + this_info.expr_offset + this_info.expr_size / 2 - this_value.size() / 2 + 1;
+                    // Make sure `value_x` didn't underflow.
+                    if (value_x > std::size_t(-1) / 2)
+                        value_x = 0;
 
-                    // Dim the parentheses.
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = config.color_dim;
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = config.color_dim;
-                    // Color the contents.
-                    for (std::size_t i = 0; i < this_info.expr_size; i++)
+                    const CellInfo this_cell_info = {.style = config.style_arguments[i % config.style_arguments.size()], .important = true};
+
+                    if (!this_info.need_bracket)
                     {
-                        TextStyle &style = canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + i).style;
-                        style.color = this_cell_info.style.color;
-                        style.bold = true;
+                        std::size_t column_x = expr_column + this_info.expr_offset + this_info.expr_size / 2;
+
+                        std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1) + 1;
+                        canvas.DrawText(value_y, value_x, this_value, this_cell_info);
+                        canvas.DrawColumn(config.chars.bar, line_counter, column_x, value_y - line_counter, true, this_cell_info);
+
+                        // Color the contents.
+                        for (std::size_t i = 0; i < this_info.expr_size; i++)
+                        {
+                            TextStyle &style = canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + i).style;
+                            style.color = this_cell_info.style.color;
+                            style.bold = true;
+                        }
                     }
-                }
-                else
-                {
-                    std::size_t bracket_left_x = expr_column + this_info.expr_offset;
-                    std::size_t bracket_right_x = bracket_left_x + this_info.expr_size + 1;
-                    if (bracket_left_x > 0)
-                        bracket_left_x--;
+                    else
+                    {
+                        std::size_t bracket_left_x = expr_column + this_info.expr_offset;
+                        std::size_t bracket_right_x = bracket_left_x + this_info.expr_size + 1;
+                        if (bracket_left_x > 0)
+                            bracket_left_x--;
 
-                    std::size_t bracket_y = line_counter;
-                    if (!canvas.IsLineFree(bracket_y, bracket_left_x, bracket_right_x - bracket_left_x, 0))
-                        bracket_y = canvas.FindFreeSpace(line_counter, bracket_left_x, 2, bracket_right_x - bracket_left_x, 0) + 1;
+                        std::size_t bracket_y = line_counter;
+                        if (!canvas.IsLineFree(bracket_y, bracket_left_x, bracket_right_x - bracket_left_x, 0))
+                            bracket_y = canvas.FindFreeSpace(line_counter, bracket_left_x, 2, bracket_right_x - bracket_left_x, 0) + 1;
 
-                    canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x, this_cell_info);
-                    canvas.DrawText(bracket_y + 1, value_x, this_value, this_cell_info);
+                        canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x, this_cell_info);
+                        canvas.DrawText(bracket_y + 1, value_x, this_value, this_cell_info);
 
-                    // Color the parentheses with the argument color.
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = this_cell_info.style.color;
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = this_cell_info.style.color;
+                        // Color the parentheses with the argument color.
+                        dim_parentheses = false;
+                        canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = this_cell_info.style.color;
+                        canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = this_cell_info.style.color;
+                    }
                 }
 
                 // Dim the macro name.
                 for (std::size_t i = 0; i < this_info.ident_size; i++)
                     canvas.CellInfoAt(line_counter - 1, expr_column + this_info.ident_offset + i).style.color = config.color_dim;
+
+                // Dim the parentheses.
+                if (dim_parentheses)
+                {
+                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = config.color_dim;
+                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = config.color_dim;
+                }
             }
 
             canvas.Print();

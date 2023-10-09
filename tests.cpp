@@ -22,7 +22,7 @@ int main()
     // TA_CHECK($ (sum($(a), $(b), $( c )) ) == true);
 
     int alpha = 10, beta = 19;
-    TA_CHECK($($(alpha) + $(beta)) == 30);
+    TA_CHECK($($(alpha) + $(beta)) == 30 && $(alpha) == 10);
 
     // TA_FOR_TYPES(int, float, double)
     // {
