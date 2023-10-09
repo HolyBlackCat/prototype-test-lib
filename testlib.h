@@ -97,18 +97,20 @@
 #endif
 #endif
 
-#define TA_CHECK(...) CFG_TA_CHECK(#__VA_ARGS__, __VA_ARGS__)
-#define CFG_TA_CHECK(x, ...) \
+#define TA_CHECK(...) DETAIL_TA_CHECK(#__VA_ARGS__, __VA_ARGS__)
+#define DETAIL_TA_CHECK(x, ...) \
     /* Using `? :` to force the contextual conversion to `bool`. */\
     if (::ta_test::detail::AssertWrapper<x, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {CFG_TA_BREAKPOINT(); std::terminate();}
 
-#define TA_ARG(...) CFG_TA_ARG(__COUNTER__, __VA_ARGS__)
+// The expansion is enclosed in `(...)`, which lets you use it e.g. as a sole function argument: `func $(var)`.
+#define TA_ARG(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
 #if CFG_TA_USE_DOLLAR
 #define $(...) TA_ARG(__VA_ARGS__)
 #endif
-#define CFG_TA_ARG(counter, ...) \
+#define DETAIL_TA_ARG(counter, ...) \
+    /* Note the parentheses, they allow this to be transparently used e.g. as a single function parameter. */\
     /* Passing `counter` the second time is redundant, but helps with our parsing. */\
-    ::ta_test::detail::ArgWrapper(__FILE__, __LINE__, counter)._ta_handle_arg_(counter, __VA_ARGS__)
+    (::ta_test::detail::ArgWrapper(__FILE__, __LINE__, counter)._ta_handle_arg_(counter, __VA_ARGS__))
 
 namespace ta_test
 {
@@ -1462,11 +1464,9 @@ namespace ta_test
 
                     if (!this_info.need_bracket)
                     {
-                        std::size_t column_x = expr_column + this_info.expr_offset + this_info.expr_size / 2;
-
                         std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1) + 1;
                         canvas.DrawText(value_y, value_x, this_value, this_cell_info);
-                        canvas.DrawColumn(config.chars.bar, line_counter, column_x, value_y - line_counter, true, this_cell_info);
+                        canvas.DrawColumn(config.chars.bar, line_counter, center_x, value_y - line_counter, true, this_cell_info);
 
                         // Color the contents.
                         for (std::size_t i = 0; i < this_info.expr_size; i++)
