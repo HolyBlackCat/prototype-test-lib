@@ -333,12 +333,15 @@ namespace ta_test
             char32_t bracket_bottom = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
             char32_t bracket_corner_left = 0x2570; // BOX DRAWINGS LIGHT ARC UP AND RIGHT
             char32_t bracket_corner_right = 0x256f; // BOX DRAWINGS LIGHT ARC UP AND LEFT
+            char32_t bracket_bottom_tail = 0x252c; // BOX DRAWINGS LIGHT DOWN AND HORIZONTAL
 
             void SetAscii()
             {
                 bar = '|';
                 bracket_bottom = '_';
-                bracket_corner_left = bracket_corner_right = '|';
+                bracket_corner_left = '|';
+                bracket_corner_right = '|';
+                bracket_bottom_tail = '.';
             }
         };
         Chars chars;
@@ -835,6 +838,19 @@ namespace ta_test
                 }
             }
 
+            // Accesses the character for the specified cell. The cell must exist.
+            [[nodiscard]] char32_t &CharAt(std::size_t line, std::size_t pos)
+            {
+                if (line >= lines.size())
+                    InternalError("Line index is out of range.");
+
+                Line &this_line = lines[line];
+                if (pos >= this_line.text.size())
+                    InternalError("Character index is out of range.");
+
+                return this_line.text[pos];
+            }
+
             // Accesses the cell info for the specified cell. The cell must exist.
             [[nodiscard]] CellInfo &CellInfoAt(std::size_t line, std::size_t pos)
             {
@@ -908,6 +924,7 @@ namespace ta_test
             }
 
             // Draws a horziontal bracket: `|___|`. Vertical columns skip important cells, but the bottom bar doesn't.
+            // The left column is on `column_start`, and the right one is on `column_start + width - 1`.
             void DrawHorBracket(std::size_t line_start, std::size_t column_start, std::size_t height, std::size_t width, const CellInfo &info = {.style = {}, .important = true})
             {
                 if (width < 2 || height < 1)
@@ -1020,6 +1037,7 @@ namespace ta_test
                                     .ident = identifier,
                                     .args = &ch + 1,
                                 };
+                                identifier = {};
                             }
                             else if (ch == ')' && parens_stack_pos > 0)
                             {
@@ -1380,9 +1398,9 @@ namespace ta_test
         inline void PrintAssertionFailure(
             std::string_view raw_expr,
             std::size_t num_args,
-            const ArgInfo *arg_info,
-            const std::size_t *args_in_draw_order,
-            const StoredArg *stored_args,
+            const ArgInfo *arg_info,               // Array of size `num_args`.
+            const std::size_t *args_in_draw_order, // Array of size `num_args`.
+            const StoredArg *stored_args,          // Array of size `num_args`.
             std::string_view file_name,
             int line_number
         )
@@ -1434,7 +1452,8 @@ namespace ta_test
                     else
                         this_value = uni::Decode(this_arg.value);
 
-                    std::size_t value_x = expr_column + this_info.expr_offset + this_info.expr_size / 2 - this_value.size() / 2 + 1;
+                    std::size_t center_x = expr_column + this_info.expr_offset + (this_info.expr_size + 1) / 2 - 1;
+                    std::size_t value_x = center_x - (this_value.size() + 1) / 2 + 1;
                     // Make sure `value_x` didn't underflow.
                     if (value_x > std::size_t(-1) / 2)
                         value_x = 0;
@@ -1470,6 +1489,10 @@ namespace ta_test
 
                         canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x, this_cell_info);
                         canvas.DrawText(bracket_y + 1, value_x, this_value, this_cell_info);
+
+                        // Add the tail to the bracket.
+                        if (center_x > bracket_left_x && center_x + 1 < bracket_right_x)
+                            canvas.CharAt(bracket_y, center_x) = config.chars.bracket_bottom_tail;
 
                         // Color the parentheses with the argument color.
                         dim_parentheses = false;
@@ -1586,6 +1609,8 @@ namespace ta_test
 
                     pos++;
                 });
+                if (pos != num_args)
+                    InternalError("Less `TA_ARG`s than expected.");
 
                 // Parse raw string.
                 pos = 0;
@@ -1627,6 +1652,8 @@ namespace ta_test
 
                     pos++;
                 });
+                if (pos != num_args)
+                    InternalError("Less `TA_ARG`s than expected.");
 
                 // Sort `counter_to_arg_index` by counter, to allow binary search.
                 // Sorting is necessary when the arguments are nested.

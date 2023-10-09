@@ -21,8 +21,9 @@ int main()
     // char c = 'e';
     // TA_CHECK($ (sum($(a), $(b), $( c )) ) == true);
 
-    int alpha = 10, beta = 19;
-    TA_CHECK($($(alpha) + $(beta)) == 30 && $(alpha) == 10);
+    // int alpha = 10, beta = 19;
+    // TA_CHECK($($(alpha) + $(beta)) == 30 && $(alpha) == 10);
+    TA_CHECK($((void *)1) == $((void *)45));
 
     // TA_FOR_TYPES(int, float, double)
     // {
