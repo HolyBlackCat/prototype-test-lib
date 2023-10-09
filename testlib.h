@@ -292,12 +292,12 @@ namespace ta_test
 
         // The argument colors. They are cycled in this order.
         std::vector<TextStyle> style_arguments = {
-            {.color = TextColor::light_cyan, .bold = true},
             {.color = TextColor::light_green, .bold = true},
             {.color = TextColor::light_yellow, .bold = true},
             {.color = TextColor::light_blue, .bold = true},
             {.color = TextColor::light_magenta, .bold = true},
             {.color = TextColor::light_red, .bold = true},
+            {.color = TextColor::light_cyan, .bold = true},
         };
         // This is used to dim the unwanted parts of expressions.
         TextColor color_dim = TextColor::light_black;
