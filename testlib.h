@@ -215,8 +215,10 @@ namespace ta_test
             return ret;
         }
     };
-    template <typename Void> struct ToString<      char *, Void> {std::string operator()(      char *value) const {return ToString<std::string_view>{}(value);}};
+    template <typename Void> struct ToString<      char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
     template <typename Void> struct ToString<const char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
+    // Somehow this catches const arrays too:
+    template <std::size_t N, typename Void> struct ToString<char[N], Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
     #endif
 
     // Text color.
@@ -1701,7 +1703,7 @@ namespace ta_test
                 // Maps `__COUNTER__` values to argument indices. Sorted by counter, but the values might not be consecutive.
                 std::array<CounterIndexPair, num_args> counter_to_arg_index;
 
-                // Arguments in the order they should be printed. Which is: highest depth first, then larger counter values first.
+                // Arguments in the order they should be printed. Which is: highest depth first, then smaller counter values first.
                 std::array<std::size_t, num_args> args_in_draw_order{};
             };
 
@@ -1797,7 +1799,7 @@ namespace ta_test
                     if (auto d = ret.info[a].depth <=> ret.info[b].depth; d != 0)
                         return d > 0;
                     if (auto d = ret.info[a].counter <=> ret.info[b].counter; d != 0)
-                        return d > 0;
+                        return d < 0;
                     return false;
                 });
 

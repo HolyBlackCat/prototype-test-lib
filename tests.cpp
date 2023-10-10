@@ -60,7 +60,8 @@ int main()
 }
 
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
-// Move text around to fit into the bracket.
+// Move text around to fit into the bracket. Or maybe not?
+// Allow more characters in bracket-less form: `:`, `.`, `->`?
 // Test that we can handle spaces in `$ ( x )`.
 
 // A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
