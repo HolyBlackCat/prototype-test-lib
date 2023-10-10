@@ -299,11 +299,15 @@ namespace ta_test
             {.color = TextColor::dark_red, .bold = true},
             {.color = TextColor::dark_cyan, .bold = true},
         };
+        // This is used for brackets above expressions.
+        TextStyle style_overline = {.color = TextColor::light_magenta, .bold = true};
         // This is used to dim the unwanted parts of expressions.
         TextColor color_dim = TextColor::light_black;
 
         // Error messages.
         TextStyle style_error = {.color = TextColor::light_red, .bold = true};
+        // Error messages in the stack, after the first one.
+        TextStyle style_stack_error = {.color = TextColor::light_magenta, .bold = true};
         // Paths in the stack traces.
         TextStyle style_stack_path = {.color = TextColor::light_black};
         // The color of `filename_prefix`.
@@ -344,19 +348,31 @@ namespace ta_test
         {
             // Vertical bars, either standalone or in brackets.
             char32_t bar = 0x2502; // BOX DRAWINGS LIGHT VERTICAL
-            // Other parts of brackets.
+            // Bottom brackets.
             char32_t bracket_bottom = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
-            char32_t bracket_corner_left = 0x2570; // BOX DRAWINGS LIGHT ARC UP AND RIGHT
-            char32_t bracket_corner_right = 0x256f; // BOX DRAWINGS LIGHT ARC UP AND LEFT
+            char32_t bracket_corner_bottom_left = 0x2570; // BOX DRAWINGS LIGHT ARC UP AND RIGHT
+            char32_t bracket_corner_bottom_right = 0x256f; // BOX DRAWINGS LIGHT ARC UP AND LEFT
             char32_t bracket_bottom_tail = 0x252c; // BOX DRAWINGS LIGHT DOWN AND HORIZONTAL
+            // Top brackets.
+            char32_t bracket_top = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
+            char32_t bracket_corner_top_left = 0x256d; // BOX DRAWINGS LIGHT ARC DOWN AND RIGHT
+            char32_t bracket_corner_top_right = 0x256e; // BOX DRAWINGS LIGHT ARC DOWN AND LEFT
+
+            // Labels a subexpression that had a nested assertion failure in it.
+            std::u32string in_this_subexpr = U"in here";
+            // Same, but when there's more than one subexpression. This should never happen.
+            std::u32string in_this_subexpr_inexact = U"in here?";
 
             void SetAscii()
             {
                 bar = '|';
                 bracket_bottom = '_';
-                bracket_corner_left = '|';
-                bracket_corner_right = '|';
+                bracket_corner_bottom_left = '|';
+                bracket_corner_bottom_right = '|';
                 bracket_bottom_tail = '.';
+                bracket_top = '-';
+                bracket_corner_top_left = '|';
+                bracket_corner_top_right = '|';
             }
         };
         Chars chars;
@@ -786,6 +802,15 @@ namespace ta_test
                 }
             }
 
+            // Inserts the line before the specified line index (or at the bottom of the canvas if given the number of lines).
+            void InsertLineBefore(std::size_t line_number)
+            {
+                if (line_number >/*sic*/ lines.size())
+                    InternalError("Line number is out of range.");
+
+                lines.insert(lines.begin() + std::ptrdiff_t(line_number), Line{});
+            }
+
             // Whether a cell is free, aka has `.important == false`.
             [[nodiscard]] bool IsCellFree(std::size_t line, std::size_t column) const
             {
@@ -962,8 +987,23 @@ namespace ta_test
                     DrawRow(config.chars.bracket_bottom, line_start + height - 1, column_start + 1, width - 2, false, info);
 
                 // Corners.
-                DrawRow(config.chars.bracket_corner_left, line_start + height - 1, column_start, 1, false, info);
-                DrawRow(config.chars.bracket_corner_right, line_start + height - 1, column_start + width - 1, 1, false, info);
+                DrawRow(config.chars.bracket_corner_bottom_left, line_start + height - 1, column_start, 1, false, info);
+                DrawRow(config.chars.bracket_corner_bottom_right, line_start + height - 1, column_start + width - 1, 1, false, info);
+            }
+
+            // Draws a little 1-high top bracket.
+            void DrawOverline(std::size_t line, std::size_t column_start, std::size_t width, const CellInfo &info = {.style = {}, .important = true})
+            {
+                if (width < 2)
+                    return;
+
+                // Middle part.
+                if (width > 2)
+                    DrawRow(config.chars.bracket_top, line, column_start + 1, width - 2, false, info);
+
+                // Corners.
+                DrawRow(config.chars.bracket_corner_top_left, line, column_start, 1, false, info);
+                DrawRow(config.chars.bracket_corner_top_right, line, column_start + width - 1, 1, false, info);
             }
         };
 
@@ -1363,6 +1403,8 @@ namespace ta_test
             // If `loc` is known, returns a pointer to the respective argument data.
             // Otherwise returns null.
             virtual StoredArg *GetArgumentDataPtr(const ArgLocation &loc) = 0;
+            // Print the assertion failure. `depth` starts at 0 and increases as we go deeper into the stack.
+            virtual void PrintFailure(std::size_t depth) const = 0;
         };
 
         // The global per-thread state.
@@ -1385,6 +1427,22 @@ namespace ta_test
                 }
 
                 InternalError("Unknown argument.");
+            }
+
+            // Prints the assertion failure.
+            // `top` must be the last element of the stack, otherwise an internal error is triggered.
+            void PrintAssertionFailure(const BasicAssert &top)
+            {
+                if (assert_stack.empty() || assert_stack.back() != &top)
+                    InternalError("The failed assertion is not the top element of the stack.");
+
+                std::size_t depth = 0;
+                auto it = assert_stack.end();
+                while (it != assert_stack.begin())
+                {
+                    --it;
+                    (*it)->PrintFailure(depth++);
+                }
             }
         };
         inline thread_local ThreadState thread_state;
@@ -1422,11 +1480,19 @@ namespace ta_test
             const std::size_t *args_in_draw_order, // Array of size `num_args`.
             const StoredArg *stored_args,          // Array of size `num_args`.
             std::string_view file_name,
-            int line_number
+            int line_number,
+            std::size_t depth // Starts at 0, increments when we go deeper into the assertion stack.
         )
         {
             TextCanvas canvas;
             std::size_t line_counter = 0;
+
+            line_counter++;
+
+            if (depth == 0)
+                canvas.DrawText(line_counter++, 0, "ASSERTION FAILED:", {.style = config.style_error, .important = true});
+            else
+                canvas.DrawText(line_counter++, 0, "WHILE CHECKING ASSERTION:", {.style = config.style_stack_error, .important = true});
 
             { // The file path.
                 CellInfo cell_info = {.style = config.style_stack_path, .important = true};
@@ -1439,8 +1505,9 @@ namespace ta_test
                 line_counter++;
             }
 
-            canvas.DrawText(line_counter++, 0, "ASSERTION FAILED:", {.style = config.style_error, .important = true});
             line_counter++;
+
+            std::size_t expr_line = line_counter;
 
             { // The assertion call.
                 std::size_t column = config.assertion_macro_indentation;
@@ -1456,6 +1523,13 @@ namespace ta_test
 
             std::u32string this_value;
 
+            // The bracket above the expression.
+            std::size_t overline_start = 0;
+            std::size_t overline_end = 0;
+            // How many subexpressions want an overline.
+            // More than one should be impossible, but if it happens, we just combine them into a single fat one.
+            int num_overline_parts = 0;
+
             for (std::size_t i = 0; i < num_args; i++)
             {
                 const std::size_t arg_index = args_in_draw_order[i];
@@ -1464,13 +1538,25 @@ namespace ta_test
 
                 bool dim_parentheses = true;
 
-                if (this_arg.state != StoredArg::State::not_started)
+                if (this_arg.state == StoredArg::State::in_progress)
                 {
-                    bool incomplete = this_arg.state == StoredArg::State::in_progress;
-                    if (incomplete) // Trying to use a `? :` here leads to a dangling `std::string_view`.
-                        this_value = U"...";
+                    if (num_overline_parts == 0)
+                    {
+                        overline_start = this_info.expr_offset;
+                        overline_end = this_info.expr_offset + this_info.expr_size;
+                    }
                     else
-                        this_value = uni::Decode(this_arg.value);
+                    {
+                        overline_start = std::min(overline_start, this_info.expr_offset);
+                        overline_end = std::max(overline_end, this_info.expr_offset + this_info.expr_size);
+                    }
+                    num_overline_parts++;
+                }
+
+                if (this_arg.state == StoredArg::State::done)
+                {
+
+                    this_value = uni::Decode(this_arg.value);
 
                     std::size_t center_x = expr_column + this_info.expr_offset + (this_info.expr_size + 1) / 2 - 1;
                     std::size_t value_x = center_x - (this_value.size() + 1) / 2 + 1;
@@ -1533,6 +1619,28 @@ namespace ta_test
                 }
             }
 
+            // The overline.
+            if (num_overline_parts > 0)
+            {
+                if (overline_start > 0)
+                    overline_start--;
+                overline_end++;
+
+                std::u32string_view this_value = num_overline_parts > 1 ? config.chars.in_this_subexpr_inexact : config.chars.in_this_subexpr;
+
+                std::size_t center_x = expr_column + overline_start + (overline_end - overline_start) / 2;
+                std::size_t value_x = center_x - this_value.size() / 2;
+
+                canvas.InsertLineBefore(expr_line++);
+
+                canvas.DrawOverline(expr_line - 1, expr_column + overline_start, overline_end - overline_start, {.style = config.style_overline, .important = true});
+                canvas.DrawText(expr_line - 2, value_x, this_value, {.style = config.style_overline, .important = true});
+
+                // Color the parentheses.
+                canvas.CellInfoAt(expr_line, expr_column + overline_start).style.color = config.style_overline.color;
+                canvas.CellInfoAt(expr_line, expr_column + overline_end - 1).style.color = config.style_overline.color;
+            }
+
             canvas.Print();
         }
 
@@ -1551,7 +1659,7 @@ namespace ta_test
             bool operator()(bool value) &&
             {
                 if (!value)
-                    PrintAssertionFailure(RawString.view(), num_args, arg_data.info.data(), arg_data.args_in_draw_order.data(), stored_args.data(), FileName.view(), LineNumber);
+                    thread_state.PrintAssertionFailure(*this);
 
                 auto &stack = thread_state.assert_stack;
                 if (stack.empty() || stack.back() != this)
@@ -1696,7 +1804,7 @@ namespace ta_test
                 return ret;
             }();
 
-            StoredArg *GetArgumentDataPtr(const ArgLocation &loc)
+            StoredArg *GetArgumentDataPtr(const ArgLocation &loc) override
             {
                 if (loc.line != LineNumber || loc.file != FileName.view())
                     return nullptr;
@@ -1708,6 +1816,11 @@ namespace ta_test
                     return nullptr;
 
                 return &stored_args[it->index];
+            }
+
+            void PrintFailure(std::size_t depth) const override
+            {
+                PrintAssertionFailure(RawString.view(), num_args, arg_data.info.data(), arg_data.args_in_draw_order.data(), stored_args.data(), FileName.view(), LineNumber, depth);
             }
         };
     }

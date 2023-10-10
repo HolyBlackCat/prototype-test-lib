@@ -9,6 +9,13 @@ bool sum(const auto &...){return false;}
 // Turn `a` and `b` into `integral_constant`s with the same __COUNTER__ value, compare them in the macro to check if we're nested or not? Could work.
 #define TA_VARIANT(...) (int a = 1) if (int b = 1) {} else
 
+bool foo()
+{
+    std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oo\nf", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    TA_CHECK( $($(first) + $(second)).ends_with($($(suffix.c_str()) + $(extra) + $("123") + $("456"))) );
+    return false;
+}
+
 int main()
 {
     ta_test::config.output_stream = stdout;
@@ -21,9 +28,9 @@ int main()
     // char c = 'e';
     // TA_CHECK($ (sum($(a), $(b), $( c )) ) == true);
 
-    std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oo\nf", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     // TA_CHECK( (first + second).ends_with(suffix) );
-    TA_CHECK( $($(first) + $(second)).ends_with($($(suffix.c_str()) + $(extra) + $("123") + $("456"))) );
+    TA_CHECK($(true) && $(foo()) && $(false));
 
     // TA_FOR_TYPES(int, float, double)
     // {
