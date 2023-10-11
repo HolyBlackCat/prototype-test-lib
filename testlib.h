@@ -222,9 +222,10 @@ namespace ta_test
     #endif
 
     // Text color.
-    // The values are the foreground text colors. Add 10 to make background colors.
     enum class TextColor
     {
+        // 16 colors palette.
+        // The values are the foreground text colors. Add 10 to make background colors.
         none = 39,
         dark_black = 30,
         dark_red = 31,
@@ -242,7 +243,30 @@ namespace ta_test
         light_magenta = 95,
         light_cyan = 96,
         light_white = 97,
+
+        // Extended colors:
+        // First 16 map to the ones listed above.
+        // The next 216 are 6-bits-per-channel RGB: R*36 + G*6 + B.
+        // The remaining 24 are shades of gray, from black to almost white.
+        extended = 256,
+        extended_end = extended + 256,
     };
+    // Creates a 6-bit-per-channel extended terminal color. Each component must be `0 <= x < 6`.
+    [[nodiscard]] constexpr TextColor TextColorRgb6(int r, int g, int b)
+    {
+        return TextColor(int(TextColor::extended) + 16 + r * 36 + g * 6 + b);
+    }
+    // Creates a grayscale color, with `n == 0` for black and `n == 24` (sic, not 23) for pure white.
+    // `n` is clamped to `0..24`.
+    [[nodiscard]] constexpr TextColor TextColorGrayscale24(int n)
+    {
+        if (n < 0)
+            n = 0;
+        else if (n >= 24)
+            return TextColorRgb6(5,5,5);
+        return TextColor(int(TextColor::extended) + 232 + n);
+    }
+
     // Text style.
     struct TextStyle
     {
@@ -294,12 +318,12 @@ namespace ta_test
 
         // The argument colors. They are cycled in this order.
         std::vector<TextStyle> style_arguments = {
-            {.color = TextColor::dark_green, .bold = true},
-            {.color = TextColor::dark_yellow, .bold = true},
-            {.color = TextColor::light_blue, .bold = true},
-            {.color = TextColor::dark_magenta, .bold = true},
-            {.color = TextColor::dark_red, .bold = true},
-            {.color = TextColor::dark_cyan, .bold = true},
+            {.color = TextColorRgb6(4,0,2), .bold = true},
+            {.color = TextColorRgb6(0,3,4), .bold = true},
+            {.color = TextColorRgb6(5,1,0), .bold = true},
+            {.color = TextColorRgb6(1,4,1), .bold = true},
+            {.color = TextColorRgb6(1,1,4), .bold = true},
+            {.color = TextColorRgb6(1,0,5), .bold = true},
         };
         // This is used for brackets above expressions.
         TextStyle style_overline = {.color = TextColor::light_magenta, .bold = true};
@@ -610,9 +634,19 @@ namespace ta_test
             std::strcpy(buffer, "\033[");
             char *ptr = buffer + 2;
             if (cur.color != prev.color)
-                ptr += std::sprintf(ptr, "%d;", int(cur.color));
+            {
+                if (cur.color >= TextColor::extended && cur.color < TextColor::extended_end)
+                    ptr += std::sprintf(ptr, "38;5;%d;", int(cur.color) - int(TextColor::extended));
+                else
+                    ptr += std::sprintf(ptr, "%d;", int(cur.color));
+            }
             if (cur.bg_color != prev.bg_color)
-                ptr += std::sprintf(ptr, "%d;", int(cur.bg_color) + 10);
+            {
+                if (cur.bg_color >= TextColor::extended && cur.bg_color < TextColor::extended_end)
+                    ptr += std::sprintf(ptr, "48;5;%d;", int(cur.bg_color) - int(TextColor::extended));
+                else
+                    ptr += std::sprintf(ptr, "%d;", int(cur.bg_color) + 10);
+            }
             if (cur.bold != prev.bold)
                 ptr += std::sprintf(ptr, "%s;", cur.bold ? "1" : "22"); // Bold text is a little weird.
             if (cur.italic != prev.italic)

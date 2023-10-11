@@ -28,7 +28,6 @@ int main()
     // char c = 'e';
     // TA_CHECK($ (sum($(a), $(b), $( c )) ) == true);
 
-
     // TA_CHECK( (first + second).ends_with(suffix) );
     TA_CHECK($(true) && $(foo()) && $(false));
 
