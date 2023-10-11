@@ -132,95 +132,6 @@ namespace ta_test
         }
     };
 
-    // Manually support quoting strings if the formatting library can't do that.
-    #if !CFG_TA_FORMAT_SUPPORTS_QUOTED
-    namespace detail::formatting
-    {
-        // Escapes a string, writes the result to `out_iter`. Includes quotes automatically.
-        template <typename It>
-        constexpr void EscapeString(std::string_view source, It out_iter, bool double_quotes)
-        {
-            *out_iter++ = "'\""[double_quotes];
-
-            for (char signed_ch : source)
-            {
-                unsigned char ch = (unsigned char)signed_ch;
-
-                bool should_escape = (ch < ' ') || ch == 0x7f || (ch == (double_quotes ? '"' : '\''));
-
-                if (!should_escape)
-                {
-                    *out_iter++ = signed_ch;
-                    continue;
-                }
-
-                switch (ch)
-                {
-                    case '\0': *out_iter++ = '\\'; *out_iter++ = '0'; break;
-                    case '\'': *out_iter++ = '\\'; *out_iter++ = '\''; break;
-                    case '\"': *out_iter++ = '\\'; *out_iter++ = '"'; break;
-                    case '\\': *out_iter++ = '\\'; *out_iter++ = '\\'; break;
-                    case '\a': *out_iter++ = '\\'; *out_iter++ = 'a'; break;
-                    case '\b': *out_iter++ = '\\'; *out_iter++ = 'b'; break;
-                    case '\f': *out_iter++ = '\\'; *out_iter++ = 'f'; break;
-                    case '\n': *out_iter++ = '\\'; *out_iter++ = 'n'; break;
-                    case '\r': *out_iter++ = '\\'; *out_iter++ = 'r'; break;
-                    case '\t': *out_iter++ = '\\'; *out_iter++ = 't'; break;
-                    case '\v': *out_iter++ = '\\'; *out_iter++ = 'v'; break;
-
-                  default:
-                    // The syntax with braces is from C++23. Without braces the escapes could consume extra characters on the right.
-                    // Octal escapes don't do that, but they're just inherently ugly.
-                    char buffer[7]; // 7 bytes for: \ x { N N } \0
-                    std::snprintf(buffer, sizeof buffer, "\\x{%02x}", ch);
-                    for (char *ptr = buffer; *ptr;)
-                        *out_iter++ = *ptr++;
-                    break;
-                }
-            }
-
-            *out_iter++ = "'\""[double_quotes];
-        }
-    }
-
-    template <typename Void>
-    struct ToString<char, Void>
-    {
-        std::string operator()(char value) const
-        {
-            char ret[12]; // Should be at most 9: `'\x??'\0`, but throwing in a little extra space.
-            detail::formatting::EscapeString({&value, 1}, ret, false);
-            return ret;
-        }
-    };
-    template <typename Void>
-    struct ToString<std::string, Void>
-    {
-        std::string operator()(const std::string &value) const
-        {
-            std::string ret;
-            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-            detail::formatting::EscapeString(value, std::back_inserter(ret), true);
-            return ret;
-        }
-    };
-    template <typename Void>
-    struct ToString<std::string_view, Void>
-    {
-        std::string operator()(const std::string_view &value) const
-        {
-            std::string ret;
-            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-            detail::formatting::EscapeString(value, std::back_inserter(ret), true);
-            return ret;
-        }
-    };
-    template <typename Void> struct ToString<      char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
-    template <typename Void> struct ToString<const char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
-    // Somehow this catches const arrays too:
-    template <std::size_t N, typename Void> struct ToString<char[N], Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
-    #endif
-
     // Text color.
     enum class TextColor
     {
@@ -318,12 +229,17 @@ namespace ta_test
 
         // The argument colors. They are cycled in this order.
         std::vector<TextStyle> style_arguments = {
-            {.color = TextColorRgb6(4,0,2), .bold = true},
-            {.color = TextColorRgb6(0,3,4), .bold = true},
-            {.color = TextColorRgb6(5,1,0), .bold = true},
             {.color = TextColorRgb6(1,4,1), .bold = true},
-            {.color = TextColorRgb6(1,1,4), .bold = true},
+            {.color = TextColorRgb6(1,3,5), .bold = true},
             {.color = TextColorRgb6(1,0,5), .bold = true},
+            {.color = TextColorRgb6(5,1,0), .bold = true},
+            {.color = TextColorRgb6(5,4,0), .bold = true},
+            {.color = TextColorRgb6(0,4,3), .bold = true},
+            {.color = TextColorRgb6(0,5,5), .bold = true},
+            {.color = TextColorRgb6(3,1,5), .bold = true},
+            {.color = TextColorRgb6(4,0,2), .bold = true},
+            {.color = TextColorRgb6(5,2,1), .bold = true},
+            {.color = TextColorRgb6(4,5,3), .bold = true},
         };
         // This is used for brackets above expressions.
         TextStyle style_overline = {.color = TextColor::light_magenta, .bold = true};
@@ -1566,6 +1482,9 @@ namespace ta_test
             // More than one should be impossible, but if it happens, we just combine them into a single fat one.
             int num_overline_parts = 0;
 
+            // Incremented when we print an argument.
+            std::size_t color_index = 0;
+
             for (std::size_t i = 0; i < num_args; i++)
             {
                 const std::size_t arg_index = args_in_draw_order[i];
@@ -1600,7 +1519,7 @@ namespace ta_test
                     if (value_x > std::size_t(-1) / 2)
                         value_x = 0;
 
-                    const CellInfo this_cell_info = {.style = config.style_arguments[i % config.style_arguments.size()], .important = true};
+                    const CellInfo this_cell_info = {.style = config.style_arguments[color_index++ % config.style_arguments.size()], .important = true};
 
                     if (!this_info.need_bracket)
                     {
@@ -1861,3 +1780,95 @@ namespace ta_test
         };
     }
 }
+
+// Manually support quoting strings if the formatting library can't do that.
+#if !CFG_TA_FORMAT_SUPPORTS_QUOTED
+namespace ta_test
+{
+    namespace detail::formatting
+    {
+        // Escapes a string, writes the result to `out_iter`. Includes quotes automatically.
+        template <typename It>
+        constexpr void EscapeString(std::string_view source, It out_iter, bool double_quotes)
+        {
+            *out_iter++ = "'\""[double_quotes];
+
+            for (char signed_ch : source)
+            {
+                unsigned char ch = (unsigned char)signed_ch;
+
+                bool should_escape = (ch < ' ') || ch == 0x7f || (ch == (double_quotes ? '"' : '\''));
+
+                if (!should_escape)
+                {
+                    *out_iter++ = signed_ch;
+                    continue;
+                }
+
+                switch (ch)
+                {
+                    case '\0': *out_iter++ = '\\'; *out_iter++ = '0'; break;
+                    case '\'': *out_iter++ = '\\'; *out_iter++ = '\''; break;
+                    case '\"': *out_iter++ = '\\'; *out_iter++ = '"'; break;
+                    case '\\': *out_iter++ = '\\'; *out_iter++ = '\\'; break;
+                    case '\a': *out_iter++ = '\\'; *out_iter++ = 'a'; break;
+                    case '\b': *out_iter++ = '\\'; *out_iter++ = 'b'; break;
+                    case '\f': *out_iter++ = '\\'; *out_iter++ = 'f'; break;
+                    case '\n': *out_iter++ = '\\'; *out_iter++ = 'n'; break;
+                    case '\r': *out_iter++ = '\\'; *out_iter++ = 'r'; break;
+                    case '\t': *out_iter++ = '\\'; *out_iter++ = 't'; break;
+                    case '\v': *out_iter++ = '\\'; *out_iter++ = 'v'; break;
+
+                  default:
+                    // The syntax with braces is from C++23. Without braces the escapes could consume extra characters on the right.
+                    // Octal escapes don't do that, but they're just inherently ugly.
+                    char buffer[7]; // 7 bytes for: \ x { N N } \0
+                    std::snprintf(buffer, sizeof buffer, "\\x{%02x}", ch);
+                    for (char *ptr = buffer; *ptr;)
+                        *out_iter++ = *ptr++;
+                    break;
+                }
+            }
+
+            *out_iter++ = "'\""[double_quotes];
+        }
+    }
+
+    template <typename Void>
+    struct ToString<char, Void>
+    {
+        std::string operator()(char value) const
+        {
+            char ret[12]; // Should be at most 9: `'\x??'\0`, but throwing in a little extra space.
+            detail::formatting::EscapeString({&value, 1}, ret, false);
+            return ret;
+        }
+    };
+    template <typename Void>
+    struct ToString<std::string, Void>
+    {
+        std::string operator()(const std::string &value) const
+        {
+            std::string ret;
+            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
+            detail::formatting::EscapeString(value, std::back_inserter(ret), true);
+            return ret;
+        }
+    };
+    template <typename Void>
+    struct ToString<std::string_view, Void>
+    {
+        std::string operator()(const std::string_view &value) const
+        {
+            std::string ret;
+            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
+            detail::formatting::EscapeString(value, std::back_inserter(ret), true);
+            return ret;
+        }
+    };
+    template <typename Void> struct ToString<      char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
+    template <typename Void> struct ToString<const char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
+    // Somehow this catches const arrays too:
+    template <std::size_t N, typename Void> struct ToString<char[N], Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
+}
+#endif

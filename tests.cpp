@@ -31,6 +31,7 @@ int main()
     // TA_CHECK( (first + second).ends_with(suffix) );
     TA_CHECK($(true) && $(foo()) && $(false));
 
+
     // TA_FOR_TYPES(int, float, double)
     // {
     //     using T = TA_TYPE;
@@ -69,6 +70,8 @@ int main()
 
 // Color the keywords. Separately color `true`, `false`, `nullptr` (same as numbers?).
 
+// Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
+
 
 /* Pending tests:
 
@@ -81,5 +84,9 @@ ta_test::detail::DrawExprToCanvas(canv, 3, 3, "foo(\"meow\",foo42foo\"meow\"bar4
 ta_test::detail::DrawExprToCanvas(canv, 4, 3, "foo(\'meow\',foo42foo\'meow\'bar42bar,\'meow\'_bar42bar,\'foo\\\'bar\')");
 ta_test::detail::DrawExprToCanvas(canv, 5, 3, "foo(R\"(meow)\",foo42fooR\"(meow)\"bar42bar,u8R\"(meow)\"_bar42bar,R\"(foo\"bar)\",R\"ab(foo\"f)\"g)a\"bar)ab\")");
 canv.Print(true, stdout);
+
+--- Colors
+
+TA_CHECK($("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && false);
 
 */
