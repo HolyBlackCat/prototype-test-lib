@@ -9,6 +9,7 @@
 #include <exception>
 #include <initializer_list>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <string_view>
 #include <string>
@@ -111,6 +112,17 @@
     /* Note the parentheses, they allow this to be transparently used e.g. as a single function parameter. */\
     /* Passing `counter` the second time is redundant, but helps with our parsing. */\
     (::ta_test::detail::ArgWrapper(__FILE__, __LINE__, counter)._ta_handle_arg_(counter, __VA_ARGS__))
+
+#define TA_TEST(name) DETAIL_TA_TEST(name)
+
+#define DETAIL_TA_TEST(name) \
+    inline void _ta_test_func(::ta_test::detail::ConstStringTag<#name>); \
+    constexpr auto _ta_registration_helper(::ta_test::detail::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
+        const std::nullptr_t *, &::ta_test::detail::register_test_helper<\
+            ::ta_test::detail::SpecificTest<static_cast<void(*)(::ta_test::detail::ConstStringTag<#name>)>(_ta_test_func), #name, __FILE__, __LINE__>\
+        >\
+    >{})) {} \
+    inline void _ta_test_func(::ta_test::detail::ConstStringTag<#name>)
 
 namespace ta_test
 {
@@ -578,8 +590,10 @@ namespace ta_test
             }
         }
 
+        enum class HardErrorKind {internal, user};
+
         // Aborts the application with an internal error.
-        [[noreturn]] inline void InternalError(std::string_view message)
+        [[noreturn]] inline void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal)
         {
             // A threadsafe once flag.
             bool once = false;
@@ -604,7 +618,7 @@ namespace ta_test
                 std::fprintf(stream, "%s%s", AnsiResetString().data(), str.data());
             });
             // Write message.
-            std::fprintf(stream, " Internal error: %.*s ", int(message.size()), message.data());
+            std::fprintf(stream, " %s: %.*s ", kind == HardErrorKind::internal ? "Internal error" : "Error", int(message.size()), message.data());
             // Reset style.
             std::fprintf(stream, "%s\n", AnsiResetString().data());
 
@@ -624,8 +638,6 @@ namespace ta_test
         // Whether `ch` is a letter or an other non-digit identifier character.
         [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
         {
-            if (ch == '$')
-                return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
             return ch == '_' || IsAlpha(ch);
         }
         [[nodiscard]] constexpr bool IsDigit(char ch)
@@ -633,9 +645,16 @@ namespace ta_test
             return ch >= '0' && ch <= '9';
         }
         // Whether `ch` can be a part of an identifier.
-        [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
+        [[nodiscard]] constexpr bool IsIdentifierCharStrict(char ch)
         {
             return IsNonDigitIdentifierChar(ch) || IsDigit(ch);
+        }
+        // Same, but also allows `$`, which we use in our macro.
+        [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
+        {
+            if (ch == '$')
+                return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
+            return IsIdentifierCharStrict(ch);
         }
         // Returns true if `name` is `"TA_ARG"` or one of its aliases.
         [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
@@ -744,7 +763,7 @@ namespace ta_test
             void EnsureLineSize(std::size_t line_number, std::size_t size)
             {
                 if (line_number >= lines.size())
-                    InternalError("Line index is out of range.");
+                    HardError("Line index is out of range.");
 
                 Line &line = lines[line_number];
                 if (line.text.size() < size)
@@ -758,7 +777,7 @@ namespace ta_test
             void InsertLineBefore(std::size_t line_number)
             {
                 if (line_number >/*sic*/ lines.size())
-                    InternalError("Line number is out of range.");
+                    HardError("Line number is out of range.");
 
                 lines.insert(lines.begin() + std::ptrdiff_t(line_number), Line{});
             }
@@ -839,11 +858,11 @@ namespace ta_test
             [[nodiscard]] char32_t &CharAt(std::size_t line, std::size_t pos)
             {
                 if (line >= lines.size())
-                    InternalError("Line index is out of range.");
+                    HardError("Line index is out of range.");
 
                 Line &this_line = lines[line];
                 if (pos >= this_line.text.size())
-                    InternalError("Character index is out of range.");
+                    HardError("Character index is out of range.");
 
                 return this_line.text[pos];
             }
@@ -852,11 +871,11 @@ namespace ta_test
             [[nodiscard]] CellInfo &CellInfoAt(std::size_t line, std::size_t pos)
             {
                 if (line >= lines.size())
-                    InternalError("Line index is out of range.");
+                    HardError("Line index is out of range.");
 
                 Line &this_line = lines[line];
                 if (pos >= this_line.info.size())
-                    InternalError("Character index is out of range.");
+                    HardError("Character index is out of range.");
 
                 return this_line.info[pos];
             }
@@ -1044,7 +1063,7 @@ namespace ta_test
                             if (ch == '(')
                             {
                                 if (parens_stack_pos >= std::size(parens_stack))
-                                    InternalError("Too many nested parentheses.");
+                                    HardError("Too many nested parentheses.");
                                 parens_stack[parens_stack_pos++] = {
                                     .ident = identifier,
                                     .args = &ch + 1,
@@ -1187,7 +1206,7 @@ namespace ta_test
                             info.style = config.style_expr_raw_string_suffix;
                             break;
                           default:
-                            InternalError("Internal lexer error during pretty-printing.");
+                            HardError("Lexer error during pretty-printing.");
                             break;
                         }
                     }
@@ -1228,7 +1247,7 @@ namespace ta_test
                                 target_style = config.style_expr_raw_string_prefix;
                                 break;
                               default:
-                                InternalError("Internal lexer error during pretty-printing.");
+                                HardError("Lexer error during pretty-printing.");
                                 break;
                             }
                         }
@@ -1257,7 +1276,7 @@ namespace ta_test
                             info.style = config.style_expr_raw_string;
                         break;
                       default:
-                        InternalError("Internal lexer error during pretty-printing.");
+                        HardError("Lexer error during pretty-printing.");
                         break;
                     }
                     break;
@@ -1290,7 +1309,7 @@ namespace ta_test
             consteval ConstString(const char (&new_str)[N])
             {
                 if (new_str[N-1] != '\0')
-                    InternalError("The input string must be null-terminated.");
+                    HardError("The input string must be null-terminated.");
                 std::copy_n(new_str, size, str);
             }
 
@@ -1298,6 +1317,11 @@ namespace ta_test
             {
                 return {str, str + size};
             }
+        };
+        template <ConstString X>
+        struct ConstStringTag
+        {
+            static constexpr auto value = X;
         };
 
         // Describes the location of `TA_ARG(...)` in the code.
@@ -1378,7 +1402,7 @@ namespace ta_test
                         return *ptr;
                 }
 
-                InternalError("Unknown argument.");
+                HardError("Unknown argument.");
             }
 
             // Prints the assertion failure.
@@ -1386,7 +1410,7 @@ namespace ta_test
             void PrintAssertionFailure(const BasicAssert &top)
             {
                 if (assert_stack.empty() || assert_stack.back() != &top)
-                    InternalError("The failed assertion is not the top element of the stack.");
+                    HardError("The failed assertion is not the top element of the stack.");
 
                 std::size_t depth = 0;
                 auto it = assert_stack.end();
@@ -1618,7 +1642,7 @@ namespace ta_test
 
                 auto &stack = thread_state.assert_stack;
                 if (stack.empty() || stack.back() != this)
-                    InternalError("Something is wrong with `TA_CHECK`. Did you `co_await` inside of an assertion?");
+                    HardError("Something is wrong with `TA_CHECK`. Did you `co_await` inside of an assertion?");
 
                 stack.pop_back();
 
@@ -1671,7 +1695,7 @@ namespace ta_test
                         return;
 
                     if (pos >= num_args)
-                        InternalError("More `TA_ARG`s than expected.");
+                        HardError("More `TA_ARG`s than expected.");
 
                     ArgInfo &new_info = ret.info[pos];
                     new_info.depth = depth;
@@ -1683,7 +1707,7 @@ namespace ta_test
                         else if (ch == ',')
                             break;
                         else
-                            InternalError("Lexer error: Unexpected character after the counter macro.");
+                            HardError("Lexer error: Unexpected character after the counter macro.");
                     }
 
                     CounterIndexPair &new_pair = ret.counter_to_arg_index[pos];
@@ -1693,7 +1717,7 @@ namespace ta_test
                     pos++;
                 });
                 if (pos != num_args)
-                    InternalError("Less `TA_ARG`s than expected.");
+                    HardError("Less `TA_ARG`s than expected.");
 
                 // Parse raw string.
                 pos = 0;
@@ -1705,7 +1729,7 @@ namespace ta_test
                         return;
 
                     if (pos >= num_args)
-                        InternalError("More `TA_ARG`s than expected.");
+                        HardError("More `TA_ARG`s than expected.");
 
                     ArgInfo &this_info = ret.info[pos];
 
@@ -1736,7 +1760,7 @@ namespace ta_test
                     pos++;
                 });
                 if (pos != num_args)
-                    InternalError("Less `TA_ARG`s than expected.");
+                    HardError("Less `TA_ARG`s than expected.");
 
                 // Sort `counter_to_arg_index` by counter, to allow binary search.
                 // Sorting is necessary when the arguments are nested.
@@ -1778,6 +1802,133 @@ namespace ta_test
                 PrintAssertionFailure(RawString.view(), num_args, arg_data.info.data(), arg_data.args_in_draw_order.data(), stored_args.data(), FileName.view(), LineNumber, depth);
             }
         };
+
+
+        struct TestLocation
+        {
+            std::string_view file;
+            int line = 0;
+            friend auto operator<=>(const TestLocation &, const TestLocation &) = default;
+        };
+
+        struct BasicTest
+        {
+            virtual ~BasicTest() = default;
+
+            // The name passed to the test macro.
+            [[nodiscard]] virtual std::string_view Name() const = 0;
+            [[nodiscard]] virtual TestLocation Location() const = 0;
+            virtual void Run() const = 0;
+        };
+        // Stores singletons derived from `BasicTest`.
+        template <typename T>
+        requires std::is_base_of_v<BasicTest, T>
+        inline const T test_singleton{};
+
+        // A comparator for test names, that orders `/` before any other character.
+        struct TestNameLess
+        {
+            bool operator()(std::string_view a, std::string_view b) const
+            {
+                std::size_t i = 0;
+                while (true)
+                {
+                    // If `a` runs out first, return true.
+                    // If `b` or both run out first, return false.
+                    if (i >= a.size())
+                        return i < b.size();
+                    if (i >= b.size())
+                        return false;
+
+                    // If exactly one of the chars is a `/`, return true if it's in `a`.
+                    if (int d = (a[i] == '/') - (b[i] == '/'))
+                        return d > 0;
+
+                    if (a[i] != b[i])
+                        return a[i] < b[i];
+
+                    i++;
+                }
+                return false;
+            }
+        };
+
+        struct GlobalState
+        {
+            // Those must be in sync.
+            std::vector<const BasicTest *> tests;
+            std::map<std::string_view, std::size_t, TestNameLess> name_to_test_index;
+        };
+        [[nodiscard]] inline GlobalState &GetState()
+        {
+            static GlobalState ret;
+            return ret;
+        }
+
+        inline void RegisterTest(const BasicTest *singleton)
+        {
+            GlobalState &state = GetState();
+
+            auto name = singleton->Name();
+            auto it = state.name_to_test_index.lower_bound(name);
+
+            if (it != state.name_to_test_index.end())
+            {
+                if (it->first == name)
+                {
+                    // On duplicate registration, make sure the call location is the same.
+                    TestLocation old_loc = state.tests[it->second]->Location();
+                    TestLocation new_loc = singleton->Location();
+                    if (new_loc != old_loc)
+                        HardError(CFG_TA_FORMAT("Conflicting definitions for test `{}`. One at `{}:{}`, another at `{}:{}`.", name, old_loc.file, old_loc.line, new_loc.file, new_loc.line), HardErrorKind::user);
+                    return; // Already registered.
+                }
+                else
+                {
+                    // Make sure a test name is not also used as a group name.
+                    // Note, don't need to check `name.size() > it->first.size()` here, because if it was equal,
+                    // we wouldn't enter `else` at all, and if it was less, `.starts_with()` would return false.
+                    if (name.starts_with(it->first) && name[it->first.size()] == '/')
+                        HardError(CFG_TA_FORMAT("A test name (`{}`) can't double as a category name (`{}`). Append `/something` to the first name.", it->first, name), HardErrorKind::user);
+                }
+            }
+
+            state.name_to_test_index.try_emplace(name, state.tests.size());
+            state.tests.push_back(singleton);
+        }
+
+        template <auto P, ConstString TestName, ConstString LocFile, int LocLine>
+        struct SpecificTest : BasicTest
+        {
+            static constexpr bool test_name_is_valid = std::all_of(TestName.view().begin(), TestName.view().end(),
+                [](char ch){return IsIdentifierCharStrict(ch) || ch == '/';}
+            );
+            static_assert(test_name_is_valid, "Test names can only contain letters, digits, underscores, and slashes as separators.");
+
+            std::string_view Name() const override
+            {
+                return TestName.view();
+            }
+            TestLocation Location() const override
+            {
+                return {LocFile.view(), LocLine};
+            }
+
+            void Run() const override
+            {
+                P({}/* Name tag. */);
+            }
+        };
+
+        template <typename T>
+        inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
+    }
+
+    inline void RunTests()
+    {
+        const auto &state = detail::GetState();
+        for (auto *test : state.tests)
+            test->Run();
     }
 }
 

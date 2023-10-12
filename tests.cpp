@@ -16,10 +16,21 @@ bool foo()
     return false;
 }
 
+TA_TEST(foo/bar)
+{
+    std::cout << "1\n";
+}
+
+TA_TEST( foo/baz )
+{
+    std::cout << "2\n";
+}
+
 int main()
 {
     ta_test::config.output_stream = stdout;
     ta_test::config.text_color = true;
+    ta_test::RunTests();
 
     // int a = 1, b = 2, c = 3;
     // TA_CHECK($(sum($(a), $(b), $(c))) == 7);
@@ -58,6 +69,8 @@ int main()
 
     // }
 }
+
+// Come up with a good way of sorting tests. Or just in registration order?
 
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
 // Move text around to fit into the bracket. Or maybe not?
