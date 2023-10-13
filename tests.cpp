@@ -75,7 +75,6 @@ int main()
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
 // Move text around to fit into the bracket. Or maybe not?
 // Allow more characters in bracket-less form: `:`, `.`, `->`?
-// Test that we can handle spaces in `$ ( x )`.
 
 // A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
 
@@ -96,6 +95,11 @@ ta_test::detail::DrawExprToCanvas(canv, 2, 3, "foo(12e5,12e+5,12e-5,12.3e5,12.3e
 ta_test::detail::DrawExprToCanvas(canv, 3, 3, "foo(\"meow\",foo42foo\"meow\"bar42bar,\"meow\"_bar42bar,\"foo\\\"bar\")");
 ta_test::detail::DrawExprToCanvas(canv, 4, 3, "foo(\'meow\',foo42foo\'meow\'bar42bar,\'meow\'_bar42bar,\'foo\\\'bar\')");
 ta_test::detail::DrawExprToCanvas(canv, 5, 3, "foo(R\"(meow)\",foo42fooR\"(meow)\"bar42bar,u8R\"(meow)\"_bar42bar,R\"(foo\"bar)\",R\"ab(foo\"f)\"g)a\"bar)ab\")");
+// Different identifier/keyword categories:
+int foo42bar = 42;
+TA_CHECK($ ( foo42bar bitand static_cast<int>(0) && __COUNTER__ ) && $(foo()) && $(false));
+// Unicode:
+TA_CHECK($("мур"));
 canv.Print(true, stdout);
 
 --- Colors

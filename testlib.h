@@ -202,6 +202,9 @@ namespace ta_test
         friend bool operator==(const TextStyle &, const TextStyle &) = default;
     };
 
+    // C++ keyword classification for highlighting.
+    enum class KeywordKind {generic, value, op};
+
     struct GlobalConfig
     {
         // The output stream for all our messages.
@@ -273,6 +276,12 @@ namespace ta_test
         TextStyle style_expr_normal;
         // Punctuation.
         TextStyle style_expr_punct = {.bold = true};
+        // Keywords.
+        TextStyle style_expr_keyword_generic = {.color = TextColor::light_blue, .bold = true};
+        TextStyle style_expr_keyword_value = {.color = TextColor::dark_magenta, .bold = true};
+        TextStyle style_expr_keyword_op = {.color = TextColor::light_white, .bold = true};
+        // Identifiers written in all caps, probably macros.
+        TextStyle style_expr_all_caps = {.color = TextColor::dark_red};
         // Numbers.
         TextStyle style_expr_number = {.color = TextColor::dark_green, .bold = true};
         // User-defined literal on a number, starting with `_`. For my sanity, literals not starting with `_` are colored like the rest of the number.
@@ -298,6 +307,7 @@ namespace ta_test
         // Internal error messages.
         TextStyle style_internal_error = {.color = TextColor::light_white, .bg_color = TextColor::dark_red, .bold = true};
 
+        // Printed characters and strings.
         struct Chars
         {
             // Vertical bars, either standalone or in brackets.
@@ -330,6 +340,104 @@ namespace ta_test
             }
         };
         Chars chars;
+
+        // Keywords classification. The lists should be mutually exclusive.
+        std::map<std::string, KeywordKind, std::less<>> highlighted_keywords = {
+            {"alignas", KeywordKind::generic},
+            {"alignof", KeywordKind::generic},
+            {"asm", KeywordKind::generic},
+            {"auto", KeywordKind::generic},
+            {"bool", KeywordKind::generic},
+            {"break", KeywordKind::generic},
+            {"case", KeywordKind::generic},
+            {"catch", KeywordKind::generic},
+            {"char", KeywordKind::generic},
+            {"char16_t", KeywordKind::generic},
+            {"char32_t", KeywordKind::generic},
+            {"char8_t", KeywordKind::generic},
+            {"class", KeywordKind::generic},
+            {"co_await", KeywordKind::generic},
+            {"co_return", KeywordKind::generic},
+            {"co_yield", KeywordKind::generic},
+            {"concept", KeywordKind::generic},
+            {"const_cast", KeywordKind::generic},
+            {"const", KeywordKind::generic},
+            {"consteval", KeywordKind::generic},
+            {"constexpr", KeywordKind::generic},
+            {"constinit", KeywordKind::generic},
+            {"continue", KeywordKind::generic},
+            {"decltype", KeywordKind::generic},
+            {"default", KeywordKind::generic},
+            {"delete", KeywordKind::generic},
+            {"do", KeywordKind::generic},
+            {"double", KeywordKind::generic},
+            {"dynamic_cast", KeywordKind::generic},
+            {"else", KeywordKind::generic},
+            {"enum", KeywordKind::generic},
+            {"explicit", KeywordKind::generic},
+            {"export", KeywordKind::generic},
+            {"extern", KeywordKind::generic},
+            {"float", KeywordKind::generic},
+            {"for", KeywordKind::generic},
+            {"friend", KeywordKind::generic},
+            {"goto", KeywordKind::generic},
+            {"if", KeywordKind::generic},
+            {"inline", KeywordKind::generic},
+            {"int", KeywordKind::generic},
+            {"long", KeywordKind::generic},
+            {"mutable", KeywordKind::generic},
+            {"namespace", KeywordKind::generic},
+            {"new", KeywordKind::generic},
+            {"noexcept", KeywordKind::generic},
+            {"operator", KeywordKind::generic},
+            {"private", KeywordKind::generic},
+            {"protected", KeywordKind::generic},
+            {"public", KeywordKind::generic},
+            {"register", KeywordKind::generic},
+            {"reinterpret_cast", KeywordKind::generic},
+            {"requires", KeywordKind::generic},
+            {"return", KeywordKind::generic},
+            {"short", KeywordKind::generic},
+            {"signed", KeywordKind::generic},
+            {"sizeof", KeywordKind::generic},
+            {"static_assert", KeywordKind::generic},
+            {"static_cast", KeywordKind::generic},
+            {"static", KeywordKind::generic},
+            {"struct", KeywordKind::generic},
+            {"switch", KeywordKind::generic},
+            {"template", KeywordKind::generic},
+            {"thread_local", KeywordKind::generic},
+            {"throw", KeywordKind::generic},
+            {"try", KeywordKind::generic},
+            {"typedef", KeywordKind::generic},
+            {"typeid", KeywordKind::generic},
+            {"typename", KeywordKind::generic},
+            {"union", KeywordKind::generic},
+            {"unsigned", KeywordKind::generic},
+            {"using", KeywordKind::generic},
+            {"virtual", KeywordKind::generic},
+            {"void", KeywordKind::generic},
+            {"volatile", KeywordKind::generic},
+            {"wchar_t", KeywordKind::generic},
+            {"while", KeywordKind::generic},
+            // ---
+            {"false", KeywordKind::value},
+            {"nullptr", KeywordKind::value},
+            {"this", KeywordKind::value},
+            {"true", KeywordKind::value},
+            // ---
+            {"and_eq", KeywordKind::op},
+            {"and", KeywordKind::op},
+            {"bitand", KeywordKind::op},
+            {"bitor", KeywordKind::op},
+            {"compl", KeywordKind::op},
+            {"not_eq", KeywordKind::op},
+            {"not", KeywordKind::op},
+            {"or_eq", KeywordKind::op},
+            {"or", KeywordKind::op},
+            {"xor_eq", KeywordKind::op},
+            {"xor", KeywordKind::op},
+        };
     };
     inline GlobalConfig config;
 
@@ -631,9 +739,17 @@ namespace ta_test
         {
             return ch == ' ' || ch == '\t';
         }
+        [[nodiscard]] constexpr bool IsAlphaLowercase(char ch)
+        {
+            return ch >= 'a' && ch <= 'z';
+        }
+        [[nodiscard]] constexpr bool IsAlphaUppercase(char ch)
+        {
+            return ch >= 'A' && ch <= 'Z';
+        }
         [[nodiscard]] constexpr bool IsAlpha(char ch)
         {
-            return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+            return IsAlphaLowercase(ch) || IsAlphaUppercase(ch);
         }
         // Whether `ch` is a letter or an other non-digit identifier character.
         [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
@@ -989,8 +1105,8 @@ namespace ta_test
             raw_string_initial_sep // A raw string literal, from the opening `"` to the `(` exclusive.
         };
 
-        // `emit_char` is `(char ch, CharKind kind) -> void`.
-        // It's called for every character, classifying it.
+        // `emit_char` is `(const char &ch, CharKind kind) -> void`.
+        // It's called for every character, classifying it. The character address is guaranteed to be in `expr`.
         // `function_call` is `(std::string_view name, std::string_view args, std::size_t depth) -> void`.
         // It's called for every pair of parentheses. `args` is the contents of parentheses, possibly with leading and trailing whitespace.
         // `name` is the identifier preceding the `(`, without whitespace. It can be empty, or otherwise invalid.
@@ -1135,20 +1251,24 @@ namespace ta_test
             std::size_t i = 0;
             CharKind prev_kind = CharKind::normal;
             bool is_number = false;
+            const char *identifier_start = nullptr;
             bool is_number_suffix = false;
             bool is_string_suffix = false;
             std::size_t raw_string_separator_len = 0;
 
             CharKind prev_string_kind{}; // One of: `string`, `character`, `raw_string`.
 
-            auto lambda = [&](char ch, CharKind kind)
+            auto lambda = [&](const char &ch, CharKind kind)
             {
                 CellInfo &info = canvas.CellInfoAt(line, start + i);
                 bool is_punct = !IsIdentifierChar(ch);
 
+                const char *const prev_identifier_start = identifier_start;
+
                 if (kind != CharKind::normal)
                 {
                     is_number = false;
+                    identifier_start = nullptr;
                     is_number_suffix = false;
                     is_string_suffix = false;
                 }
@@ -1171,9 +1291,9 @@ namespace ta_test
                     if (is_number_suffix && !IsIdentifierChar(ch))
                         is_number_suffix = false;
 
-                    if (!is_number)
+                    if (!is_number && !identifier_start && !is_string_suffix && !is_number_suffix)
                     {
-                        if (!is_string_suffix && !is_number_suffix && IsDigit(ch))
+                        if (IsDigit(ch))
                         {
                             is_number = true;
 
@@ -1181,8 +1301,12 @@ namespace ta_test
                             if (i > 0 && expr[i-1] == '.')
                                 canvas.CellInfoAt(line, start + i - 1).style = config.style_expr_number;
                         }
+                        else if (IsIdentifierChar(ch))
+                        {
+                            identifier_start = &ch;
+                        }
                     }
-                    else
+                    else if (is_number)
                     {
                         if (!(IsDigit(ch) || IsAlpha(ch) || ch == '.' || ch == '-' || ch == '+' || ch == '\''))
                         {
@@ -1190,6 +1314,11 @@ namespace ta_test
                             if (ch == '_')
                                 is_number_suffix = true;
                         }
+                    }
+                    else if (identifier_start)
+                    {
+                        if (!IsIdentifierChar(ch))
+                            identifier_start = nullptr;
                     }
 
                     if (is_string_suffix)
@@ -1286,6 +1415,42 @@ namespace ta_test
                   case CharKind::character_escape_slash:
                     info.style = config.style_expr_char;
                     break;
+                }
+
+                // Finalize identifiers.
+                if (prev_identifier_start && !identifier_start)
+                {
+                    const TextStyle *style = nullptr;
+
+                    // Check if this is a keyword.
+                    std::string_view ident(prev_identifier_start, &ch);
+                    auto it = config.highlighted_keywords.find(ident);
+                    if (it != config.highlighted_keywords.end())
+                    {
+                        switch (it->second)
+                        {
+                          case KeywordKind::generic:
+                            style = &config.style_expr_keyword_generic;
+                            break;
+                          case KeywordKind::value:
+                            style = &config.style_expr_keyword_value;
+                            break;
+                          case KeywordKind::op:
+                            style = &config.style_expr_keyword_op;
+                            break;
+                        }
+                    }
+                    else if (std::all_of(ident.begin(), ident.end(), [](char ch){return IsIdentifierChar(ch) && !IsAlphaLowercase(ch);}))
+                    {
+                        style = &config.style_expr_all_caps;
+                    }
+
+                    // If this identifier needs a custom style...
+                    if (style)
+                    {
+                        for (std::size_t j = 0; j < ident.size(); j++)
+                            canvas.CellInfoAt(line, start + i - j - 1).style = *style;
+                    }
                 }
 
                 prev_kind = kind;
