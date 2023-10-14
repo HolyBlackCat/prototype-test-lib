@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <string_view>
 #include <string>
@@ -242,6 +243,17 @@ namespace ta_test
             U":";
         #endif
 
+        // The message when a test starts.
+        TextStyle style_test_started = {.color = TextColor::light_green, .bold = true};
+        // The indentation guides for nested test starts.
+        TextStyle style_test_started_indentation = {.color = TextColorGrayscale24(8), .bold = true};
+        // The test index.
+        TextStyle style_test_started_index = {.color = TextColor::light_green, .bold = true};
+        // The total test count printed after each test index.
+        TextStyle style_test_started_total_count = {.color = TextColor::dark_green};
+        // The line that separates the test counter from the test names/groups.
+        TextStyle style_test_started_gutter_border = {.color = TextColorGrayscale24(10), .bold = true};
+
         // The argument colors. They are cycled in this order.
         std::vector<TextStyle> style_arguments = {
             {.color = TextColorRgb6(1,4,1), .bold = true},
@@ -310,6 +322,15 @@ namespace ta_test
         // Printed characters and strings.
         struct Chars
         {
+            // Using narrow strings for strings printed as text, and u32 strings for ASCII graphics things.
+
+            // This goes right before each test/group name.
+            std::string starting_test_prefix = "\xE2\x97\x8F "; // BLACK CIRCLE, then a space.
+            // The is used for indenting test names/groups.
+            std::string starting_test_indent = "\xC2\xB7   "; // MIDDLE DOT, then a space.
+            // This is printed after the test counter and before the test names/groups (and before their indentation guides).
+            std::string starting_test_counter_separator = " \xE2\x94\x82  "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
+
             // Vertical bars, either standalone or in brackets.
             char32_t bar = 0x2502; // BOX DRAWINGS LIGHT VERTICAL
             // Bottom brackets.
@@ -329,6 +350,10 @@ namespace ta_test
 
             void SetAscii()
             {
+                starting_test_prefix = "* ";
+                starting_test_indent = "  ";
+                starting_test_counter_separator = " |  ";
+
                 bar = '|';
                 bracket_bottom = '_';
                 bracket_corner_bottom_left = '|';
@@ -659,11 +684,12 @@ namespace ta_test
         // If the styles are the same, does nothing.
         // Otherwise calls `func`, which is `(std::string_view string) -> void`,
         //   with a string printing which performs the requested style change. The string is always null-terminated.
+        // In any case, returns `cur`.
         template <typename F>
-        void AnsiDeltaString(const TextStyle &prev, const TextStyle &cur, F &&func)
+        const TextStyle &AnsiDeltaString(const TextStyle &prev, const TextStyle &cur, F &&func)
         {
             if (!config.text_color.value())
-                return;
+                return cur;
 
             // Should be large enough.
             char buffer[100];
@@ -696,6 +722,19 @@ namespace ta_test
                 ptr[-1] = 'm';
                 std::forward<F>(func)(std::string_view(buffer, ptr));
             }
+
+            return cur;
+        }
+
+        // Prints an ANSI sequence to set `style`.
+        // Assumes no state was set before.
+        // Returns `cur`.
+        inline const TextStyle &PrintAnsiDeltaString(const TextStyle &prev_style, const TextStyle &style)
+        {
+            return AnsiDeltaString(prev_style, style, [&](std::string_view str)
+            {
+                std::fprintf(config.output_stream, "%s", str.data());
+            });
         }
 
         enum class HardErrorKind {internal, user};
@@ -727,7 +766,7 @@ namespace ta_test
             });
             // Write message.
             std::fprintf(stream, " %s: %.*s ", kind == HardErrorKind::internal ? "Internal error" : "Error", int(message.size()), message.data());
-            // Reset style.
+            // Reset style. Must do it before the newline, otherwise the "core dumped" message also gets colored.
             std::fprintf(stream, "%s\n", AnsiResetString().data());
 
             // Stop.
@@ -2020,9 +2059,17 @@ namespace ta_test
 
         struct GlobalState
         {
-            // Those must be in sync.
+            // Those must be in sync: [
+            // All tests.
             std::vector<const BasicTest *> tests;
+            // Maps test names to indices in `tests`.
             std::map<std::string_view, std::size_t, TestNameLess> name_to_test_index;
+            // ]
+
+            // Maps each test name, and each prefix (for test `foo/bar/baz` includes `foo/bar/baz`, `foo/bar`, and `foo`)
+            //   to the preferred execution order.
+            // The order matches the registration order, with prefixes keeping the first registration order.
+            std::map<std::string_view, std::size_t, TestNameLess> name_prefixes_to_order;
         };
         [[nodiscard]] inline GlobalState &GetState()
         {
@@ -2030,6 +2077,7 @@ namespace ta_test
             return ret;
         }
 
+        // Registers a test. Pass a pointer to an instance of `test_singleton<??>`.
         inline void RegisterTest(const BasicTest *singleton)
         {
             GlobalState &state = GetState();
@@ -2041,7 +2089,7 @@ namespace ta_test
             {
                 if (it->first == name)
                 {
-                    // On duplicate registration, make sure the call location is the same.
+                    // This test is already registered. Make sure it comes from the same source file and line, then stop.
                     TestLocation old_loc = state.tests[it->second]->Location();
                     TestLocation new_loc = singleton->Location();
                     if (new_loc != old_loc)
@@ -2060,15 +2108,31 @@ namespace ta_test
 
             state.name_to_test_index.try_emplace(name, state.tests.size());
             state.tests.push_back(singleton);
+
+            // Fill `state.name_prefixes_to_order` with all prefixes of this test.
+            for (const char &ch : name)
+            {
+                if (ch == '/')
+                    state.name_prefixes_to_order.try_emplace(std::string_view(name.data(), &ch), state.name_prefixes_to_order.size());
+            }
+            state.name_prefixes_to_order.try_emplace(name, state.name_prefixes_to_order.size());
         }
 
+        // An implementation of `BasicTest` for a specific test.
+        // `P` is a pointer to the test function, see `DETAIL_TA_TEST()` for details.
         template <auto P, ConstString TestName, ConstString LocFile, int LocLine>
         struct SpecificTest : BasicTest
         {
-            static constexpr bool test_name_is_valid = std::all_of(TestName.view().begin(), TestName.view().end(),
-                [](char ch){return IsIdentifierCharStrict(ch) || ch == '/';}
-            );
-            static_assert(test_name_is_valid, "Test names can only contain letters, digits, underscores, and slashes as separators.");
+            static constexpr bool test_name_is_valid = []{
+                if (!std::all_of(TestName.view().begin(), TestName.view().end(), [](char ch){return IsIdentifierCharStrict(ch) || ch == '/';}))
+                    return false;
+                if (std::adjacent_find(TestName.view().begin(), TestName.view().end(), [](char a, char b){return a == '/' && b == '/';}) != TestName.view().end())
+                    return false;
+                if (TestName.view().starts_with('/') || TestName.view().ends_with('/'))
+                    return false;
+                return true;
+            }();
+            static_assert(test_name_is_valid, "Test names can only contain letters, digits, underscores, and slashes as separators; can't start or end with a slash or contain consecutive slashes.");
 
             std::string_view Name() const override
             {
@@ -2085,15 +2149,136 @@ namespace ta_test
             }
         };
 
+        // Touch to register a test. `T` is `SpecificTest<??>`.
         template <typename T>
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
+
+        // Examines `GetState()` and lists test indices in the preferred execution order.
+        [[nodiscard]] inline std::vector<std::size_t> GetTestListInExecutionOrder()
+        {
+            const GlobalState &state = GetState();
+
+            std::vector<std::size_t> ret(state.tests.size());
+            std::iota(ret.begin(), ret.end(), std::size_t(0));
+
+            std::sort(ret.begin(), ret.end(), [&](std::size_t a, std::size_t b)
+            {
+                std::string_view name_a = state.tests[a]->Name();
+                std::string_view name_b = state.tests[b]->Name();
+
+                std::string_view::iterator it_a = name_a.begin();
+                std::string_view::iterator it_b = name_b.begin();
+
+                while (true)
+                {
+                    auto new_it_a = std::find(it_a, name_a.end(), '/');
+                    auto new_it_b = std::find(it_b, name_b.end(), '/');
+
+                    if (std::string_view(it_a, new_it_a) == std::string_view(it_b, new_it_b))
+                    {
+                        if ((new_it_a == name_a.end()) != (new_it_b == name_b.end()))
+                            HardError("This shouldn't happen. One test name can't be a prefix of another?");
+                        if (new_it_a == name_a.end())
+                            return false; // Equal.
+
+                        it_a = new_it_a + 1;
+                        it_b = new_it_b + 1;
+                        continue;
+                    }
+
+                    return state.name_prefixes_to_order.at(std::string_view(name_a.begin(), new_it_a)) <
+                        state.name_prefixes_to_order.at(std::string_view(name_b.begin(), new_it_b));
+                }
+            });
+
+            return ret;
+        }
     }
 
     inline void RunTests()
     {
         const auto &state = detail::GetState();
-        for (auto *test : state.tests)
+
+        auto ordered_tests = detail::GetTestListInExecutionOrder();
+
+        std::vector<std::string_view> stack;
+
+        // How much characters in the test counter.
+        const int test_counter_width = std::snprintf(nullptr, 0, "%zu", ordered_tests.size());
+
+        std::size_t test_counter = 0;
+
+        for (std::size_t test_index : ordered_tests)
+        {
+            const detail::BasicTest *test = state.tests[test_index];
+            std::string_view test_name = test->Name();
+
+            { // Print the test name, and any prefixes if we're starting a new group.
+                auto it = test_name.begin();
+                std::size_t segment_index = 0;
+                while (true)
+                {
+                    auto new_it = std::find(it, test_name.end(), '/');
+
+                    std::string_view segment(it, new_it);
+
+                    // Pop the tail off the stack.
+                    if (segment_index < stack.size() && stack[segment_index] != segment)
+                        stack.resize(segment_index);
+
+                    // Push the segment into the stack, and print a line.
+                    if (segment_index >= stack.size())
+                    {
+                        TextStyle cur_style;
+
+                        // Test index (if this is the last segment).
+                        if (new_it == test_name.end())
+                        {
+                            cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started_index);
+                            std::fprintf(config.output_stream, "%*zu", test_counter_width, test_counter + 1);
+                            cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started_total_count);
+                            std::fprintf(config.output_stream, "/%zu", ordered_tests.size());
+                        }
+                        else
+                        {
+                            // No test index, just a gap.
+                            std::fprintf(config.output_stream, "%*s", test_counter_width * 2 + 1, "");
+
+                        }
+
+                        // The gutter border.
+                        cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started_gutter_border);
+                        std::fprintf(config.output_stream, "%.*s", int(config.chars.starting_test_counter_separator.size()), config.chars.starting_test_counter_separator.data());
+
+                        // The indentation.
+                        if (!stack.empty())
+                        {
+                            // Switch to the indentation guide color.
+                            cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started_indentation);
+                            // Print the required number of guides.
+                            for (std::size_t repeat = 0; repeat < stack.size(); repeat++)
+                                std::fprintf(config.output_stream, "%s", config.chars.starting_test_indent.c_str());
+                        }
+                        // Switch to the test name color.
+                        cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started);\
+                        // Print the test name, and reset the color.
+                        std::fprintf(config.output_stream, "%s%.*s%s\n", config.chars.starting_test_prefix.c_str(), int(segment.size()), segment.data(), detail::AnsiResetString().data());
+
+                        // Push to the stack.
+                        stack.push_back(segment);
+                    }
+
+                    if (new_it == test_name.end())
+                        break;
+
+                    segment_index++;
+                    it = new_it + 1;
+                }
+            }
+
             test->Run();
+            test_counter++;
+        }
     }
 }
 

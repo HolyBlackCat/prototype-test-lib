@@ -18,13 +18,33 @@ bool foo()
 
 TA_TEST(foo/bar)
 {
-    std::cout << "1\n";
+}
+
+TA_TEST(test/lul/beta)
+{
+
 }
 
 TA_TEST( foo/baz )
 {
-    std::cout << "2\n";
 }
+
+TA_TEST( bar/alpha )
+{
+}
+TA_TEST( omega )
+{
+}
+TA_TEST(test/lul/alpha)
+{
+
+}
+TA_TEST( foo/alpha )
+{
+}
+TA_TEST( foo/alpha1 ) {}
+TA_TEST( foo/alpha2 ) {}
+TA_TEST( foo/alpha3 ) {}
 
 int main()
 {
@@ -71,6 +91,8 @@ int main()
 }
 
 // Come up with a good way of sorting tests. Or just in registration order?
+
+// When a test prints something to the log, repeat all the group stack for the next test?
 
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
 // Move text around to fit into the bracket. Or maybe not?
