@@ -2070,6 +2070,45 @@ namespace ta_test
             //   to the preferred execution order.
             // The order matches the registration order, with prefixes keeping the first registration order.
             std::map<std::string_view, std::size_t, TestNameLess> name_prefixes_to_order;
+
+            // Examines `GetState()` and lists test indices in the preferred execution order.
+            [[nodiscard]] std::vector<std::size_t> GetTestListInExecutionOrder() const
+            {
+                std::vector<std::size_t> ret(tests.size());
+                std::iota(ret.begin(), ret.end(), std::size_t(0));
+
+                std::sort(ret.begin(), ret.end(), [&](std::size_t a, std::size_t b)
+                {
+                    std::string_view name_a = tests[a]->Name();
+                    std::string_view name_b = tests[b]->Name();
+
+                    std::string_view::iterator it_a = name_a.begin();
+                    std::string_view::iterator it_b = name_b.begin();
+
+                    while (true)
+                    {
+                        auto new_it_a = std::find(it_a, name_a.end(), '/');
+                        auto new_it_b = std::find(it_b, name_b.end(), '/');
+
+                        if (std::string_view(it_a, new_it_a) == std::string_view(it_b, new_it_b))
+                        {
+                            if ((new_it_a == name_a.end()) != (new_it_b == name_b.end()))
+                                HardError("This shouldn't happen. One test name can't be a prefix of another?");
+                            if (new_it_a == name_a.end())
+                                return false; // Equal.
+
+                            it_a = new_it_a + 1;
+                            it_b = new_it_b + 1;
+                            continue;
+                        }
+
+                        return name_prefixes_to_order.at(std::string_view(name_a.begin(), new_it_a)) <
+                            name_prefixes_to_order.at(std::string_view(name_b.begin(), new_it_b));
+                    }
+                });
+
+                return ret;
+            }
         };
         [[nodiscard]] inline GlobalState &GetState()
         {
@@ -2152,54 +2191,13 @@ namespace ta_test
         // Touch to register a test. `T` is `SpecificTest<??>`.
         template <typename T>
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
-
-        // Examines `GetState()` and lists test indices in the preferred execution order.
-        [[nodiscard]] inline std::vector<std::size_t> GetTestListInExecutionOrder()
-        {
-            const GlobalState &state = GetState();
-
-            std::vector<std::size_t> ret(state.tests.size());
-            std::iota(ret.begin(), ret.end(), std::size_t(0));
-
-            std::sort(ret.begin(), ret.end(), [&](std::size_t a, std::size_t b)
-            {
-                std::string_view name_a = state.tests[a]->Name();
-                std::string_view name_b = state.tests[b]->Name();
-
-                std::string_view::iterator it_a = name_a.begin();
-                std::string_view::iterator it_b = name_b.begin();
-
-                while (true)
-                {
-                    auto new_it_a = std::find(it_a, name_a.end(), '/');
-                    auto new_it_b = std::find(it_b, name_b.end(), '/');
-
-                    if (std::string_view(it_a, new_it_a) == std::string_view(it_b, new_it_b))
-                    {
-                        if ((new_it_a == name_a.end()) != (new_it_b == name_b.end()))
-                            HardError("This shouldn't happen. One test name can't be a prefix of another?");
-                        if (new_it_a == name_a.end())
-                            return false; // Equal.
-
-                        it_a = new_it_a + 1;
-                        it_b = new_it_b + 1;
-                        continue;
-                    }
-
-                    return state.name_prefixes_to_order.at(std::string_view(name_a.begin(), new_it_a)) <
-                        state.name_prefixes_to_order.at(std::string_view(name_b.begin(), new_it_b));
-                }
-            });
-
-            return ret;
-        }
     }
 
     inline void RunTests()
     {
         const auto &state = detail::GetState();
 
-        auto ordered_tests = detail::GetTestListInExecutionOrder();
+        auto ordered_tests = state.GetTestListInExecutionOrder();
 
         std::vector<std::string_view> stack;
 

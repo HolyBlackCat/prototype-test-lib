@@ -90,8 +90,6 @@ int main()
     // }
 }
 
-// Come up with a good way of sorting tests. Or just in registration order?
-
 // When a test prints something to the log, repeat all the group stack for the next test?
 
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
