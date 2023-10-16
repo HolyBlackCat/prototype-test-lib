@@ -22,7 +22,7 @@ TA_TEST(foo/bar)
 
 TA_TEST(test/lul/beta)
 {
-
+    throw std::runtime_error("Text!");
 }
 
 TA_TEST( foo/baz )
@@ -48,8 +48,8 @@ TA_TEST( foo/alpha3 ) {}
 
 int main()
 {
-    ta_test::config.output_stream = stdout;
-    ta_test::config.text_color = true;
+    ta_test::Config().output_stream = stdout;
+    ta_test::Config().text_color = true;
     ta_test::RunTests();
 
     // int a = 1, b = 2, c = 3;
@@ -90,6 +90,9 @@ int main()
     // }
 }
 
+// Hit a breakpoint only when a debugger is present (win: IsDebuggerPresent, linux: https://stackoverflow.com/q/3596781/2752075, macos: probably nothing, but in theory use https://ladydebug.com/blog/2020/09/02/isdebuggerpresent-for-mac-osx/)
+// Add a config flag to override this detection.
+
 // When a test prints something to the log, repeat all the group stack for the next test?
 
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
@@ -100,9 +103,8 @@ int main()
 
 // Length cap on serialized values, configurable
 
-// Color the keywords. Separately color `true`, `false`, `nullptr` (same as numbers?).
-
 // Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
+// Test without RTTI. What about exception type names?
 
 
 /* Pending tests:

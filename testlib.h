@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <map>
@@ -17,6 +18,14 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#ifndef CFG_TA_API
+#if defined(_WIN32) && CFG_TA_SHARED
+#define CFG_TA_API __declspec(dllimport)
+#else
+#define CFG_TA_API
+#endif
+#endif
 
 // C++ standard release date.
 #ifndef CFG_TA_CXX_STANDARD_DATE
@@ -60,11 +69,29 @@
 #ifndef CFG_TA_USE_DOLLAR
 #define CFG_TA_USE_DOLLAR 1
 #endif
-
 #if CFG_TA_USE_DOLLAR
 #ifdef __clang__
 // We can't `push` and `pop` this, since it has to extend to the user code. And inline `_Pragma` in the macro doesn't work too.
 #pragma clang diagnostic ignored "-Wdollar-in-identifier-extension"
+#endif
+#endif
+
+// Whether to print file paths in errors in MSVC style.
+#ifndef CFG_TA_MSVC_STYLE_ERRORS
+#ifdef _MSC_VER
+#define CFG_TA_MSVC_STYLE_ERRORS 1
+#else
+#define CFG_TA_MSVC_STYLE_ERRORS 0
+#endif
+#endif
+
+// Whether to use `<cxxabi.h>` to demangle names from `typeid(...).name()`.
+// Otherwise the names are used as is.
+#ifndef CFG_TA_CXXABI_DEMANGLE
+#ifndef _MSC_VER
+#define CFG_TA_CXXABI_DEMANGLE 1
+#else
+#define CFG_TA_CXXABI_DEMANGLE 0
 #endif
 #endif
 
@@ -127,6 +154,8 @@
 
 namespace ta_test
 {
+    // String conversions.
+
     template <typename T, typename = void>
     struct ToString
     {
@@ -144,6 +173,8 @@ namespace ta_test
             }
         }
     };
+
+    // Styling text.
 
     // Text color.
     enum class TextColor
@@ -203,6 +234,8 @@ namespace ta_test
         friend bool operator==(const TextStyle &, const TextStyle &) = default;
     };
 
+    // Configuration.
+
     // C++ keyword classification for highlighting.
     enum class KeywordKind {generic, value, op};
 
@@ -216,111 +249,100 @@ namespace ta_test
         // If empty, initializing the tests will try to guess it.
         std::optional<bool> text_color;
 
+        // See below.
+        CFG_TA_API static std::optional<std::string> DefaultExceptionToMessage(const std::exception_ptr &e);
+        // A list of functions to convert exceptions to strings.
+        // The first function that returns non-null is used. Throwing from a function is same as returning null.
+        std::vector<std::function<std::optional<std::string>(const std::exception_ptr &e)>> exception_to_message = {DefaultExceptionToMessage};
 
         // --- Visual options ---
 
-        // When printing an assertion macro with all the argument values, it's indented by this amount of spaces.
-        std::size_t assertion_macro_indentation = 4;
+        // Text colors and styles.
+        struct Style
+        {
+            // The message when a test starts.
+            TextStyle test_started = {.color = TextColor::light_green, .bold = true};
+            // The indentation guides for nested test starts.
+            TextStyle test_started_indentation = {.color = TextColorGrayscale24(8), .bold = true};
+            // The test index.
+            TextStyle test_started_index = {.color = TextColor::light_green, .bold = true};
+            // The total test count printed after each test index.
+            TextStyle test_started_total_count = {.color = TextColor::dark_green};
+            // The line that separates the test counter from the test names/groups.
+            TextStyle test_started_gutter_border = {.color = TextColorGrayscale24(10), .bold = true};
 
-        // How we call the assertion macro when printing it. You can redefine those if you rename the macro.
-        std::u32string assertion_macro_prefix = U"TA_CHECK( ";
-        std::u32string assertion_macro_suffix = U" )";
+            // The argument colors. They are cycled in this order.
+            std::vector<TextStyle> arguments = {
+                {.color = TextColorRgb6(1,4,1), .bold = true},
+                {.color = TextColorRgb6(1,3,5), .bold = true},
+                {.color = TextColorRgb6(1,0,5), .bold = true},
+                {.color = TextColorRgb6(5,1,0), .bold = true},
+                {.color = TextColorRgb6(5,4,0), .bold = true},
+                {.color = TextColorRgb6(0,4,3), .bold = true},
+                {.color = TextColorRgb6(0,5,5), .bold = true},
+                {.color = TextColorRgb6(3,1,5), .bold = true},
+                {.color = TextColorRgb6(4,0,2), .bold = true},
+                {.color = TextColorRgb6(5,2,1), .bold = true},
+                {.color = TextColorRgb6(4,5,3), .bold = true},
+            };
+            // This is used for brackets above expressions.
+            TextStyle overline = {.color = TextColor::light_magenta, .bold = true};
+            // This is used to dim the unwanted parts of expressions.
+            TextColor color_dim = TextColor::light_black;
 
-        // When printing a path in a stack, this comes before the path.
-        std::u32string filename_prefix = U"  at:  ";
-        // When printing a path, separates it from the line number.
-        std::u32string filename_linenumber_separator =
-        #ifdef _MSC_VER
-            U"(";
-        #else
-            U":";
-        #endif
-        // When printing a path with a line number, this comes after the line number.
-        std::u32string filename_linenumber_suffix =
-        #ifdef _MSC_VER
-            U") :"; // Huh.
-        #else
-            U":";
-        #endif
+            // Error messages.
+            TextStyle assertion_failed = {.color = TextColor::light_red, .bold = true};
+            TextStyle test_failed = {.color = TextColor::light_red, .bold = true};
+            TextStyle test_failed_exception_message = {.color = TextColor::light_yellow, .bold = true};
 
-        // The message when a test starts.
-        TextStyle style_test_started = {.color = TextColor::light_green, .bold = true};
-        // The indentation guides for nested test starts.
-        TextStyle style_test_started_indentation = {.color = TextColorGrayscale24(8), .bold = true};
-        // The test index.
-        TextStyle style_test_started_index = {.color = TextColor::light_green, .bold = true};
-        // The total test count printed after each test index.
-        TextStyle style_test_started_total_count = {.color = TextColor::dark_green};
-        // The line that separates the test counter from the test names/groups.
-        TextStyle style_test_started_gutter_border = {.color = TextColorGrayscale24(10), .bold = true};
+            // Error messages in the stack, after the first one.
+            TextStyle stack_error = {.color = TextColor::light_magenta, .bold = true};
+            // Paths in the stack traces.
+            TextStyle stack_path = {.color = TextColor::light_black};
+            // The color of `filename_prefix`.
+            TextStyle stack_path_prefix = {.color = TextColor::light_black, .bold = true};
 
-        // The argument colors. They are cycled in this order.
-        std::vector<TextStyle> style_arguments = {
-            {.color = TextColorRgb6(1,4,1), .bold = true},
-            {.color = TextColorRgb6(1,3,5), .bold = true},
-            {.color = TextColorRgb6(1,0,5), .bold = true},
-            {.color = TextColorRgb6(5,1,0), .bold = true},
-            {.color = TextColorRgb6(5,4,0), .bold = true},
-            {.color = TextColorRgb6(0,4,3), .bold = true},
-            {.color = TextColorRgb6(0,5,5), .bold = true},
-            {.color = TextColorRgb6(3,1,5), .bold = true},
-            {.color = TextColorRgb6(4,0,2), .bold = true},
-            {.color = TextColorRgb6(5,2,1), .bold = true},
-            {.color = TextColorRgb6(4,5,3), .bold = true},
+            // When printing an assertion macro failure, the macro name itself (and parentheses) will use this style.
+            TextStyle expr_assertion_macro = {.color = TextColor::light_red, .bold = true};
+            // A piece of an expression that doesn't fit into the categories below.
+            TextStyle expr_normal;
+            // Punctuation.
+            TextStyle expr_punct = {.bold = true};
+            // Keywords.
+            TextStyle expr_keyword_generic = {.color = TextColor::light_blue, .bold = true};
+            TextStyle expr_keyword_value = {.color = TextColor::dark_magenta, .bold = true};
+            TextStyle expr_keyword_op = {.color = TextColor::light_white, .bold = true};
+            // Identifiers written in all caps, probably macros.
+            TextStyle expr_all_caps = {.color = TextColor::dark_red};
+            // Numbers.
+            TextStyle expr_number = {.color = TextColor::dark_green, .bold = true};
+            // User-defined literal on a number, starting with `_`. For my sanity, literals not starting with `_` are colored like the rest of the number.
+            TextStyle expr_number_suffix = {.color = TextColor::dark_green};
+            // A string literal; everything between the quotes inclusive.
+            TextStyle expr_string = {.color = TextColor::dark_cyan, .bold = true};
+            // Stuff before the opening `"`.
+            TextStyle expr_string_prefix = {.color = TextColor::dark_cyan};
+            // Stuff after the closing `"`.
+            TextStyle expr_string_suffix = {.color = TextColor::dark_cyan};
+            // A character literal.
+            TextStyle expr_char = {.color = TextColor::dark_yellow, .bold = true};
+            TextStyle expr_char_prefix = {.color = TextColor::dark_yellow};
+            TextStyle expr_char_suffix = {.color = TextColor::dark_yellow};
+            // A raw string literal; everything between the parentheses exclusive.
+            TextStyle expr_raw_string = {.color = TextColor::light_blue, .bold = true};
+            // Stuff before the opening `"`.
+            TextStyle expr_raw_string_prefix = {.color = TextColor::dark_magenta};
+            // Stuff after the closing `"`.
+            TextStyle expr_raw_string_suffix = {.color = TextColor::dark_magenta};
+            // Quotes, parentheses, and everything between them.
+            TextStyle expr_raw_string_delimiters = {.color = TextColor::dark_magenta, .bold = true};
+            // Internal error messages.
+            TextStyle internal_error = {.color = TextColor::light_white, .bg_color = TextColor::dark_red, .bold = true};
         };
-        // This is used for brackets above expressions.
-        TextStyle style_overline = {.color = TextColor::light_magenta, .bold = true};
-        // This is used to dim the unwanted parts of expressions.
-        TextColor color_dim = TextColor::light_black;
-
-        // Error messages.
-        TextStyle style_error = {.color = TextColor::light_red, .bold = true};
-        // Error messages in the stack, after the first one.
-        TextStyle style_stack_error = {.color = TextColor::light_magenta, .bold = true};
-        // Paths in the stack traces.
-        TextStyle style_stack_path = {.color = TextColor::light_black};
-        // The color of `filename_prefix`.
-        TextStyle style_stack_path_prefix = {.color = TextColor::light_black, .bold = true};
-
-        // When printing an assertion macro failure, the macro name itself (and parentheses) will use this style.
-        TextStyle style_expr_assertion_macro = {.color = TextColor::light_red, .bold = true};
-        // A piece of an expression that doesn't fit into the categories below.
-        TextStyle style_expr_normal;
-        // Punctuation.
-        TextStyle style_expr_punct = {.bold = true};
-        // Keywords.
-        TextStyle style_expr_keyword_generic = {.color = TextColor::light_blue, .bold = true};
-        TextStyle style_expr_keyword_value = {.color = TextColor::dark_magenta, .bold = true};
-        TextStyle style_expr_keyword_op = {.color = TextColor::light_white, .bold = true};
-        // Identifiers written in all caps, probably macros.
-        TextStyle style_expr_all_caps = {.color = TextColor::dark_red};
-        // Numbers.
-        TextStyle style_expr_number = {.color = TextColor::dark_green, .bold = true};
-        // User-defined literal on a number, starting with `_`. For my sanity, literals not starting with `_` are colored like the rest of the number.
-        TextStyle style_expr_number_suffix = {.color = TextColor::dark_green};
-        // A string literal; everything between the quotes inclusive.
-        TextStyle style_expr_string = {.color = TextColor::dark_cyan, .bold = true};
-        // Stuff before the opening `"`.
-        TextStyle style_expr_string_prefix = {.color = TextColor::dark_cyan};
-        // Stuff after the closing `"`.
-        TextStyle style_expr_string_suffix = {.color = TextColor::dark_cyan};
-        // A character literal.
-        TextStyle style_expr_char = {.color = TextColor::dark_yellow, .bold = true};
-        TextStyle style_expr_char_prefix = {.color = TextColor::dark_yellow};
-        TextStyle style_expr_char_suffix = {.color = TextColor::dark_yellow};
-        // A raw string literal; everything between the parentheses exclusive.
-        TextStyle style_expr_raw_string = {.color = TextColor::light_blue, .bold = true};
-        // Stuff before the opening `"`.
-        TextStyle style_expr_raw_string_prefix = {.color = TextColor::dark_magenta};
-        // Stuff after the closing `"`.
-        TextStyle style_expr_raw_string_suffix = {.color = TextColor::dark_magenta};
-        // Quotes, parentheses, and everything between them.
-        TextStyle style_expr_raw_string_delimiters = {.color = TextColor::dark_magenta, .bold = true};
-        // Internal error messages.
-        TextStyle style_internal_error = {.color = TextColor::light_white, .bg_color = TextColor::dark_red, .bold = true};
+        Style style;
 
         // Printed characters and strings.
-        struct Chars
+        struct Visual
         {
             // Using narrow strings for strings printed as text, and u32 strings for ASCII graphics things.
 
@@ -330,6 +352,37 @@ namespace ta_test
             std::string starting_test_indent = "\xC2\xB7   "; // MIDDLE DOT, then a space.
             // This is printed after the test counter and before the test names/groups (and before their indentation guides).
             std::string starting_test_counter_separator = " \xE2\x94\x82  "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
+
+            // A test failed because of an exception.
+            std::string test_failed_exception = "TEST FAILED WITH EXCEPTION:\n    ";
+            // An assertion failed.
+            std::u32string assertion_failed = U"ASSERTION FAILED:";
+            // Something happened while evaluating an assertion.
+            std::u32string while_checking_assertion = U"WHILE CHECKING ASSERTION:";
+
+            // When printing an assertion macro with all the argument values, it's indented by this amount of spaces.
+            std::size_t assertion_macro_indentation = 4;
+
+            // How we call the assertion macro when printing it. You can redefine those if you rename the macro.
+            std::u32string assertion_macro_prefix = U"TA_CHECK( ";
+            std::u32string assertion_macro_suffix = U" )";
+
+            // When printing a path in a stack, this comes before the path.
+            std::u32string filename_prefix = U"  at:  ";
+            // When printing a path, separates it from the line number.
+            std::u32string filename_linenumber_separator =
+            #if CFG_TA_MSVC_STYLE_ERRORS
+                U"(";
+            #else
+                U":";
+            #endif
+            // When printing a path with a line number, this comes after the line number.
+            std::u32string filename_linenumber_suffix =
+            #if CFG_TA_MSVC_STYLE_ERRORS
+                U") :"; // Huh.
+            #else
+                U":";
+            #endif
 
             // Vertical bars, either standalone or in brackets.
             char32_t bar = 0x2502; // BOX DRAWINGS LIGHT VERTICAL
@@ -364,7 +417,7 @@ namespace ta_test
                 bracket_corner_top_right = '|';
             }
         };
-        Chars chars;
+        Visual vis;
 
         // Keywords classification. The lists should be mutually exclusive.
         std::map<std::string, KeywordKind, std::less<>> highlighted_keywords = {
@@ -464,7 +517,27 @@ namespace ta_test
             {"xor", KeywordKind::op},
         };
     };
-    inline GlobalConfig config;
+    // Returns the config singleton.
+    [[nodiscard]] CFG_TA_API GlobalConfig &Config();
+
+    // Misc.
+
+    namespace detail
+    {
+        // A tag to stop users from constructing our exception types.
+        struct ConstructInterruptTestException
+        {
+            explicit ConstructInterruptTestException() = default;
+        };
+    }
+
+    // We throw this to abort a test. Don't throw this manually.
+    // You can catch and rethrow this before a `catch (...)` to still be able to abort tests inside one.
+    struct InterruptTestException
+    {
+        // For internal use.
+        constexpr InterruptTestException(detail::ConstructInterruptTestException) {}
+    };
 
     namespace detail
     {
@@ -671,10 +744,32 @@ namespace ta_test
             }
         }
 
+
+        // Demangles output from `typeid(...).name()`.
+        class Demangler
+        {
+            #if CFG_TA_CXXABI_DEMANGLE
+            char *buf_ptr = nullptr;
+            std::size_t buf_size = 0;
+            #endif
+
+          public:
+            CFG_TA_API Demangler();
+            Demangler(const Demangler &) = delete;
+            Demangler &operator=(const Demangler &) = delete;
+            CFG_TA_API ~Demangler();
+
+            // Demangles a name.
+            // On GCC ang Clang invokes `__cxa_demangle()`, on MSVC returns the string unchanged.
+            // The returned pointer remains as long as both the passed string and the class instance are alive.
+            [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
+        };
+
+
         // Printing this string resets the text styles. It's always null-terminated.
         [[nodiscard]] inline std::string_view AnsiResetString()
         {
-            if (config.text_color.value())
+            if (Config().text_color.value())
                 return "\033[0m";
             else
                 return "";
@@ -688,7 +783,7 @@ namespace ta_test
         template <typename F>
         const TextStyle &AnsiDeltaString(const TextStyle &prev, const TextStyle &cur, F &&func)
         {
-            if (!config.text_color.value())
+            if (!Config().text_color.value())
                 return cur;
 
             // Should be large enough.
@@ -726,53 +821,35 @@ namespace ta_test
             return cur;
         }
 
-        // Prints an ANSI sequence to set `style`.
-        // Assumes no state was set before.
+        // Prints an ANSI sequence to set `style`, assuming `prev_style` is currently set.
         // Returns `cur`.
         inline const TextStyle &PrintAnsiDeltaString(const TextStyle &prev_style, const TextStyle &style)
         {
             return AnsiDeltaString(prev_style, style, [&](std::string_view str)
             {
-                std::fprintf(config.output_stream, "%s", str.data());
+                std::fprintf(Config().output_stream, "%s", str.data());
             });
         }
+
+        // Prints an ANSI sequence to set `style`.
+        // Returns `cur`.
+        inline const TextStyle &PrintAnsiForceString(const TextStyle &style)
+        {
+            return AnsiDeltaString({}, style, [&](std::string_view str)
+            {
+                std::fprintf(Config().output_stream, "%s%s", AnsiResetString().data(), str.data());
+            });
+        }
+
 
         enum class HardErrorKind {internal, user};
 
         // Aborts the application with an internal error.
-        [[noreturn]] inline void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal)
-        {
-            // A threadsafe once flag.
-            bool once = false;
-            [[maybe_unused]] static const auto once_trigger = [&]
-            {
-                once = true;
-                return nullptr;
-            }();
+        [[noreturn]] CFG_TA_API void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal);
 
-            if (!once)
-                std::terminate(); // We've already been there.
+        // Given an exception, tries to get an error message from it.
+        [[nodiscard]] CFG_TA_API std::string ExceptionToMessage(const std::exception_ptr &e);
 
-            FILE *stream = config.output_stream;
-            if (!stream)
-                stream = stdout;
-            if (!config.text_color)
-                config.text_color = false;
-
-            // Set style.
-            AnsiDeltaString({}, config.style_internal_error, [&](std::string_view str)
-            {
-                std::fprintf(stream, "%s%s", AnsiResetString().data(), str.data());
-            });
-            // Write message.
-            std::fprintf(stream, " %s: %.*s ", kind == HardErrorKind::internal ? "Internal error" : "Error", int(message.size()), message.data());
-            // Reset style. Must do it before the newline, otherwise the "core dumped" message also gets colored.
-            std::fprintf(stream, "%s\n", AnsiResetString().data());
-
-            // Stop.
-            CFG_TA_BREAKPOINT();
-            std::terminate();
-        }
 
         [[nodiscard]] constexpr bool IsWhitespace(char ch)
         {
@@ -853,7 +930,7 @@ namespace ta_test
             template <typename F>
             void PrintToCallback(F &&func) const
             {
-                const bool enable_style = config.text_color.value();
+                const bool enable_style = Config().text_color.value();
 
                 TextStyle cur_style;
 
@@ -901,236 +978,62 @@ namespace ta_test
             }
 
             // Prints to the current output stream.
-            void Print() const
-            {
-                FILE *stream = config.output_stream;
-                PrintToCallback([&](std::string_view string){fwrite(string.data(), string.size(), 1, stream);});
-            }
+            CFG_TA_API void Print() const;
+
+            // The number of lines.
+            [[nodiscard]] CFG_TA_API std::size_t NumLines() const;
 
             // Resize the canvas to have at least the specified number of lines.
-            void EnsureNumLines(std::size_t size)
-            {
-                if (lines.size() < size)
-                    lines.resize(size);
-            }
+            CFG_TA_API void EnsureNumLines(std::size_t size);
 
             // Resize the line to have at least the specified number of characters.
-            void EnsureLineSize(std::size_t line_number, std::size_t size)
-            {
-                if (line_number >= lines.size())
-                    HardError("Line index is out of range.");
-
-                Line &line = lines[line_number];
-                if (line.text.size() < size)
-                {
-                    line.text.resize(size, ' ');
-                    line.info.resize(size);
-                }
-            }
+            CFG_TA_API void EnsureLineSize(std::size_t line_number, std::size_t size);
 
             // Inserts the line before the specified line index (or at the bottom of the canvas if given the number of lines).
-            void InsertLineBefore(std::size_t line_number)
-            {
-                if (line_number >/*sic*/ lines.size())
-                    HardError("Line number is out of range.");
-
-                lines.insert(lines.begin() + std::ptrdiff_t(line_number), Line{});
-            }
+            CFG_TA_API void InsertLineBefore(std::size_t line_number);
 
             // Whether a cell is free, aka has `.important == false`.
-            [[nodiscard]] bool IsCellFree(std::size_t line, std::size_t column) const
-            {
-                if (line >= lines.size())
-                    return true;
-                const Line &this_line = lines[line];
-                if (column >= this_line.info.size())
-                    return true;
-                return !this_line.info[column].important;
-            }
+            [[nodiscard]] CFG_TA_API bool IsCellFree(std::size_t line, std::size_t column) const;
 
             // Checks if the space is free in the canvas.
             // Examines a single line (at number `line`), starting at `column - gap`, checking `width + gap*2` characters.
             // Returns false if at least one character has `.important == true`.
-            [[nodiscard]] bool IsLineFree(std::size_t line, std::size_t column, std::size_t width, std::size_t gap) const
-            {
-                // Apply `gap` to `column` and `width`.
-                column = gap < column ? column - gap : 0;
-                width += gap * 2;
-
-                if (line >= lines.size())
-                    return true; // This space is below the canvas height.
-
-                const Line &this_line = lines[line];
-                if (this_line.info.empty())
-                    return true; // This line is completely empty.
-
-                std::size_t last_column = column + width;
-                if (last_column >= this_line.info.size())
-                    last_column = this_line.info.size() - 1; // `line.info` can't be empty here.
-
-                bool ok = true;
-                for (std::size_t i = column; i < last_column; i++)
-                {
-                    if (this_line.info[i].important)
-                    {
-                        ok = false;
-                        break;
-                    }
-                }
-                return ok;
-            }
+            [[nodiscard]] CFG_TA_API bool IsLineFree(std::size_t line, std::size_t column, std::size_t width, std::size_t gap) const;
 
             // Looks for a free space in the canvas.
             // Searches for `width + gap*2` consecutive cells with `.important == false`.
             // Starts looking at `(column - gap, starting_line)`, and proceeds downwards until it finds the free space,
             // which could be below the canvas.
             // Moves down in increments of `vertical_step`.
-            [[nodiscard]] std::size_t FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap, std::size_t vertical_step) const
-            {
-                std::size_t num_free_lines = 0;
-                std::size_t line = starting_line;
-                while (true)
-                {
-                    if (num_free_lines > 0 || (line - starting_line) % vertical_step == 0)
-                    {
-                        if (!IsLineFree(line, column, width, gap))
-                        {
-                            num_free_lines = 0;
-                        }
-                        else
-                        {
-                            num_free_lines++;
-                            if (num_free_lines >= height)
-                                return line - height + 1;
-                        }
-                    }
-
-                    line++; // Try the next line.
-                }
-            }
+            [[nodiscard]] CFG_TA_API std::size_t FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap, std::size_t vertical_step) const;
 
             // Accesses the character for the specified cell. The cell must exist.
-            [[nodiscard]] char32_t &CharAt(std::size_t line, std::size_t pos)
-            {
-                if (line >= lines.size())
-                    HardError("Line index is out of range.");
-
-                Line &this_line = lines[line];
-                if (pos >= this_line.text.size())
-                    HardError("Character index is out of range.");
-
-                return this_line.text[pos];
-            }
+            [[nodiscard]] CFG_TA_API char32_t &CharAt(std::size_t line, std::size_t pos);
 
             // Accesses the cell info for the specified cell. The cell must exist.
-            [[nodiscard]] CellInfo &CellInfoAt(std::size_t line, std::size_t pos)
-            {
-                if (line >= lines.size())
-                    HardError("Line index is out of range.");
-
-                Line &this_line = lines[line];
-                if (pos >= this_line.info.size())
-                    HardError("Character index is out of range.");
-
-                return this_line.info[pos];
-            }
+            [[nodiscard]] CFG_TA_API CellInfo &CellInfoAt(std::size_t line, std::size_t pos);
 
             // Draws a text.
             // Returns `text.size()`.
-            std::size_t DrawText(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info = {.style = {}, .important = true})
-            {
-                EnsureNumLines(line + 1);
-                EnsureLineSize(line, start + text.size());
-                std::copy(text.begin(), text.end(), lines[line].text.begin() + (std::ptrdiff_t)start);
-                for (std::size_t i = start; i < start + text.size(); i++)
-                    lines[line].info[i] = info;
-                return text.size();
-            }
+            CFG_TA_API std::size_t DrawText(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info = {.style = {}, .important = true});
             // Draws a UTF8 text. Returns the text size after converting to UTF32.
-            std::size_t DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true})
-            {
-                std::u32string decoded_text = uni::Decode(text);
-                return DrawText(line, start, decoded_text, info);
-            }
+            CFG_TA_API std::size_t DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true});
 
             // Draws a horizontal row of `ch`, starting at `(column, line_start)`, of width `width`.
             // If `skip_important == true`, don't overwrite important cells.
             // Returns `width`.
-            std::size_t DrawRow(char32_t ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info = {.style = {}, .important = true})
-            {
-                EnsureNumLines(line + 1);
-                EnsureLineSize(line, column + width);
-                for (std::size_t i = column; i < column + width; i++)
-                {
-                    if (skip_important && !IsCellFree(line, i))
-                        continue;
-
-                    lines[line].text[i] = ch;
-                    lines[line].info[i] = info;
-                }
-
-                return width;
-            }
+            CFG_TA_API std::size_t DrawRow(char32_t ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info = {.style = {}, .important = true});
 
             // Draws a vertical column of `ch`, starting at `(column, line_start)`, of height `height`.
             // If `skip_important == true`, don't overwrite important cells.
-            void DrawColumn(char32_t ch, std::size_t line_start, std::size_t column, std::size_t height, bool skip_important, const CellInfo &info = {.style = {}, .important = true})
-            {
-                if (height == 0)
-                    return;
-
-                EnsureNumLines(line_start + height);
-
-                for (std::size_t i = line_start; i < line_start + height; i++)
-                {
-                    if (skip_important && !IsCellFree(i, column))
-                        continue;
-
-                    EnsureLineSize(i, column + 1);
-
-                    Line &line = lines[i];
-                    line.text[column] = ch;
-                    line.info[column] = info;
-                }
-            }
+            CFG_TA_API void DrawColumn(char32_t ch, std::size_t line_start, std::size_t column, std::size_t height, bool skip_important, const CellInfo &info = {.style = {}, .important = true});
 
             // Draws a horziontal bracket: `|___|`. Vertical columns skip important cells, but the bottom bar doesn't.
             // The left column is on `column_start`, and the right one is on `column_start + width - 1`.
-            void DrawHorBracket(std::size_t line_start, std::size_t column_start, std::size_t height, std::size_t width, const CellInfo &info = {.style = {}, .important = true})
-            {
-                if (width < 2 || height < 1)
-                    return;
-
-                // Sides.
-                if (height > 1)
-                {
-                    DrawColumn(config.chars.bar, line_start, column_start, height - 1, true, info);
-                    DrawColumn(config.chars.bar, line_start, column_start + width - 1, height - 1, true, info);
-                }
-
-                // Bottom.
-                if (width > 2)
-                    DrawRow(config.chars.bracket_bottom, line_start + height - 1, column_start + 1, width - 2, false, info);
-
-                // Corners.
-                DrawRow(config.chars.bracket_corner_bottom_left, line_start + height - 1, column_start, 1, false, info);
-                DrawRow(config.chars.bracket_corner_bottom_right, line_start + height - 1, column_start + width - 1, 1, false, info);
-            }
+            CFG_TA_API void DrawHorBracket(std::size_t line_start, std::size_t column_start, std::size_t height, std::size_t width, const CellInfo &info = {.style = {}, .important = true});
 
             // Draws a little 1-high top bracket.
-            void DrawOverline(std::size_t line, std::size_t column_start, std::size_t width, const CellInfo &info = {.style = {}, .important = true})
-            {
-                if (width < 2)
-                    return;
-
-                // Middle part.
-                if (width > 2)
-                    DrawRow(config.chars.bracket_top, line, column_start + 1, width - 2, false, info);
-
-                // Corners.
-                DrawRow(config.chars.bracket_corner_top_left, line, column_start, 1, false, info);
-                DrawRow(config.chars.bracket_corner_top_right, line, column_start + width - 1, 1, false, info);
-            }
+            CFG_TA_API void DrawOverline(std::size_t line, std::size_t column_start, std::size_t width, const CellInfo &info = {.style = {}, .important = true});
         };
 
         enum class CharKind
@@ -1284,222 +1187,7 @@ namespace ta_test
 
         // Pretty-prints an expression to a canvas.
         // Returns `expr.size()`.
-        inline std::size_t DrawExprToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr)
-        {
-            canvas.DrawText(line, start, expr);
-            std::size_t i = 0;
-            CharKind prev_kind = CharKind::normal;
-            bool is_number = false;
-            const char *identifier_start = nullptr;
-            bool is_number_suffix = false;
-            bool is_string_suffix = false;
-            std::size_t raw_string_separator_len = 0;
-
-            CharKind prev_string_kind{}; // One of: `string`, `character`, `raw_string`.
-
-            auto lambda = [&](const char &ch, CharKind kind)
-            {
-                CellInfo &info = canvas.CellInfoAt(line, start + i);
-                bool is_punct = !IsIdentifierChar(ch);
-
-                const char *const prev_identifier_start = identifier_start;
-
-                if (kind != CharKind::normal)
-                {
-                    is_number = false;
-                    identifier_start = nullptr;
-                    is_number_suffix = false;
-                    is_string_suffix = false;
-                }
-
-                // When exiting raw string, backtrack and color the closing sequence.
-                if (prev_kind == CharKind::raw_string && kind != CharKind::raw_string)
-                {
-                    for (std::size_t j = 0; j < raw_string_separator_len; j++)
-                        canvas.CellInfoAt(line, start + i - j - 1).style = config.style_expr_raw_string_delimiters;
-                }
-
-                switch (kind)
-                {
-                  case CharKind::normal:
-                    if (is_string_suffix && !IsIdentifierChar(ch))
-                        is_string_suffix = false;
-                    if ((prev_kind == CharKind::string || prev_kind == CharKind::character || prev_kind == CharKind::raw_string) && IsIdentifierChar(ch))
-                        is_string_suffix = true;
-
-                    if (is_number_suffix && !IsIdentifierChar(ch))
-                        is_number_suffix = false;
-
-                    if (!is_number && !identifier_start && !is_string_suffix && !is_number_suffix)
-                    {
-                        if (IsDigit(ch))
-                        {
-                            is_number = true;
-
-                            // Backtrack and make the leading `.` a number too, if it's there.
-                            if (i > 0 && expr[i-1] == '.')
-                                canvas.CellInfoAt(line, start + i - 1).style = config.style_expr_number;
-                        }
-                        else if (IsIdentifierChar(ch))
-                        {
-                            identifier_start = &ch;
-                        }
-                    }
-                    else if (is_number)
-                    {
-                        if (!(IsDigit(ch) || IsAlpha(ch) || ch == '.' || ch == '-' || ch == '+' || ch == '\''))
-                        {
-                            is_number = false;
-                            if (ch == '_')
-                                is_number_suffix = true;
-                        }
-                    }
-                    else if (identifier_start)
-                    {
-                        if (!IsIdentifierChar(ch))
-                            identifier_start = nullptr;
-                    }
-
-                    if (is_string_suffix)
-                    {
-                        switch (prev_string_kind)
-                        {
-                          case CharKind::string:
-                            info.style = config.style_expr_string_suffix;
-                            break;
-                          case CharKind::character:
-                            info.style = config.style_expr_char_suffix;
-                            break;
-                          case CharKind::raw_string:
-                            info.style = config.style_expr_raw_string_suffix;
-                            break;
-                          default:
-                            HardError("Lexer error during pretty-printing.");
-                            break;
-                        }
-                    }
-                    else if (is_number_suffix)
-                        info.style = config.style_expr_number_suffix;
-                    else if (is_number)
-                        info.style = config.style_expr_number;
-                    else if (is_punct)
-                        info.style = config.style_expr_punct;
-                    else
-                        info.style = config.style_expr_normal;
-                    break;
-                  case CharKind::string:
-                  case CharKind::character:
-                  case CharKind::raw_string:
-                  case CharKind::raw_string_initial_sep:
-                    if (prev_kind != kind && prev_kind != CharKind::raw_string_initial_sep)
-                    {
-                        if (kind == CharKind::raw_string_initial_sep)
-                            prev_string_kind = CharKind::raw_string;
-                        else
-                            prev_string_kind = kind;
-
-                        // Backtrack and color the prefix.
-                        std::size_t j = i;
-                        while (j-- > 0 && (IsAlpha(expr[j]) || IsDigit(expr[j])))
-                        {
-                            TextStyle &target_style = canvas.CellInfoAt(line, start + j).style;
-                            switch (prev_string_kind)
-                            {
-                              case CharKind::string:
-                                target_style = config.style_expr_string_prefix;
-                                break;
-                              case CharKind::character:
-                                target_style = config.style_expr_char_prefix;
-                                break;
-                              case CharKind::raw_string:
-                                target_style = config.style_expr_raw_string_prefix;
-                                break;
-                              default:
-                                HardError("Lexer error during pretty-printing.");
-                                break;
-                            }
-                        }
-                    }
-
-                    if (kind == CharKind::raw_string_initial_sep)
-                    {
-                        if (prev_kind != CharKind::raw_string_initial_sep)
-                            raw_string_separator_len = 1;
-                        raw_string_separator_len++;
-                    }
-
-                    switch (kind)
-                    {
-                      case CharKind::string:
-                        info.style = config.style_expr_string;
-                        break;
-                      case CharKind::character:
-                        info.style = config.style_expr_char;
-                        break;
-                      case CharKind::raw_string:
-                      case CharKind::raw_string_initial_sep:
-                        if (kind == CharKind::raw_string_initial_sep || prev_kind == CharKind::raw_string_initial_sep)
-                            info.style = config.style_expr_raw_string_delimiters;
-                        else
-                            info.style = config.style_expr_raw_string;
-                        break;
-                      default:
-                        HardError("Lexer error during pretty-printing.");
-                        break;
-                    }
-                    break;
-                  case CharKind::string_escape_slash:
-                    info.style = config.style_expr_string;
-                    break;
-                  case CharKind::character_escape_slash:
-                    info.style = config.style_expr_char;
-                    break;
-                }
-
-                // Finalize identifiers.
-                if (prev_identifier_start && !identifier_start)
-                {
-                    const TextStyle *style = nullptr;
-
-                    // Check if this is a keyword.
-                    std::string_view ident(prev_identifier_start, &ch);
-                    auto it = config.highlighted_keywords.find(ident);
-                    if (it != config.highlighted_keywords.end())
-                    {
-                        switch (it->second)
-                        {
-                          case KeywordKind::generic:
-                            style = &config.style_expr_keyword_generic;
-                            break;
-                          case KeywordKind::value:
-                            style = &config.style_expr_keyword_value;
-                            break;
-                          case KeywordKind::op:
-                            style = &config.style_expr_keyword_op;
-                            break;
-                        }
-                    }
-                    else if (std::all_of(ident.begin(), ident.end(), [](char ch){return IsIdentifierChar(ch) && !IsAlphaLowercase(ch);}))
-                    {
-                        style = &config.style_expr_all_caps;
-                    }
-
-                    // If this identifier needs a custom style...
-                    if (style)
-                    {
-                        for (std::size_t j = 0; j < ident.size(); j++)
-                            canvas.CellInfoAt(line, start + i - j - 1).style = *style;
-                    }
-                }
-
-                prev_kind = kind;
-
-                i++;
-            };
-            ParseExpr(expr, lambda, nullptr);
-
-            return expr.size();
-        }
+        CFG_TA_API std::size_t DrawExprToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr);
 
         // A compile-time string.
         template <std::size_t N>
@@ -1588,7 +1276,7 @@ namespace ta_test
         };
 
         // The global per-thread state.
-        struct ThreadState
+        struct GlobalThreadState
         {
             // The stack of the currently running assertions.
             std::vector<BasicAssert *> assert_stack;
@@ -1625,7 +1313,7 @@ namespace ta_test
                 }
             }
         };
-        inline thread_local ThreadState thread_state;
+        [[nodiscard]] CFG_TA_API GlobalThreadState &ThreadState();
 
         // `TA_ARG` expands to this.
         // Stores a pointer into an `AssertWrapper` where it will write the argument as a string.
@@ -1634,7 +1322,7 @@ namespace ta_test
             StoredArg *target = nullptr;
 
             ArgWrapper(std::string_view file, int line, int counter)
-                : target(&thread_state.GetArgumentData(ArgLocation{file, line, counter}))
+                : target(&ThreadState().GetArgumentData(ArgLocation{file, line, counter}))
             {
                 target->state = StoredArg::State::in_progress;
             }
@@ -1653,7 +1341,7 @@ namespace ta_test
         };
 
         // Fails an assertion. `AssertWrapper` uses this.
-        inline void PrintAssertionFailure(
+        CFG_TA_API void PrintAssertionFailure(
             std::string_view raw_expr,
             std::size_t num_args,
             const ArgInfo *arg_info,               // Array of size `num_args`.
@@ -1662,170 +1350,7 @@ namespace ta_test
             std::string_view file_name,
             int line_number,
             std::size_t depth // Starts at 0, increments when we go deeper into the assertion stack.
-        )
-        {
-            TextCanvas canvas;
-            std::size_t line_counter = 0;
-
-            line_counter++;
-
-            if (depth == 0)
-                canvas.DrawText(line_counter++, 0, "ASSERTION FAILED:", {.style = config.style_error, .important = true});
-            else
-                canvas.DrawText(line_counter++, 0, "WHILE CHECKING ASSERTION:", {.style = config.style_stack_error, .important = true});
-
-            { // The file path.
-                CellInfo cell_info = {.style = config.style_stack_path, .important = true};
-                std::size_t column = 0;
-                column += canvas.DrawText(line_counter, column, config.filename_prefix, {.style = config.style_stack_path_prefix, .important = true});
-                column += canvas.DrawText(line_counter, column, file_name, cell_info);
-                column += canvas.DrawText(line_counter, column, config.filename_linenumber_separator, cell_info);
-                column += canvas.DrawText(line_counter, column, std::to_string(line_number), cell_info);
-                column += canvas.DrawText(line_counter, column, config.filename_linenumber_suffix, cell_info);
-                line_counter++;
-            }
-
-            line_counter++;
-
-            std::size_t expr_line = line_counter;
-
-            { // The assertion call.
-                std::size_t column = config.assertion_macro_indentation;
-
-                const CellInfo assertion_macro_cell_info = {.style = config.style_expr_assertion_macro, .important = true};
-                column += canvas.DrawText(line_counter, column, config.assertion_macro_prefix, assertion_macro_cell_info);
-                column += DrawExprToCanvas(canvas, line_counter, column, raw_expr);
-                column += canvas.DrawText(line_counter, column, config.assertion_macro_suffix, assertion_macro_cell_info);
-                line_counter++;
-            }
-
-            std::size_t expr_column = config.assertion_macro_indentation + config.assertion_macro_prefix.size();
-
-            std::u32string this_value;
-
-            // The bracket above the expression.
-            std::size_t overline_start = 0;
-            std::size_t overline_end = 0;
-            // How many subexpressions want an overline.
-            // More than one should be impossible, but if it happens, we just combine them into a single fat one.
-            int num_overline_parts = 0;
-
-            // Incremented when we print an argument.
-            std::size_t color_index = 0;
-
-            for (std::size_t i = 0; i < num_args; i++)
-            {
-                const std::size_t arg_index = args_in_draw_order[i];
-                const StoredArg &this_arg = stored_args[arg_index];
-                const ArgInfo &this_info = arg_info[arg_index];
-
-                bool dim_parentheses = true;
-
-                if (this_arg.state == StoredArg::State::in_progress)
-                {
-                    if (num_overline_parts == 0)
-                    {
-                        overline_start = this_info.expr_offset;
-                        overline_end = this_info.expr_offset + this_info.expr_size;
-                    }
-                    else
-                    {
-                        overline_start = std::min(overline_start, this_info.expr_offset);
-                        overline_end = std::max(overline_end, this_info.expr_offset + this_info.expr_size);
-                    }
-                    num_overline_parts++;
-                }
-
-                if (this_arg.state == StoredArg::State::done)
-                {
-
-                    this_value = uni::Decode(this_arg.value);
-
-                    std::size_t center_x = expr_column + this_info.expr_offset + (this_info.expr_size + 1) / 2 - 1;
-                    std::size_t value_x = center_x - (this_value.size() + 1) / 2 + 1;
-                    // Make sure `value_x` didn't underflow.
-                    if (value_x > std::size_t(-1) / 2)
-                        value_x = 0;
-
-                    const CellInfo this_cell_info = {.style = config.style_arguments[color_index++ % config.style_arguments.size()], .important = true};
-
-                    if (!this_info.need_bracket)
-                    {
-                        std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1, 2) + 1;
-                        canvas.DrawText(value_y, value_x, this_value, this_cell_info);
-                        canvas.DrawColumn(config.chars.bar, line_counter, center_x, value_y - line_counter, true, this_cell_info);
-
-                        // Color the contents.
-                        for (std::size_t i = 0; i < this_info.expr_size; i++)
-                        {
-                            TextStyle &style = canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + i).style;
-                            style.color = this_cell_info.style.color;
-                            style.bold = true;
-                        }
-                    }
-                    else
-                    {
-                        std::size_t bracket_left_x = expr_column + this_info.expr_offset;
-                        std::size_t bracket_right_x = bracket_left_x + this_info.expr_size + 1;
-                        if (bracket_left_x > 0)
-                            bracket_left_x--;
-
-                        std::size_t bracket_y = canvas.FindFreeSpace(line_counter, bracket_left_x, 2, bracket_right_x - bracket_left_x, 0, 2);
-                        std::size_t value_y = canvas.FindFreeSpace(bracket_y + 1, value_x, 1, this_value.size(), 1, 2);
-
-                        canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x, this_cell_info);
-                        canvas.DrawText(value_y, value_x, this_value, this_cell_info);
-
-                        // Add the tail to the bracket.
-                        if (center_x > bracket_left_x && center_x + 1 < bracket_right_x)
-                            canvas.CharAt(bracket_y, center_x) = config.chars.bracket_bottom_tail;
-
-                        // Draw the column connecting us to the text, if it's not directly below.
-                        canvas.DrawColumn(config.chars.bar, bracket_y + 1, center_x, value_y - bracket_y - 1, true, this_cell_info);
-
-                        // Color the parentheses with the argument color.
-                        dim_parentheses = false;
-                        canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = this_cell_info.style.color;
-                        canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = this_cell_info.style.color;
-                    }
-                }
-
-                // Dim the macro name.
-                for (std::size_t i = 0; i < this_info.ident_size; i++)
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.ident_offset + i).style.color = config.color_dim;
-
-                // Dim the parentheses.
-                if (dim_parentheses)
-                {
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = config.color_dim;
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = config.color_dim;
-                }
-            }
-
-            // The overline.
-            if (num_overline_parts > 0)
-            {
-                if (overline_start > 0)
-                    overline_start--;
-                overline_end++;
-
-                std::u32string_view this_value = num_overline_parts > 1 ? config.chars.in_this_subexpr_inexact : config.chars.in_this_subexpr;
-
-                std::size_t center_x = expr_column + overline_start + (overline_end - overline_start) / 2;
-                std::size_t value_x = center_x - this_value.size() / 2;
-
-                canvas.InsertLineBefore(expr_line++);
-
-                canvas.DrawOverline(expr_line - 1, expr_column + overline_start, overline_end - overline_start, {.style = config.style_overline, .important = true});
-                canvas.DrawText(expr_line - 2, value_x, this_value, {.style = config.style_overline, .important = true});
-
-                // Color the parentheses.
-                canvas.CellInfoAt(expr_line, expr_column + overline_start).style.color = config.style_overline.color;
-                canvas.CellInfoAt(expr_line, expr_column + overline_end - 1).style.color = config.style_overline.color;
-            }
-
-            canvas.Print();
-        }
+        );
 
         // Returns `value` as is. But before that, prints an error message if it's false.
         template <ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
@@ -1833,7 +1358,7 @@ namespace ta_test
         {
             AssertWrapper()
             {
-                thread_state.assert_stack.push_back(this);
+                ThreadState().assert_stack.push_back(this);
             }
             AssertWrapper(const AssertWrapper &) = delete;
             AssertWrapper &operator=(const AssertWrapper &) = delete;
@@ -1842,9 +1367,9 @@ namespace ta_test
             bool operator()(bool value) &&
             {
                 if (!value)
-                    thread_state.PrintAssertionFailure(*this);
+                    ThreadState().PrintAssertionFailure(*this);
 
-                auto &stack = thread_state.assert_stack;
+                auto &stack = ThreadState().assert_stack;
                 if (stack.empty() || stack.back() != this)
                     HardError("Something is wrong with `TA_CHECK`. Did you `co_await` inside of an assertion?");
 
@@ -2071,91 +1596,13 @@ namespace ta_test
             // The order matches the registration order, with prefixes keeping the first registration order.
             std::map<std::string_view, std::size_t, TestNameLess> name_prefixes_to_order;
 
-            // Examines `GetState()` and lists test indices in the preferred execution order.
-            [[nodiscard]] std::vector<std::size_t> GetTestListInExecutionOrder() const
-            {
-                std::vector<std::size_t> ret(tests.size());
-                std::iota(ret.begin(), ret.end(), std::size_t(0));
-
-                std::sort(ret.begin(), ret.end(), [&](std::size_t a, std::size_t b)
-                {
-                    std::string_view name_a = tests[a]->Name();
-                    std::string_view name_b = tests[b]->Name();
-
-                    std::string_view::iterator it_a = name_a.begin();
-                    std::string_view::iterator it_b = name_b.begin();
-
-                    while (true)
-                    {
-                        auto new_it_a = std::find(it_a, name_a.end(), '/');
-                        auto new_it_b = std::find(it_b, name_b.end(), '/');
-
-                        if (std::string_view(it_a, new_it_a) == std::string_view(it_b, new_it_b))
-                        {
-                            if ((new_it_a == name_a.end()) != (new_it_b == name_b.end()))
-                                HardError("This shouldn't happen. One test name can't be a prefix of another?");
-                            if (new_it_a == name_a.end())
-                                return false; // Equal.
-
-                            it_a = new_it_a + 1;
-                            it_b = new_it_b + 1;
-                            continue;
-                        }
-
-                        return name_prefixes_to_order.at(std::string_view(name_a.begin(), new_it_a)) <
-                            name_prefixes_to_order.at(std::string_view(name_b.begin(), new_it_b));
-                    }
-                });
-
-                return ret;
-            }
+            // Examines `State()` and lists test indices in the preferred execution order.
+            [[nodiscard]] CFG_TA_API std::vector<std::size_t> GetTestListInExecutionOrder() const;
         };
-        [[nodiscard]] inline GlobalState &GetState()
-        {
-            static GlobalState ret;
-            return ret;
-        }
+        [[nodiscard]] CFG_TA_API GlobalState &State();
 
         // Registers a test. Pass a pointer to an instance of `test_singleton<??>`.
-        inline void RegisterTest(const BasicTest *singleton)
-        {
-            GlobalState &state = GetState();
-
-            auto name = singleton->Name();
-            auto it = state.name_to_test_index.lower_bound(name);
-
-            if (it != state.name_to_test_index.end())
-            {
-                if (it->first == name)
-                {
-                    // This test is already registered. Make sure it comes from the same source file and line, then stop.
-                    TestLocation old_loc = state.tests[it->second]->Location();
-                    TestLocation new_loc = singleton->Location();
-                    if (new_loc != old_loc)
-                        HardError(CFG_TA_FORMAT("Conflicting definitions for test `{}`. One at `{}:{}`, another at `{}:{}`.", name, old_loc.file, old_loc.line, new_loc.file, new_loc.line), HardErrorKind::user);
-                    return; // Already registered.
-                }
-                else
-                {
-                    // Make sure a test name is not also used as a group name.
-                    // Note, don't need to check `name.size() > it->first.size()` here, because if it was equal,
-                    // we wouldn't enter `else` at all, and if it was less, `.starts_with()` would return false.
-                    if (name.starts_with(it->first) && name[it->first.size()] == '/')
-                        HardError(CFG_TA_FORMAT("A test name (`{}`) can't double as a category name (`{}`). Append `/something` to the first name.", it->first, name), HardErrorKind::user);
-                }
-            }
-
-            state.name_to_test_index.try_emplace(name, state.tests.size());
-            state.tests.push_back(singleton);
-
-            // Fill `state.name_prefixes_to_order` with all prefixes of this test.
-            for (const char &ch : name)
-            {
-                if (ch == '/')
-                    state.name_prefixes_to_order.try_emplace(std::string_view(name.data(), &ch), state.name_prefixes_to_order.size());
-            }
-            state.name_prefixes_to_order.try_emplace(name, state.name_prefixes_to_order.size());
-        }
+        CFG_TA_API void RegisterTest(const BasicTest *singleton);
 
         // An implementation of `BasicTest` for a specific test.
         // `P` is a pointer to the test function, see `DETAIL_TA_TEST()` for details.
@@ -2193,91 +1640,7 @@ namespace ta_test
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
     }
 
-    inline void RunTests()
-    {
-        const auto &state = detail::GetState();
-
-        auto ordered_tests = state.GetTestListInExecutionOrder();
-
-        std::vector<std::string_view> stack;
-
-        // How much characters in the test counter.
-        const int test_counter_width = std::snprintf(nullptr, 0, "%zu", ordered_tests.size());
-
-        std::size_t test_counter = 0;
-
-        for (std::size_t test_index : ordered_tests)
-        {
-            const detail::BasicTest *test = state.tests[test_index];
-            std::string_view test_name = test->Name();
-
-            { // Print the test name, and any prefixes if we're starting a new group.
-                auto it = test_name.begin();
-                std::size_t segment_index = 0;
-                while (true)
-                {
-                    auto new_it = std::find(it, test_name.end(), '/');
-
-                    std::string_view segment(it, new_it);
-
-                    // Pop the tail off the stack.
-                    if (segment_index < stack.size() && stack[segment_index] != segment)
-                        stack.resize(segment_index);
-
-                    // Push the segment into the stack, and print a line.
-                    if (segment_index >= stack.size())
-                    {
-                        TextStyle cur_style;
-
-                        // Test index (if this is the last segment).
-                        if (new_it == test_name.end())
-                        {
-                            cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started_index);
-                            std::fprintf(config.output_stream, "%*zu", test_counter_width, test_counter + 1);
-                            cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started_total_count);
-                            std::fprintf(config.output_stream, "/%zu", ordered_tests.size());
-                        }
-                        else
-                        {
-                            // No test index, just a gap.
-                            std::fprintf(config.output_stream, "%*s", test_counter_width * 2 + 1, "");
-
-                        }
-
-                        // The gutter border.
-                        cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started_gutter_border);
-                        std::fprintf(config.output_stream, "%.*s", int(config.chars.starting_test_counter_separator.size()), config.chars.starting_test_counter_separator.data());
-
-                        // The indentation.
-                        if (!stack.empty())
-                        {
-                            // Switch to the indentation guide color.
-                            cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started_indentation);
-                            // Print the required number of guides.
-                            for (std::size_t repeat = 0; repeat < stack.size(); repeat++)
-                                std::fprintf(config.output_stream, "%s", config.chars.starting_test_indent.c_str());
-                        }
-                        // Switch to the test name color.
-                        cur_style = detail::PrintAnsiDeltaString(cur_style, config.style_test_started);\
-                        // Print the test name, and reset the color.
-                        std::fprintf(config.output_stream, "%s%.*s%s\n", config.chars.starting_test_prefix.c_str(), int(segment.size()), segment.data(), detail::AnsiResetString().data());
-
-                        // Push to the stack.
-                        stack.push_back(segment);
-                    }
-
-                    if (new_it == test_name.end())
-                        break;
-
-                    segment_index++;
-                    it = new_it + 1;
-                }
-            }
-
-            test->Run();
-            test_counter++;
-        }
-    }
+    CFG_TA_API void RunTests();
 }
 
 // Manually support quoting strings if the formatting library can't do that.
