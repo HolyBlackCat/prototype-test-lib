@@ -8,6 +8,37 @@
 #include <cxxabi.h>
 #endif
 
+#if defined(_WIN32)
+#include <windows.h> // IsDebuggerPresent
+#elif defined(__linux__)
+#include <fstream> // To read `/proc/self/status` to detect the debugger.
+#endif
+
+bool ta_test::GlobalConfig::DefaultIsDebuggerAttached()
+{
+    #if defined(_WIN32)
+    return bool(IsDebuggerPresent());
+    #elif defined(__linux__)
+    std::ifstream file("/proc/self/status");
+    if (!file)
+        return false;
+    for (std::string line; std::getline(file, line);)
+    {
+        constexpr std::string_view prefix = "TracerPid:";
+        if (!line.starts_with(prefix))
+            continue;
+        for (std::size_t i = prefix.size(); i < line.size(); i++)
+        {
+            if (detail::IsDigit(line[i]) && line[i] != '0')
+                return true;
+        }
+    }
+    return false;
+    #else
+    return false;
+    #endif
+}
+
 std::optional<std::string> ta_test::GlobalConfig::DefaultExceptionToMessage(const std::exception_ptr &e)
 {
     try
@@ -68,19 +99,28 @@ void ta_test::detail::HardError(std::string_view message, HardErrorKind kind)
     if (!Config().text_color)
         Config().text_color = false;
 
-    // Set style.
-    AnsiDeltaString({}, Config().style.internal_error, [&](std::string_view str)
-    {
-        std::fprintf(stream, "%s%s", AnsiResetString().data(), str.data());
-    });
-    // Write message.
-    std::fprintf(stream, " %s: %.*s ", kind == HardErrorKind::internal ? "Internal error" : "Error", int(message.size()), message.data());
-    // Reset style. Must do it before the newline, otherwise the "core dumped" message also gets colored.
-    std::fprintf(stream, "%s\n", AnsiResetString().data());
+    std::fprintf(stream, "%s%s %s: %.*s %s\n",
+        AnsiResetString().data(),
+        AnsiDeltaString({}, Config().style.internal_error).buf,
+        kind == HardErrorKind::internal ? "Internal error" : "Error",
+        int(message.size()), message.data(),
+        AnsiResetString().data()
+    );
 
     // Stop.
+    // Don't need to check whether the debugger is attached, a crash is fine.
     CFG_TA_BREAKPOINT();
     std::terminate();
+}
+
+void ta_test::detail::PrintNote(std::string_view message)
+{
+    std::fprintf(Config().output_stream, "%s%sNOTE: %.*s%s\n",
+        AnsiResetString().data(),
+        AnsiDeltaString({}, Config().style.note).buf,
+        int(message.size()), message.data(),
+        AnsiResetString().data()
+    );
 }
 
 std::string ta_test::detail::ExceptionToMessage(const std::exception_ptr &e)
@@ -806,6 +846,26 @@ void ta_test::RunTests()
 {
     const auto &state = detail::State();
 
+    // Print a message if a debugger is attached.
+    // Note, it can become attached later, and we'll re-check that later. This is by design.
+    if (auto &func = Config().is_debugger_attached)
+    {
+        if (func())
+            detail::PrintNote("Will break on the first problem.");
+    }
+    else
+    {
+        if (GlobalConfig::DefaultIsDebuggerAttached())
+        {
+            detail::PrintNote("Debugger is attached, will break on the first problem.");
+            func = []{return true;};
+        }
+        else
+        {
+            func = []{return false;};
+        }
+    }
+
     auto ordered_tests = state.GetTestListInExecutionOrder();
 
     std::vector<std::string_view> stack;
@@ -841,10 +901,15 @@ void ta_test::RunTests()
                     // Test index (if this is the last segment).
                     if (new_it == test_name.end())
                     {
-                        cur_style = detail::PrintAnsiDeltaString(cur_style, Config().style.test_started_index);
-                        std::fprintf(Config().output_stream, "%*zu", test_counter_width, test_counter + 1);
-                        cur_style = detail::PrintAnsiDeltaString(cur_style, Config().style.test_started_total_count);
-                        std::fprintf(Config().output_stream, "/%zu", ordered_tests.size());
+                        detail::AnsiDeltaString style_a(cur_style, Config().style.test_started_index);
+                        detail::AnsiDeltaString style_b(cur_style, Config().style.test_started_total_count);
+
+                        std::fprintf(Config().output_stream, "%s%*zu%s/%zu",
+                            style_a.buf,
+                            test_counter_width, test_counter + 1,
+                            style_b.buf,
+                            ordered_tests.size()
+                        );
                     }
                     else
                     {
@@ -853,22 +918,27 @@ void ta_test::RunTests()
                     }
 
                     // The gutter border.
-                    cur_style = detail::PrintAnsiDeltaString(cur_style, Config().style.test_started_gutter_border);
-                    std::fprintf(Config().output_stream, "%.*s", int(Config().vis.starting_test_counter_separator.size()), Config().vis.starting_test_counter_separator.data());
+                    std::fprintf(Config().output_stream, "%s%.*s",
+                        detail::AnsiDeltaString(cur_style, Config().style.test_started_gutter_border).buf,
+                        int(Config().vis.starting_test_counter_separator.size()), Config().vis.starting_test_counter_separator.data()
+                    );
 
                     // The indentation.
                     if (!stack.empty())
                     {
                         // Switch to the indentation guide color.
-                        cur_style = detail::PrintAnsiDeltaString(cur_style, Config().style.test_started_indentation);
+                        std::fprintf(Config().output_stream, "%s", detail::AnsiDeltaString(cur_style, Config().style.test_started_indentation).buf);
                         // Print the required number of guides.
                         for (std::size_t repeat = 0; repeat < stack.size(); repeat++)
                             std::fprintf(Config().output_stream, "%s", Config().vis.starting_test_indent.c_str());
                     }
-                    // Switch to the test name color.
-                    cur_style = detail::PrintAnsiDeltaString(cur_style, Config().style.test_started);\
                     // Print the test name, and reset the color.
-                    std::fprintf(Config().output_stream, "%s%.*s%s\n", Config().vis.starting_test_prefix.c_str(), int(segment.size()), segment.data(), detail::AnsiResetString().data());
+                    std::fprintf(Config().output_stream, "%s%s%.*s%s\n",
+                        detail::AnsiDeltaString(cur_style, Config().style.test_started).buf,
+                        Config().vis.starting_test_prefix.c_str(),
+                        int(segment.size()), segment.data(),
+                        detail::AnsiResetString().data()
+                    );
 
                     // Push to the stack.
                     stack.push_back(segment);
@@ -891,10 +961,18 @@ void ta_test::RunTests()
         {
             std::string message = detail::ExceptionToMessage(std::current_exception());
 
-            TextStyle cur_style = detail::PrintAnsiForceString(Config().style.test_failed);
-            fprintf(Config().output_stream, "%s", Config().vis.test_failed_exception.c_str());
-            cur_style = detail::PrintAnsiDeltaString(cur_style, Config().style.test_failed_exception_message);
-            fprintf(Config().output_stream, "%s%s\n\n", message.c_str(), detail::AnsiResetString().data());
+            TextStyle cur_style;
+
+            detail::AnsiDeltaString style_a(cur_style, Config().style.test_failed);
+            detail::AnsiDeltaString style_b(cur_style, Config().style.test_failed_exception_message);
+            fprintf(Config().output_stream, "%s%s%s%s%s\n\n%s",
+                detail::AnsiResetString().data(),
+                style_a.buf,
+                Config().vis.test_failed_exception.c_str(),
+                style_b.buf,
+                message.c_str(),
+                detail::AnsiResetString().data()
+            );
         }
 
         test_counter++;

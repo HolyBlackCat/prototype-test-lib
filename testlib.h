@@ -48,7 +48,8 @@
 
 // Override to change what we call to terminate the application.
 // The logic is mostly copied from `SDL_TriggerBreakpoint()`.
-// This can be empty, we follow up by a forced termination anyway.
+// This can be empty, we follow up with a forced termination anyway.
+// Note, this failed for me at least once when resuming from being paused on an exception (didn't show the line number; on Linux Clang).
 #ifndef CFG_TA_BREAKPOINT
 #if defined(_MSC_VER) // MSVC.
 #define CFG_TA_BREAKPOINT() __debugbreak()
@@ -129,7 +130,7 @@
 #define TA_CHECK(...) DETAIL_TA_CHECK(#__VA_ARGS__, __VA_ARGS__)
 #define DETAIL_TA_CHECK(x, ...) \
     /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (::ta_test::detail::AssertWrapper<x, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {CFG_TA_BREAKPOINT(); std::terminate();}
+    if (::ta_test::detail::AssertWrapper<x, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {if (::ta_test::Config().is_debugger_attached()) {CFG_TA_BREAKPOINT();} throw ::ta_test::InterruptTestException(::ta_test::detail::ConstructInterruptTestException{});}
 
 // The expansion is enclosed in `(...)`, which lets you use it e.g. as a sole function argument: `func $(var)`.
 #define TA_ARG(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
@@ -249,6 +250,12 @@ namespace ta_test
         // If empty, initializing the tests will try to guess it.
         std::optional<bool> text_color;
 
+        // See below. Currently has meaningful implementations only on Windows and Linux, always returns false elsewhere.
+        CFG_TA_API static bool DefaultIsDebuggerAttached();
+        // Whether we currently have a debugger attached.
+        // If null, we call `DefaultIsDebuggerAttached()` once during init, and set this to unconditionally return true or false.
+        std::function<bool()> is_debugger_attached;
+
         // See below.
         CFG_TA_API static std::optional<std::string> DefaultExceptionToMessage(const std::exception_ptr &e);
         // A list of functions to convert exceptions to strings.
@@ -293,7 +300,12 @@ namespace ta_test
             // Error messages.
             TextStyle assertion_failed = {.color = TextColor::light_red, .bold = true};
             TextStyle test_failed = {.color = TextColor::light_red, .bold = true};
-            TextStyle test_failed_exception_message = {.color = TextColor::light_yellow, .bold = true};
+            TextStyle test_failed_exception_message = {.color = TextColor::dark_magenta};
+
+            // Internal error messages.
+            TextStyle internal_error = {.color = TextColor::light_white, .bg_color = TextColor::dark_red, .bold = true};
+            // "Note" messages.
+            TextStyle note = {.color = TextColor::light_blue, .bold = true};
 
             // Error messages in the stack, after the first one.
             TextStyle stack_error = {.color = TextColor::light_magenta, .bold = true};
@@ -336,8 +348,6 @@ namespace ta_test
             TextStyle expr_raw_string_suffix = {.color = TextColor::dark_magenta};
             // Quotes, parentheses, and everything between them.
             TextStyle expr_raw_string_delimiters = {.color = TextColor::dark_magenta, .bold = true};
-            // Internal error messages.
-            TextStyle internal_error = {.color = TextColor::light_white, .bg_color = TextColor::dark_red, .bold = true};
         };
         Style style;
 
@@ -780,72 +790,72 @@ namespace ta_test
         // Otherwise calls `func`, which is `(std::string_view string) -> void`,
         //   with a string printing which performs the requested style change. The string is always null-terminated.
         // In any case, returns `cur`.
-        template <typename F>
-        const TextStyle &AnsiDeltaString(const TextStyle &prev, const TextStyle &cur, F &&func)
+        struct AnsiDeltaString
         {
-            if (!Config().text_color.value())
-                return cur;
-
             // Should be large enough.
-            char buffer[100];
-            std::strcpy(buffer, "\033[");
-            char *ptr = buffer + 2;
-            if (cur.color != prev.color)
+            char buf[100];
+
+            AnsiDeltaString() {buf[0] = '\0';}
+
+            AnsiDeltaString(const TextStyle &&cur, const TextStyle &next)
             {
-                if (cur.color >= TextColor::extended && cur.color < TextColor::extended_end)
-                    ptr += std::sprintf(ptr, "38;5;%d;", int(cur.color) - int(TextColor::extended));
-                else
-                    ptr += std::sprintf(ptr, "%d;", int(cur.color));
+                if (!Config().text_color.value())
+                {
+                    buf[0] = '\0';
+                    return;
+                }
+
+                // Should be large enough.
+                std::strcpy(buf, "\033[");
+                char *ptr = buf + 2;
+                if (next.color != cur.color)
+                {
+                    if (next.color >= TextColor::extended && next.color < TextColor::extended_end)
+                        ptr += std::sprintf(ptr, "38;5;%d;", int(next.color) - int(TextColor::extended));
+                    else
+                        ptr += std::sprintf(ptr, "%d;", int(next.color));
+                }
+                if (next.bg_color != cur.bg_color)
+                {
+                    if (next.bg_color >= TextColor::extended && next.bg_color < TextColor::extended_end)
+                        ptr += std::sprintf(ptr, "48;5;%d;", int(next.bg_color) - int(TextColor::extended));
+                    else
+                        ptr += std::sprintf(ptr, "%d;", int(next.bg_color) + 10);
+                }
+                if (next.bold != cur.bold)
+                    ptr += std::sprintf(ptr, "%s;", next.bold ? "1" : "22"); // Bold text is a little weird.
+                if (next.italic != cur.italic)
+                    ptr += std::sprintf(ptr, "%s3;", next.italic ? "" : "2");
+                if (next.underline != cur.underline)
+                    ptr += std::sprintf(ptr, "%s4;", next.underline ? "" : "2");
+
+                if (ptr != buf + 2)
+                {
+                    // `sprintf` automatically null-terminates the buffer.
+                    ptr[-1] = 'm';
+                    return;
+                }
+
+                // Nothing useful in the buffer.
+                buf[0] = '\0';
             }
-            if (cur.bg_color != prev.bg_color)
+
+            // This overload additionally performs `cur = next`.
+            AnsiDeltaString(TextStyle &cur, const TextStyle &next)
+                : AnsiDeltaString(std::move(cur), next)
             {
-                if (cur.bg_color >= TextColor::extended && cur.bg_color < TextColor::extended_end)
-                    ptr += std::sprintf(ptr, "48;5;%d;", int(cur.bg_color) - int(TextColor::extended));
-                else
-                    ptr += std::sprintf(ptr, "%d;", int(cur.bg_color) + 10);
+                cur = next;
             }
-            if (cur.bold != prev.bold)
-                ptr += std::sprintf(ptr, "%s;", cur.bold ? "1" : "22"); // Bold text is a little weird.
-            if (cur.italic != prev.italic)
-                ptr += std::sprintf(ptr, "%s3;", cur.italic ? "" : "2");
-            if (cur.underline != prev.underline)
-                ptr += std::sprintf(ptr, "%s4;", cur.underline ? "" : "2");
-
-            if (ptr != buffer + 2)
-            {
-                // `sprintf` automatically null-terminates the buffer.
-                ptr[-1] = 'm';
-                std::forward<F>(func)(std::string_view(buffer, ptr));
-            }
-
-            return cur;
-        }
-
-        // Prints an ANSI sequence to set `style`, assuming `prev_style` is currently set.
-        // Returns `cur`.
-        inline const TextStyle &PrintAnsiDeltaString(const TextStyle &prev_style, const TextStyle &style)
-        {
-            return AnsiDeltaString(prev_style, style, [&](std::string_view str)
-            {
-                std::fprintf(Config().output_stream, "%s", str.data());
-            });
-        }
-
-        // Prints an ANSI sequence to set `style`.
-        // Returns `cur`.
-        inline const TextStyle &PrintAnsiForceString(const TextStyle &style)
-        {
-            return AnsiDeltaString({}, style, [&](std::string_view str)
-            {
-                std::fprintf(Config().output_stream, "%s%s", AnsiResetString().data(), str.data());
-            });
-        }
+        };
 
 
         enum class HardErrorKind {internal, user};
 
         // Aborts the application with an internal error.
         [[noreturn]] CFG_TA_API void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal);
+
+        // Prints a "note" message.
+        CFG_TA_API void PrintNote(std::string_view message);
 
         // Given an exception, tries to get an error message from it.
         [[nodiscard]] CFG_TA_API std::string ExceptionToMessage(const std::exception_ptr &e);
@@ -957,12 +967,8 @@ namespace ta_test
                             if (line.text[i] == ' ')
                                 continue;
 
-                            AnsiDeltaString(cur_style, line.info[i].style, [&](std::string_view escape)
-                            {
-                                FlushSegment(i);
-                                func(escape);
-                                cur_style = line.info[i].style;
-                            });
+                            FlushSegment(i);
+                            func(std::string_view(detail::AnsiDeltaString(cur_style, line.info[i].style).buf));
                         }
                     }
 
