@@ -842,7 +842,7 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
     state.name_prefixes_to_order.try_emplace(name, state.name_prefixes_to_order.size());
 }
 
-void ta_test::RunTests()
+int ta_test::RunTests()
 {
     const auto &state = detail::State();
 
@@ -874,6 +874,7 @@ void ta_test::RunTests()
     const int test_counter_width = std::snprintf(nullptr, 0, "%zu", ordered_tests.size());
 
     std::size_t test_counter = 0;
+    std::size_t failed_test_counter = 0;
 
     for (std::size_t test_index : ordered_tests)
     {
@@ -933,10 +934,11 @@ void ta_test::RunTests()
                             std::fprintf(Config().output_stream, "%s", Config().vis.starting_test_indent.c_str());
                     }
                     // Print the test name, and reset the color.
-                    std::fprintf(Config().output_stream, "%s%s%.*s%s\n",
-                        detail::AnsiDeltaString(cur_style, Config().style.test_started).buf,
+                    std::fprintf(Config().output_stream, "%s%s%.*s%s%s\n",
+                        detail::AnsiDeltaString(cur_style, new_it == test_name.end() ? Config().style.test_started : Config().style.test_started_group).buf,
                         Config().vis.starting_test_prefix.c_str(),
                         int(segment.size()), segment.data(),
+                        new_it == test_name.end() ? "" : "/",
                         detail::AnsiResetString().data()
                     );
 
@@ -952,6 +954,14 @@ void ta_test::RunTests()
             }
         }
 
+        struct StateGuard
+        {
+            detail::RunningTestState state;
+            StateGuard() {detail::ThreadState().running_state = &state;}
+            ~StateGuard() {detail::ThreadState().running_state = nullptr;}
+        };
+        StateGuard guard;
+
         try
         {
             test->Run();
@@ -959,13 +969,12 @@ void ta_test::RunTests()
         catch (InterruptTestException) {}
         catch (...)
         {
+            guard.state.FailTest();
             std::string message = detail::ExceptionToMessage(std::current_exception());
-
             TextStyle cur_style;
-
             detail::AnsiDeltaString style_a(cur_style, Config().style.test_failed);
             detail::AnsiDeltaString style_b(cur_style, Config().style.test_failed_exception_message);
-            fprintf(Config().output_stream, "%s%s%s%s%s\n\n%s",
+            std::fprintf(Config().output_stream, "%s%s%s%s%s\n\n%s",
                 detail::AnsiResetString().data(),
                 style_a.buf,
                 Config().vis.test_failed_exception.c_str(),
@@ -975,6 +984,50 @@ void ta_test::RunTests()
             );
         }
 
+        if (guard.state.TestFailed())
+            failed_test_counter++;
+
         test_counter++;
     }
+
+    { // Print results.
+        // Reset color.
+        std::fprintf(Config().output_stream, "%s\n", detail::AnsiResetString().data());
+
+        if (test_counter == 0)
+        {
+            // No tests to run.
+            std::fprintf(Config().output_stream, "%sNO TESTS TO RUN%s\n",
+                detail::AnsiDeltaString({}, Config().style.result_no_tests).buf,
+                detail::AnsiResetString().data()
+            );
+        }
+        else
+        {
+            std::size_t num_passed = test_counter - failed_test_counter;
+            if (num_passed > 0)
+            {
+                std::fprintf(Config().output_stream, "%s%s%zu TEST%s PASSED%s\n",
+                    detail::AnsiDeltaString({}, failed_test_counter == 0 ? Config().style.result_all_passed : Config().style.result_num_passed).buf,
+                    failed_test_counter == 0 && test_counter > 1 ? "ALL " : "",
+                    num_passed,
+                    num_passed == 1 ? "" : "S",
+                    detail::AnsiResetString().data()
+                );
+            }
+
+            if (failed_test_counter > 0)
+            {
+                std::fprintf(Config().output_stream, "%s%s%zu TEST%s FAILED%s\n",
+                    detail::AnsiDeltaString({}, Config().style.result_num_failed).buf,
+                    num_passed == 0 && failed_test_counter > 1 ? "ALL " : "",
+                    failed_test_counter,
+                    failed_test_counter == 1 ? "" : "S",
+                    detail::AnsiResetString().data()
+                );
+            }
+        }
+    }
+
+    return failed_test_counter == 0;
 }

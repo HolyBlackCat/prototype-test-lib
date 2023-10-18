@@ -50,7 +50,7 @@ int main()
 {
     ta_test::Config().output_stream = stdout;
     ta_test::Config().text_color = true;
-    ta_test::RunTests();
+    (void)ta_test::RunTests();
 
     // int a = 1, b = 2, c = 3;
     // TA_CHECK($(sum($(a), $(b), $(c))) == 7);
@@ -90,6 +90,9 @@ int main()
     // }
 }
 
+// Make it so that `$(...)` is impossible to use outside of ASSERT.
+// Make ASSERTs impossible to use outside of tests.
+
 // When a test prints something to the log, repeat all the group stack for the next test?
 
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
@@ -104,6 +107,8 @@ int main()
 // Test without RTTI. What about exception type names?
 
 // Opt-in to make asserts from any thread to propagate to the main thread.
+
+// Entirely singlethreaded mode.
 
 
 /* Pending tests:

@@ -127,10 +127,18 @@
 #endif
 #endif
 
-#define TA_CHECK(...) DETAIL_TA_CHECK(#__VA_ARGS__, __VA_ARGS__)
-#define DETAIL_TA_CHECK(x, ...) \
+// Check condition, immediately fail the test if false.
+#define TA_CHECK(...) DETAIL_TA_CHECK(throw ::ta_test::InterruptTestException(::ta_test::detail::ConstructInterruptTestException{});, #__VA_ARGS__, __VA_ARGS__)
+// Check condition, later fail the test if false.
+#define TA_SOFT_CHECK(...) DETAIL_TA_CHECK(, #__VA_ARGS__, __VA_ARGS__)
+
+#define DETAIL_TA_CHECK(on_fail_, str_, ...) \
+    /* Using `_ta_test_name_tag` to force this to be called only in tests. */\
     /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (::ta_test::detail::AssertWrapper<x, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {if (::ta_test::Config().is_debugger_attached()) {CFG_TA_BREAKPOINT();} throw ::ta_test::InterruptTestException(::ta_test::detail::ConstructInterruptTestException{});}
+    if (_ta_test_name_tag, ::ta_test::detail::AssertWrapper<str_, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {\
+        if (::ta_test::Config().is_debugger_attached()) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
+        on_fail_ \
+    }
 
 // The expansion is enclosed in `(...)`, which lets you use it e.g. as a sole function argument: `func $(var)`.
 #define TA_ARG(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
@@ -148,7 +156,9 @@
     inline void _ta_test_func(::ta_test::detail::ConstStringTag<#name>); \
     constexpr auto _ta_registration_helper(::ta_test::detail::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
         const std::nullptr_t *, &::ta_test::detail::register_test_helper<\
-            ::ta_test::detail::SpecificTest<static_cast<void(*)(::ta_test::detail::ConstStringTag<#name>)>(_ta_test_func), #name, __FILE__, __LINE__>\
+            ::ta_test::detail::SpecificTest<static_cast<void(*)(\
+                ::ta_test::detail::ConstStringTag<#name>\
+            )>(_ta_test_func), #name, __FILE__, __LINE__>\
         >\
     >{})) {} \
     inline void _ta_test_func(::ta_test::detail::ConstStringTag<#name>)
@@ -267,8 +277,23 @@ namespace ta_test
         // Text colors and styles.
         struct Style
         {
+            // --- RESULTS ---
+
+            // No tests to run.
+            TextStyle result_no_tests = {.color = TextColor::light_blue, .bold = true};
+            // All tests passed.
+            TextStyle result_all_passed = {.color = TextColor::light_green, .bold = true};
+            // Some tests passed, this part shows how many have passed.
+            TextStyle result_num_passed = {.color = TextColor::light_green};
+            // Some tests passed, this part shows how many have failed.
+            TextStyle result_num_failed = {.color = TextColor::light_red, .bold = true};
+
+            // --- RUNNING TESTS ---
+
             // The message when a test starts.
             TextStyle test_started = {.color = TextColor::light_green, .bold = true};
+            // The message when a test group starts.
+            TextStyle test_started_group = {.color = TextColor::dark_green};
             // The indentation guides for nested test starts.
             TextStyle test_started_indentation = {.color = TextColorGrayscale24(8), .bold = true};
             // The test index.
@@ -277,6 +302,16 @@ namespace ta_test
             TextStyle test_started_total_count = {.color = TextColor::dark_green};
             // The line that separates the test counter from the test names/groups.
             TextStyle test_started_gutter_border = {.color = TextColorGrayscale24(10), .bold = true};
+
+            // --- TEST FAILED ---
+
+            // The main error message.
+            TextStyle test_failed = {.color = TextColor::light_red, .bold = true};
+            // If the test failed with an exception, this is the color of the exception string.
+            TextStyle test_failed_exception_message = {.color = TextColor::dark_magenta};
+
+
+
 
             // The argument colors. They are cycled in this order.
             std::vector<TextStyle> arguments = {
@@ -299,8 +334,7 @@ namespace ta_test
 
             // Error messages.
             TextStyle assertion_failed = {.color = TextColor::light_red, .bold = true};
-            TextStyle test_failed = {.color = TextColor::light_red, .bold = true};
-            TextStyle test_failed_exception_message = {.color = TextColor::dark_magenta};
+
 
             // Internal error messages.
             TextStyle internal_error = {.color = TextColor::light_white, .bg_color = TextColor::dark_red, .bold = true};
@@ -313,6 +347,8 @@ namespace ta_test
             TextStyle stack_path = {.color = TextColor::light_black};
             // The color of `filename_prefix`.
             TextStyle stack_path_prefix = {.color = TextColor::light_black, .bold = true};
+
+            // --- EXPRESSIONS IN ASSERTS ---
 
             // When printing an assertion macro failure, the macro name itself (and parentheses) will use this style.
             TextStyle expr_assertion_macro = {.color = TextColor::light_red, .bold = true};
@@ -356,12 +392,16 @@ namespace ta_test
         {
             // Using narrow strings for strings printed as text, and u32 strings for ASCII graphics things.
 
+            // --- RUNNING TESTS ---
+
             // This goes right before each test/group name.
             std::string starting_test_prefix = "\xE2\x97\x8F "; // BLACK CIRCLE, then a space.
             // The is used for indenting test names/groups.
             std::string starting_test_indent = "\xC2\xB7   "; // MIDDLE DOT, then a space.
             // This is printed after the test counter and before the test names/groups (and before their indentation guides).
             std::string starting_test_counter_separator = " \xE2\x94\x82  "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
+
+
 
             // A test failed because of an exception.
             std::string test_failed_exception = "TEST FAILED WITH EXCEPTION:\n    ";
@@ -1281,11 +1321,24 @@ namespace ta_test
             virtual void PrintFailure(std::size_t depth) const = 0;
         };
 
+        // The state of the current test.
+        class RunningTestState
+        {
+            bool failed = false;
+
+          public:
+            void FailTest() {failed = true;}
+            [[nodiscard]] bool TestFailed() const {return failed;}
+        };
+
         // The global per-thread state.
         struct GlobalThreadState
         {
             // The stack of the currently running assertions.
             std::vector<BasicAssert *> assert_stack;
+
+            // The state of the test that's currently running.
+            RunningTestState *running_state = nullptr;
 
             // Finds an argument in the currently running assertions.
             StoredArg &GetArgumentData(const ArgLocation &loc)
@@ -1646,7 +1699,9 @@ namespace ta_test
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
     }
 
-    CFG_TA_API void RunTests();
+    // Runs all tests.
+    // Returns the exit code to return from `main()`, zero on success.
+    [[nodiscard]] CFG_TA_API int RunTests();
 }
 
 // Manually support quoting strings if the formatting library can't do that.
