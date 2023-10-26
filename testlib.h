@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <compare>
+#include <concepts>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -11,8 +12,10 @@
 #include <initializer_list>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <string>
 #include <type_traits>
@@ -127,6 +130,13 @@
 #endif
 #endif
 
+// Whether we should try to detect the debugger and break on failed assertions, on platforms where we know how to do so.
+// NOTE: Only touch this if including the debugger detection code in the binary is somehow problematic.
+// If you just want to temporarily disable automatic breakpoints, configure `modules::DebuggerDetector` in `ta_test::Runner` instead.
+#ifndef CFG_TA_DETECT_DEBUGGER
+#define CFG_TA_DETECT_DEBUGGER 1
+#endif
+
 // Check condition, immediately fail the test if false.
 #define TA_CHECK(...) DETAIL_TA_CHECK(throw ::ta_test::InterruptTestException(::ta_test::detail::ConstructInterruptTestException{});, #__VA_ARGS__, __VA_ARGS__)
 // Check condition, later fail the test if false.
@@ -135,8 +145,8 @@
 #define DETAIL_TA_CHECK(on_fail_, str_, ...) \
     /* Using `_ta_test_name_tag` to force this to be called only in tests. */\
     /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (_ta_test_name_tag, ::ta_test::detail::AssertWrapper<str_, #__VA_ARGS__, __FILE__, __LINE__>{}((__VA_ARGS__) ? true : false)) {} else {\
-        if (::ta_test::Config().is_debugger_attached()) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
+    if (::ta_test::detail::AssertWrapper<str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion((__VA_ARGS__) ? true : false)) {} else {\
+        if (_ta_assertion.should_break) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
         on_fail_ \
     }
 
@@ -153,39 +163,305 @@
 #define TA_TEST(name) DETAIL_TA_TEST(name)
 
 #define DETAIL_TA_TEST(name) \
-    inline void _ta_test_func(::ta_test::detail::ConstStringTag<#name>); \
-    constexpr auto _ta_registration_helper(::ta_test::detail::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
+    inline void _ta_test_func(::ta_test::ConstStringTag<#name>); \
+    constexpr auto _ta_registration_helper(::ta_test::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
         const std::nullptr_t *, &::ta_test::detail::register_test_helper<\
             ::ta_test::detail::SpecificTest<static_cast<void(*)(\
-                ::ta_test::detail::ConstStringTag<#name>\
+                ::ta_test::ConstStringTag<#name>\
             )>(_ta_test_func), #name, __FILE__, __LINE__>\
         >\
     >{})) {} \
-    inline void _ta_test_func(::ta_test::detail::ConstStringTag<#name>)
+    inline void _ta_test_func(::ta_test::ConstStringTag<#name>)
 
 namespace ta_test
 {
-    // String conversions.
+    struct Runner;
 
-    template <typename T, typename = void>
-    struct ToString
+    // The common base of all modules.
+    struct BasicModule
     {
-        std::string operator()(const T &value) const
+        virtual ~BasicModule() = default;
+
+        BasicModule() = default;
+        BasicModule(const BasicModule &) = default;
+        BasicModule(BasicModule &&) = default;
+        BasicModule &operator=(const BasicModule &) = default;
+        BasicModule &operator=(BasicModule &&) = default;
+
+        // A simple source location.
+        struct SourceLoc
         {
-            #if CFG_TA_FORMAT_SUPPORTS_QUOTED
-            if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
+            std::string_view file;
+            int line = 0;
+            friend auto operator<=>(const SourceLoc &, const SourceLoc &) = default;
+        };
+        // A source location augumented with the value of `__COUNTER__`.
+        struct SourceLocCounter
+        {
+            std::string_view file;
+            int line = 0;
+            int counter = 0;
+            friend auto operator<=>(const SourceLocCounter &, const SourceLocCounter &) = default;
+        };
+
+        struct BasicTestInfo
+        {
+          protected:
+            ~BasicTestInfo() = default;
+
+          public:
+            // The name passed to the test macro.
+            [[nodiscard]] virtual std::string_view Name() const = 0;
+
+            // Where the test was declared.
+            [[nodiscard]] virtual SourceLoc Location() const = 0;
+        };
+        // Whether the test should run.
+        // This is called for every module, with `enable` initially set to true. If it ends up false, the test is skipped.
+        virtual void OnFilterTest(const BasicTestInfo &test, bool &enable) {(void)test; (void)enable;}
+
+        struct RunTestsInfo
+        {
+            Runner *runner = nullptr;
+
+            std::size_t num_tests = 0;
+        };
+        struct RunTestsResults : RunTestsInfo
+        {
+            std::size_t num_failed_tests = 0;
+        };
+        // This is called first, before any tests run.
+        virtual void OnPreRunTests(const RunTestsInfo &data) {(void)data;}
+        // This is called after all tests run.
+        virtual void OnPostRunTests(const RunTestsResults &data) {(void)data;}
+
+        struct SingleTestInfo
+        {
+            const RunTestsInfo *all_tests = nullptr;
+            const BasicTestInfo *test = nullptr;
+        };
+        struct SingleTestResults : SingleTestInfo
+        {
+            bool failed = false;
+        };
+        // This is called before every single test runs.
+        virtual void OnPreRunSingleTest(const SingleTestInfo &data) {(void)data;}
+        // This is called after every single test runs.
+        virtual void OnPostRunSingleTest(const SingleTestResults &data) {(void)data;}
+
+        struct BasicAssertionInfo
+        {
+          protected:
+            ~BasicAssertionInfo() = default;
+
+          public:
+            // You can set this to true to trigger a breakpoint.
+            mutable bool should_break = false;
+
+            // The enclosing assertion, if any.
+            const BasicAssertionInfo *enclosing_assertion = nullptr;
+
+            // Where the assertion is located in the source.
+            [[nodiscard]] virtual const SourceLoc &SourceLocation() const = 0;
+
+            // How many assertions are currently running.
+            [[nodiscard]] int AssertionStackDepth() const
             {
-                return CFG_TA_FORMAT("{:?}", value);
+                int ret = 0;
+                for (auto cur = this; cur; cur = cur->enclosing_assertion)
+                    ret++;
+                return ret;
             }
-            else
-            #endif
+
+            // The exact code passed to the assertion macro, as a string. Before macro expansion.
+            [[nodiscard]] virtual std::string_view Expr() const = 0;
+
+            // How many `$(...)` arguments are in this assertion.
+            [[nodiscard]] std::size_t NumArgs() const {return ArgsInfo().size();}
+
+            // Misc information about an argument.
+            struct ArgInfo
             {
-                return CFG_TA_FORMAT("{}", value);
-            }
-        }
+                // The value of `__COUNTER__`.
+                int counter = 0;
+                // Parentheses nesting depth.
+                std::size_t depth = 0;
+
+                // Where this argument is located in the expression string.
+                std::size_t expr_offset = 0;
+                std::size_t expr_size = 0;
+                // This is where the argument macro name is located in the expression string.
+                std::size_t ident_offset = 0;
+                std::size_t ident_size = 0;
+
+                // Whether this argument has a complex enough spelling to require drawing a horizontal bracket.
+                // This should be automatically true for all arguments with nested arguments.
+                bool need_bracket = false;
+            };
+
+            // A stored argument representation as a string.
+            struct StoredArg
+            {
+                enum class State
+                {
+                    not_started, // No value yet.
+                    in_progress, // Started calculating, but no value yet.
+                    done, // Has value.
+                };
+                State state = State::not_started;
+
+                std::string value;
+            };
+
+            // All those functions return spans with size `NumArgs()`.
+            // Information about each argument.
+            [[nodiscard]] virtual std::span<const ArgInfo> ArgsInfo() const = 0;
+            // Indices of the arguments (0..N-1), sorted in the preferred draw order.
+            [[nodiscard]] virtual std::span<const std::size_t> ArgsInDrawOrder() const = 0;
+            // The current values of the arguments.
+            [[nodiscard]] virtual std::span<const StoredArg> StoredArgs() const = 0;
+
+            // Gets the `StoredArg` from its location in the source. Returns null on failure.
+            // Mostly for internal use.
+            [[nodiscard]] virtual const StoredArg *FindStoredArgumentByLocation(const SourceLocCounter &loc) const = 0;
+        };
+        virtual void OnAssertionFailed(const BasicAssertionInfo &data) {(void)data;}
+
+        // An exception falls out of a test. This is called right before the test fails.
+        virtual void OnUncaughtException(const std::exception_ptr &e) {(void)e;}
+
+        struct ExceptionInfo
+        {
+            // This is usually obtained by calling `text::Demangler{}(typeid(e).name())`.
+            std::string type_name;
+
+            // This is usually obtained from `e.what()`.
+            std::string message;
+        };
+        struct ExceptionInfoWithNested : ExceptionInfo
+        {
+            // The nested exception, if any.
+            std::exception_ptr nested_exception;
+        };
+        // This is called when an exception needs to be converted to a string.
+        // Return the information on your custom exception type, if they don't inherit from `std::exception`.
+        // Do nothing (or throw) to let some other module handle this.
+        [[nodiscard]] virtual std::optional<ExceptionInfoWithNested> OnExplainException(const std::exception_ptr &e) const {(void)e; return {};}
     };
 
-    // Styling text.
+    // A pointer to a class derived from `BasicModule`.
+    class ModulePtr
+    {
+        std::unique_ptr<BasicModule> ptr;
+
+        template <std::derived_from<BasicModule> T, typename ...P>
+        requires std::constructible_from<T, P &&...>
+        friend ModulePtr MakeModule(P &&... params);
+
+      public:
+        constexpr ModulePtr() {}
+        constexpr ModulePtr(std::nullptr_t) {}
+
+        [[nodiscard]] explicit operator bool() const {return bool(ptr);}
+
+        [[nodiscard]] BasicModule *get() const {return ptr.get();}
+        [[nodiscard]] BasicModule &operator*() const {return *ptr;}
+        [[nodiscard]] BasicModule *operator->() const {return ptr.get();}
+    };
+    // Allocates a new module as a `ModulePtr`.
+    template <std::derived_from<BasicModule> T, typename ...P>
+    requires std::constructible_from<T, P &&...>
+    [[nodiscard]] ModulePtr MakeModule(P &&... params)
+    {
+        ModulePtr ret;
+        ret.ptr = std::make_unique<T>(std::forward<P>(params)...);
+        return ret;
+    }
+
+    enum class HardErrorKind {internal, user};
+    // Aborts the application with an error.
+    [[noreturn]] CFG_TA_API void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal);
+
+    // Don't touch this.
+    namespace detail
+    {
+        // The global per-thread state.
+        struct GlobalThreadState
+        {
+            BasicModule::SingleTestResults *current_test = nullptr;
+            BasicModule::BasicAssertionInfo *current_assertion = nullptr;
+
+            // Finds an argument in the currently running assertions.
+            // Results in a hard error on failure.
+            BasicModule::BasicAssertionInfo::StoredArg &FindStoredArgument(const BasicModule::SourceLocCounter &loc)
+            {
+                const BasicModule::BasicAssertionInfo *cur = current_assertion;
+                while (cur)
+                {
+                    if (auto ret = cur->FindStoredArgumentByLocation(loc))
+                        return const_cast<BasicModule::BasicAssertionInfo::StoredArg &>(*ret);
+                    cur = cur->enclosing_assertion;
+                }
+
+                HardError("This `$(...)` isn't enclosed in any assertion macro.", HardErrorKind::user);
+            }
+        };
+        [[nodiscard]] CFG_TA_API GlobalThreadState &ThreadState();
+
+        // A tag to stop users from constructing our exception types.
+        struct ConstructInterruptTestException
+        {
+            explicit ConstructInterruptTestException() = default;
+        };
+    }
+
+    // We throw this to abort a test. Don't throw this manually.
+    // You can catch and rethrow this before a `catch (...)` to still be able to abort tests inside one.
+    struct InterruptTestException
+    {
+        // For internal use.
+        constexpr InterruptTestException(detail::ConstructInterruptTestException) {}
+    };
+
+    // A compile-time string.
+    template <std::size_t N>
+    struct ConstString
+    {
+        char str[N]{};
+
+        static constexpr std::size_t size = N - 1;
+
+        consteval ConstString() {}
+        consteval ConstString(const char (&new_str)[N])
+        {
+            if (new_str[N-1] != '\0')
+                HardError("The input string must be null-terminated.");
+            std::copy_n(new_str, size, str);
+        }
+
+        [[nodiscard]] constexpr std::string_view view() const
+        {
+            return {str, str + size};
+        }
+    };
+    template <ConstString X>
+    struct ConstStringTag
+    {
+        static constexpr auto value = X;
+    };
+
+
+    // --- PLATFORM INFORMATION ---
+
+    namespace platform
+    {
+        // Whether the debugger is currently attached.
+        // `false` if unknown or disabled with `CFG_TA_DETECT_DEBUGGER`
+        CFG_TA_API bool IsDebuggerAttached();
+    }
+
+
+    // --- PRINTING AND STRINGS ---
 
     // Text color.
     enum class TextColor
@@ -245,218 +521,85 @@ namespace ta_test
         friend bool operator==(const TextStyle &, const TextStyle &) = default;
     };
 
-    // Configuration.
-
-    // C++ keyword classification for highlighting.
-    enum class KeywordKind {generic, value, op};
-
-    struct GlobalConfig
+    // Configuration for printing text.
+    struct Terminal
     {
-        // The output stream for all our messages.
-        // If null, starting tests initializes it to `stdout`.
-        FILE *output_stream = nullptr;
+        bool color = true;
 
-        // Use ANSI sequences to change the text style.
-        // If empty, initializing the tests will try to guess it.
-        std::optional<bool> text_color;
+        // Printing this string resets the text styles. It's always null-terminated.
+        [[nodiscard]] CFG_TA_API std::string_view AnsiResetString() const;
 
-        // See below. Currently has meaningful implementations only on Windows and Linux, always returns false elsewhere.
-        CFG_TA_API static bool DefaultIsDebuggerAttached();
-        // Whether we currently have a debugger attached.
-        // If null, we call `DefaultIsDebuggerAttached()` once during init, and set this to unconditionally return true or false.
-        std::function<bool()> is_debugger_attached;
+        // Should be large enough.
+        using AnsiDeltaStringBuffer = std::array<char, 100>;
 
-        // See below.
-        CFG_TA_API static std::optional<std::string> DefaultExceptionToMessage(const std::exception_ptr &e);
-        // A list of functions to convert exceptions to strings.
-        // The first function that returns non-null is used. Throwing from a function is same as returning null.
-        std::vector<std::function<std::optional<std::string>(const std::exception_ptr &e)>> exception_to_message = {DefaultExceptionToMessage};
+        // Produces a string to switch between text styles, from `prev` to `cur`.
+        // If the styles are the same, does nothing.
+        [[nodiscard]] CFG_TA_API AnsiDeltaStringBuffer AnsiDeltaString(const TextStyle &&cur, const TextStyle &next) const;
 
-        // --- Visual options ---
-
-        // Text colors and styles.
-        struct Style
+        // This overload additionally performs `cur = next`.
+        [[nodiscard]] AnsiDeltaStringBuffer AnsiDeltaString(TextStyle &cur, const TextStyle &next) const
         {
-            // --- RESULTS ---
+            AnsiDeltaStringBuffer ret = AnsiDeltaString(std::move(cur), next);
+            cur = next;
+            return ret;
+        }
+    };
 
-            // No tests to run.
-            TextStyle result_no_tests = {.color = TextColor::light_blue, .bold = true};
-            // All tests passed.
-            TextStyle result_all_passed = {.color = TextColor::light_green, .bold = true};
-            // Some tests passed, this part shows how many have passed.
-            TextStyle result_num_passed = {.color = TextColor::light_green};
-            // Some tests passed, this part shows how many have failed.
-            TextStyle result_num_failed = {.color = TextColor::light_red, .bold = true};
+    struct CommonStyles
+    {
+        TextStyle error = {.color = TextColor::light_red, .bold = true};
+        TextStyle note = {.color = TextColor::light_blue, .bold = true};
+    };
 
-            // --- RUNNING TESTS ---
+    // Common characters we use to print stuff.
+    struct CommonChars
+    {
+        std::string note_prefix = "NOTE: ";
 
-            // The message when a test starts.
-            TextStyle test_started = {.color = TextColor::light_green, .bold = true};
-            // The message when a test group starts.
-            TextStyle test_started_group = {.color = TextColor::dark_green};
-            // The indentation guides for nested test starts.
-            TextStyle test_started_indentation = {.color = TextColorGrayscale24(8), .bold = true};
-            // The test index.
-            TextStyle test_started_index = {.color = TextColor::light_green, .bold = true};
-            // The total test count printed after each test index.
-            TextStyle test_started_total_count = {.color = TextColor::dark_green};
-            // The line that separates the test counter from the test names/groups.
-            TextStyle test_started_gutter_border = {.color = TextColorGrayscale24(10), .bold = true};
+        // When printing a path, separates it from the line number.
+        std::string filename_linenumber_separator;
+        // When printing a path with a line number, this comes after the line number.
+        std::string filename_linenumber_suffix;
 
-            // --- TEST FAILED ---
+        // Vertical bars, either standalone or in brackets.
+        char32_t bar{};
+        // Bottom brackets.
+        char32_t bracket_bottom{};
+        char32_t bracket_corner_bottom_left{};
+        char32_t bracket_corner_bottom_right{};
+        char32_t bracket_bottom_tail{};
+        // Top brackets.
+        char32_t bracket_top{};
+        char32_t bracket_corner_top_left{};
+        char32_t bracket_corner_top_right{};
 
-            // The main error message.
-            TextStyle test_failed = {.color = TextColor::light_red, .bold = true};
-            // If the test failed with an exception, this is the color of the exception string.
-            TextStyle test_failed_exception_message = {.color = TextColor::dark_magenta};
-
-
-
-
-            // The argument colors. They are cycled in this order.
-            std::vector<TextStyle> arguments = {
-                {.color = TextColorRgb6(1,4,1), .bold = true},
-                {.color = TextColorRgb6(1,3,5), .bold = true},
-                {.color = TextColorRgb6(1,0,5), .bold = true},
-                {.color = TextColorRgb6(5,1,0), .bold = true},
-                {.color = TextColorRgb6(5,4,0), .bold = true},
-                {.color = TextColorRgb6(0,4,3), .bold = true},
-                {.color = TextColorRgb6(0,5,5), .bold = true},
-                {.color = TextColorRgb6(3,1,5), .bold = true},
-                {.color = TextColorRgb6(4,0,2), .bold = true},
-                {.color = TextColorRgb6(5,2,1), .bold = true},
-                {.color = TextColorRgb6(4,5,3), .bold = true},
-            };
-            // This is used for brackets above expressions.
-            TextStyle overline = {.color = TextColor::light_magenta, .bold = true};
-            // This is used to dim the unwanted parts of expressions.
-            TextColor color_dim = TextColor::light_black;
-
-            // Error messages.
-            TextStyle assertion_failed = {.color = TextColor::light_red, .bold = true};
-
-
-            // Internal error messages.
-            TextStyle internal_error = {.color = TextColor::light_white, .bg_color = TextColor::dark_red, .bold = true};
-            // "Note" messages.
-            TextStyle note = {.color = TextColor::light_blue, .bold = true};
-
-            // Error messages in the stack, after the first one.
-            TextStyle stack_error = {.color = TextColor::light_magenta, .bold = true};
-            // Paths in the stack traces.
-            TextStyle stack_path = {.color = TextColor::light_black};
-            // The color of `filename_prefix`.
-            TextStyle stack_path_prefix = {.color = TextColor::light_black, .bold = true};
-
-            // --- EXPRESSIONS IN ASSERTS ---
-
-            // When printing an assertion macro failure, the macro name itself (and parentheses) will use this style.
-            TextStyle expr_assertion_macro = {.color = TextColor::light_red, .bold = true};
-            // A piece of an expression that doesn't fit into the categories below.
-            TextStyle expr_normal;
-            // Punctuation.
-            TextStyle expr_punct = {.bold = true};
-            // Keywords.
-            TextStyle expr_keyword_generic = {.color = TextColor::light_blue, .bold = true};
-            TextStyle expr_keyword_value = {.color = TextColor::dark_magenta, .bold = true};
-            TextStyle expr_keyword_op = {.color = TextColor::light_white, .bold = true};
-            // Identifiers written in all caps, probably macros.
-            TextStyle expr_all_caps = {.color = TextColor::dark_red};
-            // Numbers.
-            TextStyle expr_number = {.color = TextColor::dark_green, .bold = true};
-            // User-defined literal on a number, starting with `_`. For my sanity, literals not starting with `_` are colored like the rest of the number.
-            TextStyle expr_number_suffix = {.color = TextColor::dark_green};
-            // A string literal; everything between the quotes inclusive.
-            TextStyle expr_string = {.color = TextColor::dark_cyan, .bold = true};
-            // Stuff before the opening `"`.
-            TextStyle expr_string_prefix = {.color = TextColor::dark_cyan};
-            // Stuff after the closing `"`.
-            TextStyle expr_string_suffix = {.color = TextColor::dark_cyan};
-            // A character literal.
-            TextStyle expr_char = {.color = TextColor::dark_yellow, .bold = true};
-            TextStyle expr_char_prefix = {.color = TextColor::dark_yellow};
-            TextStyle expr_char_suffix = {.color = TextColor::dark_yellow};
-            // A raw string literal; everything between the parentheses exclusive.
-            TextStyle expr_raw_string = {.color = TextColor::light_blue, .bold = true};
-            // Stuff before the opening `"`.
-            TextStyle expr_raw_string_prefix = {.color = TextColor::dark_magenta};
-            // Stuff after the closing `"`.
-            TextStyle expr_raw_string_suffix = {.color = TextColor::dark_magenta};
-            // Quotes, parentheses, and everything between them.
-            TextStyle expr_raw_string_delimiters = {.color = TextColor::dark_magenta, .bold = true};
-        };
-        Style style;
-
-        // Printed characters and strings.
-        struct Visual
+        CommonChars()
         {
-            // Using narrow strings for strings printed as text, and u32 strings for ASCII graphics things.
+            EnableUnicode(true);
+            EnableMsvcStylePaths(
+                #if CFG_TA_MSVC_STYLE_ERRORS
+                true
+                #else
+                false
+                #endif
+            );
+        }
 
-            // --- RUNNING TESTS ---
-
-            // This goes right before each test/group name.
-            std::string starting_test_prefix = "\xE2\x97\x8F "; // BLACK CIRCLE, then a space.
-            // The is used for indenting test names/groups.
-            std::string starting_test_indent = "\xC2\xB7   "; // MIDDLE DOT, then a space.
-            // This is printed after the test counter and before the test names/groups (and before their indentation guides).
-            std::string starting_test_counter_separator = " \xE2\x94\x82  "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
-
-
-
-            // A test failed because of an exception.
-            std::string test_failed_exception = "TEST FAILED WITH EXCEPTION:\n    ";
-            // An assertion failed.
-            std::u32string assertion_failed = U"ASSERTION FAILED:";
-            // Something happened while evaluating an assertion.
-            std::u32string while_checking_assertion = U"WHILE CHECKING ASSERTION:";
-
-            // When printing an assertion macro with all the argument values, it's indented by this amount of spaces.
-            std::size_t assertion_macro_indentation = 4;
-
-            // How we call the assertion macro when printing it. You can redefine those if you rename the macro.
-            std::u32string assertion_macro_prefix = U"TA_CHECK( ";
-            std::u32string assertion_macro_suffix = U" )";
-
-            // When printing a path in a stack, this comes before the path.
-            std::u32string filename_prefix = U"  at:  ";
-            // When printing a path, separates it from the line number.
-            std::u32string filename_linenumber_separator =
-            #if CFG_TA_MSVC_STYLE_ERRORS
-                U"(";
-            #else
-                U":";
-            #endif
-            // When printing a path with a line number, this comes after the line number.
-            std::u32string filename_linenumber_suffix =
-            #if CFG_TA_MSVC_STYLE_ERRORS
-                U") :"; // Huh.
-            #else
-                U":";
-            #endif
-
-            // Vertical bars, either standalone or in brackets.
-            char32_t bar = 0x2502; // BOX DRAWINGS LIGHT VERTICAL
-            // Bottom brackets.
-            char32_t bracket_bottom = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
-            char32_t bracket_corner_bottom_left = 0x2570; // BOX DRAWINGS LIGHT ARC UP AND RIGHT
-            char32_t bracket_corner_bottom_right = 0x256f; // BOX DRAWINGS LIGHT ARC UP AND LEFT
-            char32_t bracket_bottom_tail = 0x252c; // BOX DRAWINGS LIGHT DOWN AND HORIZONTAL
-            // Top brackets.
-            char32_t bracket_top = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
-            char32_t bracket_corner_top_left = 0x256d; // BOX DRAWINGS LIGHT ARC DOWN AND RIGHT
-            char32_t bracket_corner_top_right = 0x256e; // BOX DRAWINGS LIGHT ARC DOWN AND LEFT
-
-            // Labels a subexpression that had a nested assertion failure in it.
-            std::u32string in_this_subexpr = U"in here";
-            // Same, but when there's more than one subexpression. This should never happen.
-            std::u32string in_this_subexpr_inexact = U"in here?";
-
-            void SetAscii()
+        void EnableUnicode(bool enable)
+        {
+            if (enable)
             {
-                starting_test_prefix = "* ";
-                starting_test_indent = "  ";
-                starting_test_counter_separator = " |  ";
-
+                bar = 0x2502; // BOX DRAWINGS LIGHT VERTICAL
+                bracket_bottom = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
+                bracket_corner_bottom_left = 0x2570; // BOX DRAWINGS LIGHT ARC UP AND RIGHT
+                bracket_corner_bottom_right = 0x256f; // BOX DRAWINGS LIGHT ARC UP AND LEFT
+                bracket_bottom_tail = 0x252c; // BOX DRAWINGS LIGHT DOWN AND HORIZONTAL
+                bracket_top = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
+                bracket_corner_top_left = 0x256d; // BOX DRAWINGS LIGHT ARC DOWN AND RIGHT
+                bracket_corner_top_right = 0x256e; // BOX DRAWINGS LIGHT ARC DOWN AND LEFT
+            }
+            else
+            {
                 bar = '|';
                 bracket_bottom = '_';
                 bracket_corner_bottom_left = '|';
@@ -466,131 +609,87 @@ namespace ta_test
                 bracket_corner_top_left = '|';
                 bracket_corner_top_right = '|';
             }
-        };
-        Visual vis;
+        }
 
-        // Keywords classification. The lists should be mutually exclusive.
-        std::map<std::string, KeywordKind, std::less<>> highlighted_keywords = {
-            {"alignas", KeywordKind::generic},
-            {"alignof", KeywordKind::generic},
-            {"asm", KeywordKind::generic},
-            {"auto", KeywordKind::generic},
-            {"bool", KeywordKind::generic},
-            {"break", KeywordKind::generic},
-            {"case", KeywordKind::generic},
-            {"catch", KeywordKind::generic},
-            {"char", KeywordKind::generic},
-            {"char16_t", KeywordKind::generic},
-            {"char32_t", KeywordKind::generic},
-            {"char8_t", KeywordKind::generic},
-            {"class", KeywordKind::generic},
-            {"co_await", KeywordKind::generic},
-            {"co_return", KeywordKind::generic},
-            {"co_yield", KeywordKind::generic},
-            {"concept", KeywordKind::generic},
-            {"const_cast", KeywordKind::generic},
-            {"const", KeywordKind::generic},
-            {"consteval", KeywordKind::generic},
-            {"constexpr", KeywordKind::generic},
-            {"constinit", KeywordKind::generic},
-            {"continue", KeywordKind::generic},
-            {"decltype", KeywordKind::generic},
-            {"default", KeywordKind::generic},
-            {"delete", KeywordKind::generic},
-            {"do", KeywordKind::generic},
-            {"double", KeywordKind::generic},
-            {"dynamic_cast", KeywordKind::generic},
-            {"else", KeywordKind::generic},
-            {"enum", KeywordKind::generic},
-            {"explicit", KeywordKind::generic},
-            {"export", KeywordKind::generic},
-            {"extern", KeywordKind::generic},
-            {"float", KeywordKind::generic},
-            {"for", KeywordKind::generic},
-            {"friend", KeywordKind::generic},
-            {"goto", KeywordKind::generic},
-            {"if", KeywordKind::generic},
-            {"inline", KeywordKind::generic},
-            {"int", KeywordKind::generic},
-            {"long", KeywordKind::generic},
-            {"mutable", KeywordKind::generic},
-            {"namespace", KeywordKind::generic},
-            {"new", KeywordKind::generic},
-            {"noexcept", KeywordKind::generic},
-            {"operator", KeywordKind::generic},
-            {"private", KeywordKind::generic},
-            {"protected", KeywordKind::generic},
-            {"public", KeywordKind::generic},
-            {"register", KeywordKind::generic},
-            {"reinterpret_cast", KeywordKind::generic},
-            {"requires", KeywordKind::generic},
-            {"return", KeywordKind::generic},
-            {"short", KeywordKind::generic},
-            {"signed", KeywordKind::generic},
-            {"sizeof", KeywordKind::generic},
-            {"static_assert", KeywordKind::generic},
-            {"static_cast", KeywordKind::generic},
-            {"static", KeywordKind::generic},
-            {"struct", KeywordKind::generic},
-            {"switch", KeywordKind::generic},
-            {"template", KeywordKind::generic},
-            {"thread_local", KeywordKind::generic},
-            {"throw", KeywordKind::generic},
-            {"try", KeywordKind::generic},
-            {"typedef", KeywordKind::generic},
-            {"typeid", KeywordKind::generic},
-            {"typename", KeywordKind::generic},
-            {"union", KeywordKind::generic},
-            {"unsigned", KeywordKind::generic},
-            {"using", KeywordKind::generic},
-            {"virtual", KeywordKind::generic},
-            {"void", KeywordKind::generic},
-            {"volatile", KeywordKind::generic},
-            {"wchar_t", KeywordKind::generic},
-            {"while", KeywordKind::generic},
-            // ---
-            {"false", KeywordKind::value},
-            {"nullptr", KeywordKind::value},
-            {"this", KeywordKind::value},
-            {"true", KeywordKind::value},
-            // ---
-            {"and_eq", KeywordKind::op},
-            {"and", KeywordKind::op},
-            {"bitand", KeywordKind::op},
-            {"bitor", KeywordKind::op},
-            {"compl", KeywordKind::op},
-            {"not_eq", KeywordKind::op},
-            {"not", KeywordKind::op},
-            {"or_eq", KeywordKind::op},
-            {"or", KeywordKind::op},
-            {"xor_eq", KeywordKind::op},
-            {"xor", KeywordKind::op},
-        };
-    };
-    // Returns the config singleton.
-    [[nodiscard]] CFG_TA_API GlobalConfig &Config();
-
-    // Misc.
-
-    namespace detail
-    {
-        // A tag to stop users from constructing our exception types.
-        struct ConstructInterruptTestException
+        void EnableMsvcStylePaths(bool enable)
         {
-            explicit ConstructInterruptTestException() = default;
-        };
-    }
+            if (enable)
+            {
+                filename_linenumber_separator = "(";
+                filename_linenumber_suffix = ") :"; // Huh.
+            }
+            else
+            {
+                filename_linenumber_separator = ":";
+                filename_linenumber_suffix = ":";
+            }
+        }
 
-    // We throw this to abort a test. Don't throw this manually.
-    // You can catch and rethrow this before a `catch (...)` to still be able to abort tests inside one.
-    struct InterruptTestException
-    {
-        // For internal use.
-        constexpr InterruptTestException(detail::ConstructInterruptTestException) {}
+        // Converts a source location to a string in the current preferred format.
+        [[nodiscard]] std::string LocationToString(const BasicModule::SourceLoc &loc)
+        {
+            return CFG_TA_FORMAT("{}{}{}{}", loc.file, filename_linenumber_separator, loc.line, filename_linenumber_suffix);
+        }
     };
 
-    namespace detail
+    // Text processing functions.
+    namespace text
     {
+        [[nodiscard]] constexpr bool IsWhitespace(char ch)
+        {
+            return ch == ' ' || ch == '\t';
+        }
+        [[nodiscard]] constexpr bool IsAlphaLowercase(char ch)
+        {
+            return ch >= 'a' && ch <= 'z';
+        }
+        [[nodiscard]] constexpr bool IsAlphaUppercase(char ch)
+        {
+            return ch >= 'A' && ch <= 'Z';
+        }
+        [[nodiscard]] constexpr bool IsAlpha(char ch)
+        {
+            return IsAlphaLowercase(ch) || IsAlphaUppercase(ch);
+        }
+        // Whether `ch` is a letter or an other non-digit identifier character.
+        [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
+        {
+            return ch == '_' || IsAlpha(ch);
+        }
+        [[nodiscard]] constexpr bool IsDigit(char ch)
+        {
+            return ch >= '0' && ch <= '9';
+        }
+        // Whether `ch` can be a part of an identifier.
+        [[nodiscard]] constexpr bool IsIdentifierCharStrict(char ch)
+        {
+            return IsNonDigitIdentifierChar(ch) || IsDigit(ch);
+        }
+        // Same, but also allows `$`, which we use in our macro.
+        [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
+        {
+            if (ch == '$')
+                return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
+            return IsIdentifierCharStrict(ch);
+        }
+        // Returns true if `name` is `"TA_ARG"` or one of its aliases.
+        [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
+        {
+            for (std::string_view alias : std::initializer_list<std::string_view>{
+                "TA_ARG",
+                #if CFG_TA_USE_DOLLAR
+                "$"
+                #endif
+                CFG_TA_EXTRA_ARG_MACROS
+            })
+            {
+                if (alias == name)
+                    return true;
+            }
+
+            return false;
+        }
+
         // A mini unicode library.
         namespace uni
         {
@@ -603,14 +702,14 @@ namespace ta_test
             // Given a byte, checks if it's the first byte of a multibyte character, or is a single-byte character.
             // Even if this function returns true, `byte` can be an invalid first byte.
             // To check for the byte validity, use `FirstByteToCharacterLength`.
-            [[nodiscard]] inline bool IsFirstByte(char byte)
+            [[nodiscard]] constexpr bool IsFirstByte(char byte)
             {
                 return (byte & 0b11000000) != 0b10000000;
             }
 
             // Given the first byte of a multibyte character (or a single-byte character), returns the amount of bytes occupied by the character.
             // Returns 0 if this is not a valid first byte, or not a first byte at all.
-            [[nodiscard]] inline std::size_t FirstByteToCharacterLength(char first_byte)
+            [[nodiscard]] constexpr std::size_t FirstByteToCharacterLength(char first_byte)
             {
                 if ((first_byte & 0b10000000) == 0b00000000) return 1; // Note the different bit pattern in this one.
                 if ((first_byte & 0b11100000) == 0b11000000) return 2;
@@ -620,14 +719,14 @@ namespace ta_test
             }
 
             // Returns true if `ch` is a valid unicode ch (aka 'codepoint').
-            [[nodiscard]] inline bool IsValidCharacterCode(char32_t ch)
+            [[nodiscard]] constexpr bool IsValidCharacterCode(char32_t ch)
             {
                 return ch <= 0x10ffff;
             }
 
             // Returns the amount of bytes needed to represent a character.
             // If the character is invalid (use `IsValidCharacterCode` to check for validity) returns 4, which is the maximum possible length
-            [[nodiscard]] inline std::size_t CharacterCodeToLength(char32_t ch)
+            [[nodiscard]] constexpr std::size_t CharacterCodeToLength(char32_t ch)
             {
                 if (ch <= 0x7f) return 1;
                 if (ch <= 0x7ff) return 2;
@@ -642,10 +741,10 @@ namespace ta_test
             // If the character is invalid, writes `default_char` instead.
             // No null-terminator is added.
             // Returns the amount of bytes written, equal to what `CharacterCodeToLength` would return.
-            inline std::size_t Encode(char32_t ch, char *buffer)
+            [[nodiscard]] constexpr std::size_t EncodeCharToBuffer(char32_t ch, char *buffer)
             {
                 if (!IsValidCharacterCode(ch))
-                    return Encode(default_char, buffer);
+                    return EncodeCharToBuffer(default_char, buffer);
 
                 std::size_t len = CharacterCodeToLength(ch);
                 switch (len)
@@ -673,28 +772,24 @@ namespace ta_test
                 return len;
             }
 
-            // Same as `std::size_t Encode(Char ch, char *buffer)`, but appends the data to a string.
-            inline std::size_t Encode(char32_t ch, std::string &str)
-            {
-                char buf[max_char_len];
-                std::size_t len = Encode(ch, buf);
-                str.append(buf, len);
-                return len;
-            }
-
             // Encodes one string into another.
-            inline void Encode(std::u32string_view view, std::string &str)
+            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
+            constexpr void Encode(std::u32string_view view, std::string &str)
             {
                 str.clear();
                 str.reserve(view.size() * max_char_len);
                 for (char32_t ch : view)
-                    Encode(ch, str);
+                {
+                    char buf[max_char_len];
+                    std::size_t len = EncodeCharToBuffer(ch, buf);
+                    str.append(buf, len);
+                }
             }
 
             // Decodes a UTF8 character.
             // Returns a pointer to the first byte of the next character.
             // If `end` is not null, it'll stop reading at `end`. In this case `end` will be returned.
-            [[nodiscard]] inline const char *FindNextCharacter(const char *data, const char *end = nullptr)
+            [[nodiscard]] constexpr const char *FindNextCharacter(const char *data, const char *end = nullptr)
             {
                 do
                     data++;
@@ -708,7 +803,7 @@ namespace ta_test
             // If `next_char` is not null, it will be set to point to the next byte after the current character.
             // If `data == end`, returns '\0'. (If `end != 0` and `data > end`, also returns '\0'.)
             // If `data == 0`, returns '\0'.
-            inline char32_t Decode(const char *data, const char *end = nullptr, const char **next_char = nullptr)
+            constexpr char32_t DecodeCharFromBuffer(const char *data, const char *end = nullptr, const char **next_char = nullptr)
             {
                 // Stop if `data` is a null pointer.
                 if (!data)
@@ -779,21 +874,15 @@ namespace ta_test
             }
 
             // Decodes one string into another.
+            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
             inline void Decode(std::string_view view, std::u32string &str)
             {
                 str.clear();
                 str.reserve(view.size());
                 for (const char *cur = view.data(); cur - view.data() < std::ptrdiff_t(view.size());)
-                    str += uni::Decode(cur, view.data() + view.size(), &cur);
-            }
-            [[nodiscard]] inline std::u32string Decode(std::string_view view)
-            {
-                std::u32string ret;
-                uni::Decode(view, ret);
-                return ret;
+                    str += uni::DecodeCharFromBuffer(cur, view.data() + view.size(), &cur);
             }
         }
-
 
         // Demangles output from `typeid(...).name()`.
         class Demangler
@@ -812,160 +901,28 @@ namespace ta_test
             // Demangles a name.
             // On GCC ang Clang invokes `__cxa_demangle()`, on MSVC returns the string unchanged.
             // The returned pointer remains as long as both the passed string and the class instance are alive.
+            // Preserve the class instance between calls to potentially reuse the buffer.
             [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
         };
 
-
-        // Printing this string resets the text styles. It's always null-terminated.
-        [[nodiscard]] inline std::string_view AnsiResetString()
-        {
-            if (Config().text_color.value())
-                return "\033[0m";
-            else
-                return "";
-        }
-
-        // Produces a string to switch between text styles, from `prev` to `cur`.
-        // If the styles are the same, does nothing.
-        // Otherwise calls `func`, which is `(std::string_view string) -> void`,
-        //   with a string printing which performs the requested style change. The string is always null-terminated.
-        // In any case, returns `cur`.
-        struct AnsiDeltaString
-        {
-            // Should be large enough.
-            char buf[100];
-
-            AnsiDeltaString() {buf[0] = '\0';}
-
-            AnsiDeltaString(const TextStyle &&cur, const TextStyle &next)
-            {
-                if (!Config().text_color.value())
-                {
-                    buf[0] = '\0';
-                    return;
-                }
-
-                // Should be large enough.
-                std::strcpy(buf, "\033[");
-                char *ptr = buf + 2;
-                if (next.color != cur.color)
-                {
-                    if (next.color >= TextColor::extended && next.color < TextColor::extended_end)
-                        ptr += std::sprintf(ptr, "38;5;%d;", int(next.color) - int(TextColor::extended));
-                    else
-                        ptr += std::sprintf(ptr, "%d;", int(next.color));
-                }
-                if (next.bg_color != cur.bg_color)
-                {
-                    if (next.bg_color >= TextColor::extended && next.bg_color < TextColor::extended_end)
-                        ptr += std::sprintf(ptr, "48;5;%d;", int(next.bg_color) - int(TextColor::extended));
-                    else
-                        ptr += std::sprintf(ptr, "%d;", int(next.bg_color) + 10);
-                }
-                if (next.bold != cur.bold)
-                    ptr += std::sprintf(ptr, "%s;", next.bold ? "1" : "22"); // Bold text is a little weird.
-                if (next.italic != cur.italic)
-                    ptr += std::sprintf(ptr, "%s3;", next.italic ? "" : "2");
-                if (next.underline != cur.underline)
-                    ptr += std::sprintf(ptr, "%s4;", next.underline ? "" : "2");
-
-                if (ptr != buf + 2)
-                {
-                    // `sprintf` automatically null-terminates the buffer.
-                    ptr[-1] = 'm';
-                    return;
-                }
-
-                // Nothing useful in the buffer.
-                buf[0] = '\0';
-            }
-
-            // This overload additionally performs `cur = next`.
-            AnsiDeltaString(TextStyle &cur, const TextStyle &next)
-                : AnsiDeltaString(std::move(cur), next)
-            {
-                cur = next;
-            }
-        };
-
-
-        enum class HardErrorKind {internal, user};
-
-        // Aborts the application with an internal error.
-        [[noreturn]] CFG_TA_API void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal);
-
-        // Prints a "note" message.
-        CFG_TA_API void PrintNote(std::string_view message);
-
-        // Given an exception, tries to get an error message from it.
-        [[nodiscard]] CFG_TA_API std::string ExceptionToMessage(const std::exception_ptr &e);
-
-
-        [[nodiscard]] constexpr bool IsWhitespace(char ch)
-        {
-            return ch == ' ' || ch == '\t';
-        }
-        [[nodiscard]] constexpr bool IsAlphaLowercase(char ch)
-        {
-            return ch >= 'a' && ch <= 'z';
-        }
-        [[nodiscard]] constexpr bool IsAlphaUppercase(char ch)
-        {
-            return ch >= 'A' && ch <= 'Z';
-        }
-        [[nodiscard]] constexpr bool IsAlpha(char ch)
-        {
-            return IsAlphaLowercase(ch) || IsAlphaUppercase(ch);
-        }
-        // Whether `ch` is a letter or an other non-digit identifier character.
-        [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
-        {
-            return ch == '_' || IsAlpha(ch);
-        }
-        [[nodiscard]] constexpr bool IsDigit(char ch)
-        {
-            return ch >= '0' && ch <= '9';
-        }
-        // Whether `ch` can be a part of an identifier.
-        [[nodiscard]] constexpr bool IsIdentifierCharStrict(char ch)
-        {
-            return IsNonDigitIdentifierChar(ch) || IsDigit(ch);
-        }
-        // Same, but also allows `$`, which we use in our macro.
-        [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
-        {
-            if (ch == '$')
-                return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
-            return IsIdentifierCharStrict(ch);
-        }
-        // Returns true if `name` is `"TA_ARG"` or one of its aliases.
-        [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
-        {
-            for (std::string_view alias : std::initializer_list<std::string_view>{
-                "TA_ARG",
-                #if CFG_TA_USE_DOLLAR
-                "$"
-                #endif
-                CFG_TA_EXTRA_ARG_MACROS
-            })
-            {
-                if (alias == name)
-                    return true;
-            }
-
-            return false;
-        }
-
-        // Describes a cell in a 2D canvas.
-        struct CellInfo
-        {
-            TextStyle style;
-            bool important = false; // If this is true, will avoid overwriting this cell.
-        };
+        // Given an exception, tries to get an error message from it, using the current modules. Shouldn't throw.
+        // Calls `func` at least once. The last call in the chain may or may not receive null `info` if this is an unknown exception.
+        // Hence, for completely unknown exceptions, calls `func(nullptr)`.
+        // Calls `func` multiple times for nested exceptions.
+        CFG_TA_API void GetExceptionInfo(const std::exception_ptr &e, const std::function<void(const BasicModule::ExceptionInfo *info)> &func);
 
         // A class for composing 2D ASCII graphics.
         class TextCanvas
         {
+          public:
+            // Describes a cell, except for the character it stores.
+            struct CellInfo
+            {
+                TextStyle style;
+                bool important = false; // If this is true, will avoid overwriting this cell.
+            };
+
+          private:
             struct Line
             {
                 std::u32string text;
@@ -973,15 +930,15 @@ namespace ta_test
             };
             std::vector<Line> lines;
 
+            CommonChars *chars = nullptr;
+
           public:
-            TextCanvas() {}
+            TextCanvas(CommonChars *chars) : chars(chars) {}
 
             // Prints the canvas to a callback `func`, which is `(std::string_view string) -> void`.
             template <typename F>
-            void PrintToCallback(F &&func) const
+            void PrintToCallback(const Terminal &terminal, F &&func) const
             {
-                const bool enable_style = Config().text_color.value();
-
                 TextStyle cur_style;
 
                 std::string buffer;
@@ -1000,7 +957,7 @@ namespace ta_test
                         segment_start = end_pos;
                     };
 
-                    if (enable_style)
+                    if (terminal.color)
                     {
                         for (std::size_t i = 0; i < line.text.size(); i++)
                         {
@@ -1008,7 +965,7 @@ namespace ta_test
                                 continue;
 
                             FlushSegment(i);
-                            func(std::string_view(detail::AnsiDeltaString(cur_style, line.info[i].style).buf));
+                            func(std::string_view(terminal.AnsiDeltaString(cur_style, line.info[i].style).data()));
                         }
                     }
 
@@ -1016,15 +973,15 @@ namespace ta_test
 
                     // Reset the style after the last line.
                     // Must do it before the line feed, otherwise the "core dumped" message also gets colored.
-                    if (enable_style && &line == &lines.back() && cur_style != TextStyle{})
-                        func(AnsiResetString());
+                    if (terminal.color && &line == &lines.back() && cur_style != TextStyle{})
+                        func(terminal.AnsiResetString());
 
                     func(std::string_view("\n"));
                 }
             }
 
-            // Prints to the current output stream.
-            CFG_TA_API void Print() const;
+            // Prints to a stream.
+            CFG_TA_API void Print(const Terminal &terminal, FILE *stream) const;
 
             // The number of lines.
             [[nodiscard]] CFG_TA_API std::size_t NumLines() const;
@@ -1082,634 +1039,302 @@ namespace ta_test
             CFG_TA_API void DrawOverline(std::size_t line, std::size_t column_start, std::size_t width, const CellInfo &info = {.style = {}, .important = true});
         };
 
-        enum class CharKind
+        // Parsing C++ expressions.
+        namespace expr
         {
-            normal,
-            string, // A string literal (not raw), not including things outside quotes.
-            character, // A character literal, not including things outside quotes.
-            string_escape_slash, // Escaping slashes in a string literal.
-            character_escape_slash, // Escaping slashes in a character literal.
-            raw_string, // A raw string literal, starting from `(` and until the closing `"` inclusive.
-            raw_string_initial_sep // A raw string literal, from the opening `"` to the `(` exclusive.
-        };
-
-        // `emit_char` is `(const char &ch, CharKind kind) -> void`.
-        // It's called for every character, classifying it. The character address is guaranteed to be in `expr`.
-        // `function_call` is `(std::string_view name, std::string_view args, std::size_t depth) -> void`.
-        // It's called for every pair of parentheses. `args` is the contents of parentheses, possibly with leading and trailing whitespace.
-        // `name` is the identifier preceding the `(`, without whitespace. It can be empty, or otherwise invalid.
-        // `depth` is the parentheses nesting depth, starting at 0.
-        template <typename EmitCharFunc, typename FunctionCallFunc>
-        constexpr void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, FunctionCallFunc &&function_call)
-        {
-            CharKind state = CharKind::normal;
-
-            // The previous character.
-            char prev_ch = '\0';
-            // The current identifier. Only makes sense in `state == normal`.
-            std::string_view identifier;
-            // Points at the start of the initial separator of a raw string.
-            const char *raw_string_sep_start = nullptr;
-            // The separator at the end of the raw string.
-            std::string_view raw_string_sep;
-
-            struct Entry
+            // The state of the parser state machine.
+            enum class CharKind
             {
-                // The identifier preceding the `(`, such as the function name. if any.
-                std::string_view ident;
-                // Points to the beginning of the arguments, right after `(`.
-                const char *args = nullptr;
+                normal,
+                string, // A string literal (not raw), not including things outside quotes.
+                character, // A character literal, not including things outside quotes.
+                string_escape_slash, // Escaping slashes in a string literal.
+                character_escape_slash, // Escaping slashes in a character literal.
+                raw_string, // A raw string literal, starting from `(` and until the closing `"` inclusive.
+                raw_string_initial_sep // A raw string literal, from the opening `"` to the `(` exclusive.
             };
 
-            // A stack of `()` parentheses.
-            // This should be a vector, by my Clang 16 can't handle them in constexpr calls yet...
-            Entry parens_stack[256];
-            std::size_t parens_stack_pos = 0;
-
-            for (const char &ch : expr)
+            // `emit_char` is `(const char &ch, CharKind kind) -> void`.
+            // It's called for every character, classifying it. The character address is guaranteed to be in `expr`.
+            // `function_call` is `(std::string_view name, std::string_view args, std::size_t depth) -> void`.
+            // It's called for every pair of parentheses. `args` is the contents of parentheses, possibly with leading and trailing whitespace.
+            // `name` is the identifier preceding the `(`, without whitespace. It can be empty, or otherwise invalid.
+            // `depth` is the parentheses nesting depth, starting at 0.
+            template <typename EmitCharFunc, typename FunctionCallFunc>
+            constexpr void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, FunctionCallFunc &&function_call)
             {
-                const CharKind prev_state = state;
+                CharKind state = CharKind::normal;
 
-                switch (state)
+                // The previous character.
+                char prev_ch = '\0';
+                // The current identifier. Only makes sense in `state == normal`.
+                std::string_view identifier;
+                // Points at the start of the initial separator of a raw string.
+                const char *raw_string_sep_start = nullptr;
+                // The separator at the end of the raw string.
+                std::string_view raw_string_sep;
+
+                struct Entry
                 {
-                  case CharKind::normal:
-                    if (ch == '"' && prev_ch == 'R')
-                    {
-                        state = CharKind::raw_string_initial_sep;
-                        raw_string_sep_start = &ch + 1;
-                    }
-                    else if (ch == '"')
-                    {
-                        state = CharKind::string;
-                    }
-                    else if (ch == '\'')
-                    {
-                        // This condition handles `'` digit separators.
-                        if (identifier.empty() || &identifier.back() + 1 != &ch || !IsDigit(identifier.front()))
-                            state = CharKind::character;
-                    }
-                    else if (IsIdentifierChar(ch))
-                    {
-                        // We reset `identifier` lazily here, as opposed to immediately,
-                        // to allow function calls with whitespace between the identifier and `(`.
-                        if (!IsIdentifierChar(prev_ch))
-                            identifier = {};
+                    // The identifier preceding the `(`, such as the function name. if any.
+                    std::string_view ident;
+                    // Points to the beginning of the arguments, right after `(`.
+                    const char *args = nullptr;
+                };
 
-                        if (identifier.empty())
-                            identifier = {&ch, 1};
-                        else
-                            identifier = {identifier.data(), identifier.size() + 1};
-                    }
-                    else
+                // A stack of `()` parentheses.
+                // This should be a vector, by my Clang 16 can't handle them in constexpr calls yet...
+                Entry parens_stack[256];
+                std::size_t parens_stack_pos = 0;
+
+                for (const char &ch : expr)
+                {
+                    const CharKind prev_state = state;
+
+                    switch (state)
                     {
-                        if constexpr (!std::is_null_pointer_v<FunctionCallFunc>)
+                      case CharKind::normal:
+                        if (ch == '"' && prev_ch == 'R')
                         {
-                            if (ch == '(')
-                            {
-                                if (parens_stack_pos >= std::size(parens_stack))
-                                    HardError("Too many nested parentheses.");
-                                parens_stack[parens_stack_pos++] = {
-                                    .ident = identifier,
-                                    .args = &ch + 1,
-                                };
+                            state = CharKind::raw_string_initial_sep;
+                            raw_string_sep_start = &ch + 1;
+                        }
+                        else if (ch == '"')
+                        {
+                            state = CharKind::string;
+                        }
+                        else if (ch == '\'')
+                        {
+                            // This condition handles `'` digit separators.
+                            if (identifier.empty() || &identifier.back() + 1 != &ch || !IsDigit(identifier.front()))
+                                state = CharKind::character;
+                        }
+                        else if (IsIdentifierChar(ch))
+                        {
+                            // We reset `identifier` lazily here, as opposed to immediately,
+                            // to allow function calls with whitespace between the identifier and `(`.
+                            if (!IsIdentifierChar(prev_ch))
                                 identifier = {};
-                            }
-                            else if (ch == ')' && parens_stack_pos > 0)
+
+                            if (identifier.empty())
+                                identifier = {&ch, 1};
+                            else
+                                identifier = {identifier.data(), identifier.size() + 1};
+                        }
+                        else
+                        {
+                            if constexpr (!std::is_null_pointer_v<FunctionCallFunc>)
                             {
-                                parens_stack_pos--;
-                                function_call(parens_stack[parens_stack_pos].ident, std::string_view(parens_stack[parens_stack_pos].args, &ch), parens_stack_pos);
+                                if (ch == '(')
+                                {
+                                    if (parens_stack_pos >= std::size(parens_stack))
+                                        HardError("Too many nested parentheses.");
+                                    parens_stack[parens_stack_pos++] = {
+                                        .ident = identifier,
+                                        .args = &ch + 1,
+                                    };
+                                    identifier = {};
+                                }
+                                else if (ch == ')' && parens_stack_pos > 0)
+                                {
+                                    parens_stack_pos--;
+                                    function_call(parens_stack[parens_stack_pos].ident, std::string_view(parens_stack[parens_stack_pos].args, &ch), parens_stack_pos);
+                                }
                             }
                         }
-                    }
-                    break;
-                  case CharKind::string:
-                    if (ch == '"')
-                        state = CharKind::normal;
-                    else if (ch == '\\')
-                        state = CharKind::string_escape_slash;
-                    break;
-                  case CharKind::character:
-                    if (ch == '\'')
-                        state = CharKind::normal;
-                    else if (ch == '\\')
-                        state = CharKind::character_escape_slash;
-                    break;
-                  case CharKind::string_escape_slash:
-                    state = CharKind::string;
-                    break;
-                  case CharKind::character_escape_slash:
-                    state = CharKind::character;
-                    break;
-                  case CharKind::raw_string_initial_sep:
-                    if (ch == '(')
-                    {
-                        state = CharKind::raw_string;
-                        raw_string_sep = {raw_string_sep_start, &ch};
-                    }
-                    break;
-                  case CharKind::raw_string:
-                    if (ch == '"')
-                    {
-                        std::string_view content(raw_string_sep_start, &ch);
-                        if (content.size() >/*sic*/ raw_string_sep.size() && content[content.size() - raw_string_sep.size() - 1] == ')' && content.ends_with(raw_string_sep))
+                        break;
+                      case CharKind::string:
+                        if (ch == '"')
                             state = CharKind::normal;
+                        else if (ch == '\\')
+                            state = CharKind::string_escape_slash;
+                        break;
+                      case CharKind::character:
+                        if (ch == '\'')
+                            state = CharKind::normal;
+                        else if (ch == '\\')
+                            state = CharKind::character_escape_slash;
+                        break;
+                      case CharKind::string_escape_slash:
+                        state = CharKind::string;
+                        break;
+                      case CharKind::character_escape_slash:
+                        state = CharKind::character;
+                        break;
+                      case CharKind::raw_string_initial_sep:
+                        if (ch == '(')
+                        {
+                            state = CharKind::raw_string;
+                            raw_string_sep = {raw_string_sep_start, &ch};
+                        }
+                        break;
+                      case CharKind::raw_string:
+                        if (ch == '"')
+                        {
+                            std::string_view content(raw_string_sep_start, &ch);
+                            if (content.size() >/*sic*/ raw_string_sep.size() && content[content.size() - raw_string_sep.size() - 1] == ')' && content.ends_with(raw_string_sep))
+                                state = CharKind::normal;
+                        }
+                        break;
                     }
-                    break;
+
+                    if (prev_state != CharKind::normal && state == CharKind::normal)
+                        identifier = {};
+
+                    CharKind fixed_state = state;
+                    if (prev_state == CharKind::string || prev_state == CharKind::character || prev_state == CharKind::raw_string)
+                        fixed_state = prev_state;
+
+                    if constexpr (!std::is_null_pointer_v<EmitCharFunc>)
+                        emit_char(ch, fixed_state);
+
+                    prev_ch = ch;
                 }
-
-                if (prev_state != CharKind::normal && state == CharKind::normal)
-                    identifier = {};
-
-                CharKind fixed_state = state;
-                if (prev_state == CharKind::string || prev_state == CharKind::character || prev_state == CharKind::raw_string)
-                    fixed_state = prev_state;
-
-                if constexpr (!std::is_null_pointer_v<EmitCharFunc>)
-                    emit_char(ch, fixed_state);
-
-                prev_ch = ch;
             }
+
+            // C++ keyword classification for highlighting.
+            enum class KeywordKind {generic, value, op};
+
+            // Visual settings for printing exceptions.
+            struct Style
+            {
+                // A piece of an expression that doesn't fit into the categories below.
+                TextStyle normal;
+                // Punctuation.
+                TextStyle punct = {.bold = true};
+                // Keywords.
+                TextStyle keyword_generic = {.color = TextColor::light_blue, .bold = true};
+                TextStyle keyword_value = {.color = TextColor::dark_magenta, .bold = true};
+                TextStyle keyword_op = {.color = TextColor::light_white, .bold = true};
+                // Identifiers written in all caps, probably macros.
+                TextStyle all_caps = {.color = TextColor::dark_red};
+                // Numbers.
+                TextStyle number = {.color = TextColor::dark_green, .bold = true};
+                // User-defined literal on a number, starting with `_`. For my sanity, literals not starting with `_` are colored like the rest of the number.
+                TextStyle number_suffix = {.color = TextColor::dark_green};
+                // A string literal; everything between the quotes inclusive.
+                TextStyle string = {.color = TextColor::dark_cyan, .bold = true};
+                // Stuff before the opening `"`.
+                TextStyle string_prefix = {.color = TextColor::dark_cyan};
+                // Stuff after the closing `"`.
+                TextStyle string_suffix = {.color = TextColor::dark_cyan};
+                // A character literal.
+                TextStyle character = {.color = TextColor::dark_yellow, .bold = true};
+                TextStyle character_prefix = {.color = TextColor::dark_yellow};
+                TextStyle character_suffix = {.color = TextColor::dark_yellow};
+                // A raw string literal; everything between the parentheses exclusive.
+                TextStyle raw_string = {.color = TextColor::light_blue, .bold = true};
+                // Stuff before the opening `"`.
+                TextStyle raw_string_prefix = {.color = TextColor::dark_magenta};
+                // Stuff after the closing `"`.
+                TextStyle raw_string_suffix = {.color = TextColor::dark_magenta};
+                // Quotes, parentheses, and everything between them.
+                TextStyle raw_string_delimiters = {.color = TextColor::dark_magenta, .bold = true};
+
+                // Keywords classification. The lists should be mutually exclusive.
+                std::map<std::string, KeywordKind, std::less<>> highlighted_keywords = {
+                    {"alignas", KeywordKind::generic},
+                    {"alignof", KeywordKind::generic},
+                    {"asm", KeywordKind::generic},
+                    {"auto", KeywordKind::generic},
+                    {"bool", KeywordKind::generic},
+                    {"break", KeywordKind::generic},
+                    {"case", KeywordKind::generic},
+                    {"catch", KeywordKind::generic},
+                    {"char", KeywordKind::generic},
+                    {"char16_t", KeywordKind::generic},
+                    {"char32_t", KeywordKind::generic},
+                    {"char8_t", KeywordKind::generic},
+                    {"class", KeywordKind::generic},
+                    {"co_await", KeywordKind::generic},
+                    {"co_return", KeywordKind::generic},
+                    {"co_yield", KeywordKind::generic},
+                    {"concept", KeywordKind::generic},
+                    {"const_cast", KeywordKind::generic},
+                    {"const", KeywordKind::generic},
+                    {"consteval", KeywordKind::generic},
+                    {"constexpr", KeywordKind::generic},
+                    {"constinit", KeywordKind::generic},
+                    {"continue", KeywordKind::generic},
+                    {"decltype", KeywordKind::generic},
+                    {"default", KeywordKind::generic},
+                    {"delete", KeywordKind::generic},
+                    {"do", KeywordKind::generic},
+                    {"double", KeywordKind::generic},
+                    {"dynamic_cast", KeywordKind::generic},
+                    {"else", KeywordKind::generic},
+                    {"enum", KeywordKind::generic},
+                    {"explicit", KeywordKind::generic},
+                    {"export", KeywordKind::generic},
+                    {"extern", KeywordKind::generic},
+                    {"float", KeywordKind::generic},
+                    {"for", KeywordKind::generic},
+                    {"friend", KeywordKind::generic},
+                    {"goto", KeywordKind::generic},
+                    {"if", KeywordKind::generic},
+                    {"inline", KeywordKind::generic},
+                    {"int", KeywordKind::generic},
+                    {"long", KeywordKind::generic},
+                    {"mutable", KeywordKind::generic},
+                    {"namespace", KeywordKind::generic},
+                    {"new", KeywordKind::generic},
+                    {"noexcept", KeywordKind::generic},
+                    {"operator", KeywordKind::generic},
+                    {"private", KeywordKind::generic},
+                    {"protected", KeywordKind::generic},
+                    {"public", KeywordKind::generic},
+                    {"register", KeywordKind::generic},
+                    {"reinterpret_cast", KeywordKind::generic},
+                    {"requires", KeywordKind::generic},
+                    {"return", KeywordKind::generic},
+                    {"short", KeywordKind::generic},
+                    {"signed", KeywordKind::generic},
+                    {"sizeof", KeywordKind::generic},
+                    {"static_assert", KeywordKind::generic},
+                    {"static_cast", KeywordKind::generic},
+                    {"static", KeywordKind::generic},
+                    {"struct", KeywordKind::generic},
+                    {"switch", KeywordKind::generic},
+                    {"template", KeywordKind::generic},
+                    {"thread_local", KeywordKind::generic},
+                    {"throw", KeywordKind::generic},
+                    {"try", KeywordKind::generic},
+                    {"typedef", KeywordKind::generic},
+                    {"typeid", KeywordKind::generic},
+                    {"typename", KeywordKind::generic},
+                    {"union", KeywordKind::generic},
+                    {"unsigned", KeywordKind::generic},
+                    {"using", KeywordKind::generic},
+                    {"virtual", KeywordKind::generic},
+                    {"void", KeywordKind::generic},
+                    {"volatile", KeywordKind::generic},
+                    {"wchar_t", KeywordKind::generic},
+                    {"while", KeywordKind::generic},
+                    // ---
+                    {"false", KeywordKind::value},
+                    {"nullptr", KeywordKind::value},
+                    {"this", KeywordKind::value},
+                    {"true", KeywordKind::value},
+                    // ---
+                    {"and_eq", KeywordKind::op},
+                    {"and", KeywordKind::op},
+                    {"bitand", KeywordKind::op},
+                    {"bitor", KeywordKind::op},
+                    {"compl", KeywordKind::op},
+                    {"not_eq", KeywordKind::op},
+                    {"not", KeywordKind::op},
+                    {"or_eq", KeywordKind::op},
+                    {"or", KeywordKind::op},
+                    {"xor_eq", KeywordKind::op},
+                    {"xor", KeywordKind::op},
+                };
+            };
+
+            // Pretty-prints an expression to a canvas.
+            // Returns `expr.size()`.
+            CFG_TA_API std::size_t DrawExprToCanvas(TextCanvas &canvas, const Style &style, std::size_t line, std::size_t start, std::string_view expr);
         }
 
-        // Pretty-prints an expression to a canvas.
-        // Returns `expr.size()`.
-        CFG_TA_API std::size_t DrawExprToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr);
-
-        // A compile-time string.
-        template <std::size_t N>
-        struct ConstString
-        {
-            char str[N]{};
-
-            static constexpr std::size_t size = N - 1;
-
-            consteval ConstString() {}
-            consteval ConstString(const char (&new_str)[N])
-            {
-                if (new_str[N-1] != '\0')
-                    HardError("The input string must be null-terminated.");
-                std::copy_n(new_str, size, str);
-            }
-
-            [[nodiscard]] constexpr std::string_view view() const
-            {
-                return {str, str + size};
-            }
-        };
-        template <ConstString X>
-        struct ConstStringTag
-        {
-            static constexpr auto value = X;
-        };
-
-        // Describes the location of `TA_ARG(...)` in the code.
-        struct ArgLocation
-        {
-            std::string_view file;
-            int line = 0;
-            int counter = 0;
-
-            friend auto operator<=>(const ArgLocation &, const ArgLocation &) = default;
-        };
-
-        // A stored argument representation as a string.
-        struct StoredArg
-        {
-            enum class State
-            {
-                not_started, // No value yet.
-                in_progress, // Started calculating, but no value yet.
-                done, // Has value.
-            };
-            State state = State::not_started;
-
-            std::string value;
-        };
-
-        // Misc information about an argument.
-        struct ArgInfo
-        {
-            // The value of `__COUNTER__`.
-            int counter = 0;
-            // Parentheses nesting depth.
-            std::size_t depth = 0;
-
-            // Where this argument is located in the raw expression string.
-            std::size_t expr_offset = 0;
-            std::size_t expr_size = 0;
-            // This is where the argument macro name is located in the raw expression string.
-            std::size_t ident_offset = 0;
-            std::size_t ident_size = 0;
-
-            // Whether this argument has a complex enough spelling to require drawing a horizontal bracket.
-            // This should be automatically true for all arguments with nested arguments.
-            bool need_bracket = false;
-        };
-
-        // A common base for `AssertWrapper<T>` instantiations.
-        // Describes an assertion that's currently being computed.
-        struct BasicAssert
-        {
-          protected:
-            ~BasicAssert() = default;
-
-          public:
-            // If `loc` is known, returns a pointer to the respective argument data.
-            // Otherwise returns null.
-            virtual StoredArg *GetArgumentDataPtr(const ArgLocation &loc) = 0;
-            // Print the assertion failure. `depth` starts at 0 and increases as we go deeper into the stack.
-            virtual void PrintFailure(std::size_t depth) const = 0;
-        };
-
-        // The state of the current test.
-        class RunningTestState
-        {
-            bool failed = false;
-
-          public:
-            void FailTest() {failed = true;}
-            [[nodiscard]] bool TestFailed() const {return failed;}
-        };
-
-        // The global per-thread state.
-        struct GlobalThreadState
-        {
-            // The stack of the currently running assertions.
-            std::vector<BasicAssert *> assert_stack;
-
-            // The state of the test that's currently running.
-            RunningTestState *running_state = nullptr;
-
-            // Finds an argument in the currently running assertions.
-            StoredArg &GetArgumentData(const ArgLocation &loc)
-            {
-                auto it = assert_stack.end();
-                while (true)
-                {
-                    if (it == assert_stack.begin())
-                        break;
-                    --it;
-                    if (StoredArg *ptr = (*it)->GetArgumentDataPtr(loc))
-                        return *ptr;
-                }
-
-                HardError("Unknown argument.");
-            }
-
-            // Prints the assertion failure.
-            // `top` must be the last element of the stack, otherwise an internal error is triggered.
-            void PrintAssertionFailure(const BasicAssert &top)
-            {
-                if (assert_stack.empty() || assert_stack.back() != &top)
-                    HardError("The failed assertion is not the top element of the stack.");
-
-                std::size_t depth = 0;
-                auto it = assert_stack.end();
-                while (it != assert_stack.begin())
-                {
-                    --it;
-                    (*it)->PrintFailure(depth++);
-                }
-            }
-        };
-        [[nodiscard]] CFG_TA_API GlobalThreadState &ThreadState();
-
-        // `TA_ARG` expands to this.
-        // Stores a pointer into an `AssertWrapper` where it will write the argument as a string.
-        struct ArgWrapper
-        {
-            StoredArg *target = nullptr;
-
-            ArgWrapper(std::string_view file, int line, int counter)
-                : target(&ThreadState().GetArgumentData(ArgLocation{file, line, counter}))
-            {
-                target->state = StoredArg::State::in_progress;
-            }
-            ArgWrapper(const ArgWrapper &) = default;
-            ArgWrapper &operator=(const ArgWrapper &) = default;
-
-            // The method name is wonky to assist with our parsing.
-            template <typename T>
-            T &&_ta_handle_arg_(int counter, T &&arg) &&
-            {
-                (void)counter; // Unused, but passing it helps with parsing.
-                target->value = ToString<std::remove_cvref_t<T>>{}(arg);
-                target->state = StoredArg::State::done;
-                return std::forward<T>(arg);
-            }
-        };
-
-        // Fails an assertion. `AssertWrapper` uses this.
-        CFG_TA_API void PrintAssertionFailure(
-            std::string_view raw_expr,
-            std::size_t num_args,
-            const ArgInfo *arg_info,               // Array of size `num_args`.
-            const std::size_t *args_in_draw_order, // Array of size `num_args`.
-            const StoredArg *stored_args,          // Array of size `num_args`.
-            std::string_view file_name,
-            int line_number,
-            std::size_t depth // Starts at 0, increments when we go deeper into the assertion stack.
-        );
-
-        // Returns `value` as is. But before that, prints an error message if it's false.
-        template <ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
-        struct AssertWrapper : BasicAssert
-        {
-            AssertWrapper()
-            {
-                ThreadState().assert_stack.push_back(this);
-            }
-            AssertWrapper(const AssertWrapper &) = delete;
-            AssertWrapper &operator=(const AssertWrapper &) = delete;
-
-            // Checks `value`, reports an error if it's false. In any case, returns `value` unchanged.
-            bool operator()(bool value) &&
-            {
-                if (!value)
-                    ThreadState().PrintAssertionFailure(*this);
-
-                auto &stack = ThreadState().assert_stack;
-                if (stack.empty() || stack.back() != this)
-                    HardError("Something is wrong with `TA_CHECK`. Did you `co_await` inside of an assertion?");
-
-                stack.pop_back();
-
-                return value;
-            }
-
-            // The number of arguments.
-            static constexpr std::size_t num_args = []{
-                std::size_t ret = 0;
-                ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
-                {
-                    (void)args;
-                    (void)depth;
-                    if (IsArgMacroName(name))
-                        ret++;
-                });
-                return ret;
-            }();
-
-            // The values of the arguments.
-            std::array<StoredArg, num_args> stored_args;
-
-            struct CounterIndexPair
-            {
-                int counter = 0;
-                std::size_t index = 0;
-            };
-
-            // Information about the arguments.
-            struct ArgData
-            {
-                // Information about each individual argument.
-                std::array<ArgInfo, num_args> info;
-
-                // Maps `__COUNTER__` values to argument indices. Sorted by counter, but the values might not be consecutive.
-                std::array<CounterIndexPair, num_args> counter_to_arg_index;
-
-                // Arguments in the order they should be printed. Which is: highest depth first, then smaller counter values first.
-                std::array<std::size_t, num_args> args_in_draw_order{};
-            };
-
-            static constexpr ArgData arg_data = []{
-                ArgData ret;
-
-                // Parse expanded string.
-                std::size_t pos = 0;
-                ParseExpr(ExpandedString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
-                {
-                    if (name != "_ta_handle_arg_")
-                        return;
-
-                    if (pos >= num_args)
-                        HardError("More `TA_ARG`s than expected.");
-
-                    ArgInfo &new_info = ret.info[pos];
-                    new_info.depth = depth;
-
-                    for (const char &ch : args)
-                    {
-                        if (IsDigit(ch))
-                            new_info.counter = new_info.counter * 10 + (ch - '0');
-                        else if (ch == ',')
-                            break;
-                        else
-                            HardError("Lexer error: Unexpected character after the counter macro.");
-                    }
-
-                    CounterIndexPair &new_pair = ret.counter_to_arg_index[pos];
-                    new_pair.index = pos;
-                    new_pair.counter = new_info.counter;
-
-                    pos++;
-                });
-                if (pos != num_args)
-                    HardError("Less `TA_ARG`s than expected.");
-
-                // Parse raw string.
-                pos = 0;
-                ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
-                {
-                    (void)depth;
-
-                    if (!IsArgMacroName(name))
-                        return;
-
-                    if (pos >= num_args)
-                        HardError("More `TA_ARG`s than expected.");
-
-                    ArgInfo &this_info = ret.info[pos];
-
-                    this_info.expr_offset = std::size_t(args.data() - RawString.view().data());
-                    this_info.expr_size = args.size();
-
-                    this_info.ident_offset = std::size_t(name.data() - RawString.view().data());
-                    this_info.ident_size = name.size();
-
-                    // Trim side whitespace from `args`.
-                    std::string_view trimmed_args = args;
-                    while (!trimmed_args.empty() && IsWhitespace(trimmed_args.front()))
-                        trimmed_args.remove_prefix(1);
-                    while (!trimmed_args.empty() && IsWhitespace(trimmed_args.back()))
-                        trimmed_args.remove_suffix(1);
-
-                    // Decide if we should draw a bracket for this argument.
-                    for (char ch : trimmed_args)
-                    {
-                        // Whatever the condition is, it should trigger for all arguments with nested arguments.
-                        if (!IsIdentifierChar(ch))
-                        {
-                            this_info.need_bracket = true;
-                            break;
-                        }
-                    }
-
-                    pos++;
-                });
-                if (pos != num_args)
-                    HardError("Less `TA_ARG`s than expected.");
-
-                // Sort `counter_to_arg_index` by counter, to allow binary search.
-                // Sorting is necessary when the arguments are nested.
-                std::sort(ret.counter_to_arg_index.begin(), ret.counter_to_arg_index.end(),
-                    [](const CounterIndexPair &a, const CounterIndexPair &b){return a.counter < b.counter;}
-                );
-
-                // Fill and sort `args_in_draw_order`.
-                for (std::size_t i = 0; i < num_args; i++)
-                    ret.args_in_draw_order[i] = i;
-                std::sort(ret.args_in_draw_order.begin(), ret.args_in_draw_order.end(), [&](std::size_t a, std::size_t b)
-                {
-                    if (auto d = ret.info[a].depth <=> ret.info[b].depth; d != 0)
-                        return d > 0;
-                    if (auto d = ret.info[a].counter <=> ret.info[b].counter; d != 0)
-                        return d < 0;
-                    return false;
-                });
-
-                return ret;
-            }();
-
-            StoredArg *GetArgumentDataPtr(const ArgLocation &loc) override
-            {
-                if (loc.line != LineNumber || loc.file != FileName.view())
-                    return nullptr;
-
-                auto it = std::partition_point(arg_data.counter_to_arg_index.begin(), arg_data.counter_to_arg_index.end(),
-                    [&](const CounterIndexPair &pair){return pair.counter < loc.counter;}
-                );
-                if (it == arg_data.counter_to_arg_index.end() || it->counter != loc.counter)
-                    return nullptr;
-
-                return &stored_args[it->index];
-            }
-
-            void PrintFailure(std::size_t depth) const override
-            {
-                PrintAssertionFailure(RawString.view(), num_args, arg_data.info.data(), arg_data.args_in_draw_order.data(), stored_args.data(), FileName.view(), LineNumber, depth);
-            }
-        };
-
-
-        struct TestLocation
-        {
-            std::string_view file;
-            int line = 0;
-            friend auto operator<=>(const TestLocation &, const TestLocation &) = default;
-        };
-
-        struct BasicTest
-        {
-            virtual ~BasicTest() = default;
-
-            // The name passed to the test macro.
-            [[nodiscard]] virtual std::string_view Name() const = 0;
-            [[nodiscard]] virtual TestLocation Location() const = 0;
-            virtual void Run() const = 0;
-        };
-        // Stores singletons derived from `BasicTest`.
-        template <typename T>
-        requires std::is_base_of_v<BasicTest, T>
-        inline const T test_singleton{};
-
-        // A comparator for test names, that orders `/` before any other character.
-        struct TestNameLess
-        {
-            bool operator()(std::string_view a, std::string_view b) const
-            {
-                std::size_t i = 0;
-                while (true)
-                {
-                    // If `a` runs out first, return true.
-                    // If `b` or both run out first, return false.
-                    if (i >= a.size())
-                        return i < b.size();
-                    if (i >= b.size())
-                        return false;
-
-                    // If exactly one of the chars is a `/`, return true if it's in `a`.
-                    if (int d = (a[i] == '/') - (b[i] == '/'))
-                        return d > 0;
-
-                    if (a[i] != b[i])
-                        return a[i] < b[i];
-
-                    i++;
-                }
-                return false;
-            }
-        };
-
-        struct GlobalState
-        {
-            // Those must be in sync: [
-            // All tests.
-            std::vector<const BasicTest *> tests;
-            // Maps test names to indices in `tests`.
-            std::map<std::string_view, std::size_t, TestNameLess> name_to_test_index;
-            // ]
-
-            // Maps each test name, and each prefix (for test `foo/bar/baz` includes `foo/bar/baz`, `foo/bar`, and `foo`)
-            //   to the preferred execution order.
-            // The order matches the registration order, with prefixes keeping the first registration order.
-            std::map<std::string_view, std::size_t, TestNameLess> name_prefixes_to_order;
-
-            // Examines `State()` and lists test indices in the preferred execution order.
-            [[nodiscard]] CFG_TA_API std::vector<std::size_t> GetTestListInExecutionOrder() const;
-        };
-        [[nodiscard]] CFG_TA_API GlobalState &State();
-
-        // Registers a test. Pass a pointer to an instance of `test_singleton<??>`.
-        CFG_TA_API void RegisterTest(const BasicTest *singleton);
-
-        // An implementation of `BasicTest` for a specific test.
-        // `P` is a pointer to the test function, see `DETAIL_TA_TEST()` for details.
-        template <auto P, ConstString TestName, ConstString LocFile, int LocLine>
-        struct SpecificTest : BasicTest
-        {
-            static constexpr bool test_name_is_valid = []{
-                if (!std::all_of(TestName.view().begin(), TestName.view().end(), [](char ch){return IsIdentifierCharStrict(ch) || ch == '/';}))
-                    return false;
-                if (std::adjacent_find(TestName.view().begin(), TestName.view().end(), [](char a, char b){return a == '/' && b == '/';}) != TestName.view().end())
-                    return false;
-                if (TestName.view().starts_with('/') || TestName.view().ends_with('/'))
-                    return false;
-                return true;
-            }();
-            static_assert(test_name_is_valid, "Test names can only contain letters, digits, underscores, and slashes as separators; can't start or end with a slash or contain consecutive slashes.");
-
-            std::string_view Name() const override
-            {
-                return TestName.view();
-            }
-            TestLocation Location() const override
-            {
-                return {LocFile.view(), LocLine};
-            }
-
-            void Run() const override
-            {
-                P({}/* Name tag. */);
-            }
-        };
-
-        // Touch to register a test. `T` is `SpecificTest<??>`.
-        template <typename T>
-        inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
-    }
-
-    // Runs all tests.
-    // Returns the exit code to return from `main()`, zero on success.
-    [[nodiscard]] CFG_TA_API int RunTests();
-}
-
-// Manually support quoting strings if the formatting library can't do that.
-#if !CFG_TA_FORMAT_SUPPORTS_QUOTED
-namespace ta_test
-{
-    namespace detail::formatting
-    {
         // Escapes a string, writes the result to `out_iter`. Includes quotes automatically.
         template <typename It>
         constexpr void EscapeString(std::string_view source, It out_iter, bool double_quotes)
@@ -1757,41 +1382,664 @@ namespace ta_test
         }
     }
 
+    // The base for modules that print stuff.
+    struct BasicPrintingModule : virtual BasicModule
+    {
+      protected:
+        ~BasicPrintingModule() = default;
+
+      public:
+        BasicPrintingModule() = default;
+        BasicPrintingModule(const BasicPrintingModule &) = default;
+        BasicPrintingModule(BasicPrintingModule &&) = default;
+        BasicPrintingModule &operator=(const BasicPrintingModule &) = default;
+        BasicPrintingModule &operator=(BasicPrintingModule &&) = default;
+
+        FILE *output_stream = stdout;
+        Terminal terminal;
+        CommonStyles common_styles;
+        CommonChars common_chars;
+
+        virtual void EnableUnicode(bool enable)
+        {
+            common_chars.EnableUnicode(enable);
+        }
+
+      protected:
+        CFG_TA_API void PrintNote(std::string_view text) const;
+    };
+
+
+    // --- STRING CONVERSIONS ---
+
+    // Don't specialize this, specialize `ToString` defined below.
+    template <typename T, typename = void>
+    struct DefaultToString
+    {
+        std::string operator()(const T &value) const
+        {
+            #if CFG_TA_FORMAT_SUPPORTS_QUOTED
+            if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
+            {
+                return CFG_TA_FORMAT("{:?}", value);
+            }
+            else
+            #endif
+            {
+                return CFG_TA_FORMAT("{}", value);
+            }
+        }
+    };
+    // You can specialize this for your types.
+    template <typename T, typename = void>
+    struct ToString : DefaultToString<T> {};
+
+
+    // --- TEST RUNNER ---
+
+    // Don't touch this.
+    namespace detail
+    {
+        // `TA_ARG` expands to this.
+        // Stores a pointer into an `AssertWrapper` where it will write the argument as a string.
+        struct ArgWrapper
+        {
+            BasicModule::BasicAssertionInfo::StoredArg *target = nullptr;
+
+            ArgWrapper(std::string_view file, int line, int counter)
+                : target(&ThreadState().FindStoredArgument(BasicModule::SourceLocCounter{.file = file, .line = line, .counter = counter}))
+            {
+                target->state = BasicModule::BasicAssertionInfo::StoredArg::State::in_progress;
+            }
+            ArgWrapper(const ArgWrapper &) = default;
+            ArgWrapper &operator=(const ArgWrapper &) = default;
+
+            // The method name is wonky to assist with our parsing.
+            template <typename T>
+            T &&_ta_handle_arg_(int counter, T &&arg) &&
+            {
+                (void)counter; // Unused, but passing it helps with parsing.
+                target->value = ToString<std::remove_cvref_t<T>>{}(arg);
+                target->state = BasicModule::BasicAssertionInfo::StoredArg::State::done;
+                return std::forward<T>(arg);
+            }
+        };
+
+        // An intermediate base class that `AssertWrapper<T>` inherits from.
+        struct BasicAssertWrapper : BasicModule::BasicAssertionInfo
+        {
+            bool finished = false;
+
+            CFG_TA_API BasicAssertWrapper();
+            BasicAssertWrapper(const BasicAssertWrapper &) = delete;
+            BasicAssertWrapper &operator=(const BasicAssertWrapper &) = delete;
+
+            // Checks `value`, reports an error if it's false. In any case, returns `value` unchanged.
+            CFG_TA_API bool operator()(bool value);
+
+          protected:
+            CFG_TA_API ~BasicAssertWrapper();
+        };
+
+        template <ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
+        struct AssertWrapper : BasicAssertWrapper
+        {
+            // The number of arguments.
+            static constexpr std::size_t num_args = []{
+                std::size_t ret = 0;
+                text::expr::ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
+                {
+                    (void)args;
+                    (void)depth;
+                    if (text::IsArgMacroName(name))
+                        ret++;
+                });
+                return ret;
+            }();
+
+            // The values of the arguments.
+            std::array<StoredArg, num_args> stored_args;
+
+            struct CounterIndexPair
+            {
+                int counter = 0;
+                std::size_t index = 0;
+            };
+
+            // Information about the arguments.
+            struct ArgData
+            {
+                // Information about each individual argument.
+                std::array<ArgInfo, num_args> info;
+
+                // Maps `__COUNTER__` values to argument indices. Sorted by counter, but the values might not be consecutive.
+                std::array<CounterIndexPair, num_args> counter_to_arg_index;
+
+                // Arguments in the order they should be printed. Which is: highest depth first, then smaller counter values first.
+                std::array<std::size_t, num_args> args_in_draw_order{};
+            };
+
+            static constexpr ArgData arg_data = []{
+                ArgData ret;
+
+                // Parse expanded string.
+                std::size_t pos = 0;
+                text::expr::ParseExpr(ExpandedString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
+                {
+                    if (name != "_ta_handle_arg_")
+                        return;
+
+                    if (pos >= num_args)
+                        HardError("More `$(...)`s than expected.");
+
+                    ArgInfo &new_info = ret.info[pos];
+                    new_info.depth = depth;
+
+                    for (const char &ch : args)
+                    {
+                        if (text::IsDigit(ch))
+                            new_info.counter = new_info.counter * 10 + (ch - '0');
+                        else if (ch == ',')
+                            break;
+                        else
+                            HardError("Lexer error: Unexpected character after the counter macro.");
+                    }
+
+                    CounterIndexPair &new_pair = ret.counter_to_arg_index[pos];
+                    new_pair.index = pos;
+                    new_pair.counter = new_info.counter;
+
+                    pos++;
+                });
+                if (pos != num_args)
+                    HardError("Less `$(...)`s than expected.");
+
+                // Parse raw string.
+                pos = 0;
+                text::expr::ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
+                {
+                    (void)depth;
+
+                    if (!text::IsArgMacroName(name))
+                        return;
+
+                    if (pos >= num_args)
+                        HardError("More `$(...)`s than expected.");
+
+                    ArgInfo &this_info = ret.info[pos];
+
+                    this_info.expr_offset = std::size_t(args.data() - RawString.view().data());
+                    this_info.expr_size = args.size();
+
+                    this_info.ident_offset = std::size_t(name.data() - RawString.view().data());
+                    this_info.ident_size = name.size();
+
+                    // Trim side whitespace from `args`.
+                    std::string_view trimmed_args = args;
+                    while (!trimmed_args.empty() && text::IsWhitespace(trimmed_args.front()))
+                        trimmed_args.remove_prefix(1);
+                    while (!trimmed_args.empty() && text::IsWhitespace(trimmed_args.back()))
+                        trimmed_args.remove_suffix(1);
+
+                    // Decide if we should draw a bracket for this argument.
+                    for (char ch : trimmed_args)
+                    {
+                        // Whatever the condition is, it should trigger for all arguments with nested arguments.
+                        if (!text::IsIdentifierChar(ch))
+                        {
+                            this_info.need_bracket = true;
+                            break;
+                        }
+                    }
+
+                    pos++;
+                });
+                if (pos != num_args)
+                    HardError("Less `$(...)`s than expected.");
+
+                // Sort `counter_to_arg_index` by counter, to allow binary search.
+                // Sorting is necessary when the arguments are nested.
+                std::sort(ret.counter_to_arg_index.begin(), ret.counter_to_arg_index.end(),
+                    [](const CounterIndexPair &a, const CounterIndexPair &b){return a.counter < b.counter;}
+                );
+
+                // Fill and sort `args_in_draw_order`.
+                for (std::size_t i = 0; i < num_args; i++)
+                    ret.args_in_draw_order[i] = i;
+                std::sort(ret.args_in_draw_order.begin(), ret.args_in_draw_order.end(), [&](std::size_t a, std::size_t b)
+                {
+                    if (auto d = ret.info[a].depth <=> ret.info[b].depth; d != 0)
+                        return d > 0;
+                    if (auto d = ret.info[a].counter <=> ret.info[b].counter; d != 0)
+                        return d < 0;
+                    return false;
+                });
+
+                return ret;
+            }();
+
+            static constexpr BasicModule::SourceLoc location{.file = FileName.view(), .line = LineNumber};
+            const BasicModule::SourceLoc &SourceLocation() const override {return location;}
+
+            std::string_view Expr() const override {return RawString.view();}
+            std::span<const ArgInfo> ArgsInfo() const override {return arg_data.info;}
+            std::span<const std::size_t> ArgsInDrawOrder() const override {return arg_data.args_in_draw_order;}
+            std::span<const StoredArg> StoredArgs() const override {return stored_args;}
+
+            const StoredArg *FindStoredArgumentByLocation(const BasicModule::SourceLocCounter &loc) const override
+            {
+                if (loc.line != LineNumber || loc.file != FileName.view())
+                    return nullptr;
+
+                auto it = std::partition_point(arg_data.counter_to_arg_index.begin(), arg_data.counter_to_arg_index.end(),
+                    [&](const CounterIndexPair &pair){return pair.counter < loc.counter;}
+                );
+                if (it == arg_data.counter_to_arg_index.end() || it->counter != loc.counter)
+                    return nullptr;
+
+                return &stored_args[it->index];
+            }
+        };
+
+        struct BasicTest : BasicModule::BasicTestInfo
+        {
+            virtual void Run() const = 0;
+        };
+
+        // A comparator for test names, that orders `/` before any other character.
+        struct TestNameLess
+        {
+            bool operator()(std::string_view a, std::string_view b) const
+            {
+                std::size_t i = 0;
+                while (true)
+                {
+                    // If `a` runs out first, return true.
+                    // If `b` or both run out first, return false.
+                    if (i >= a.size())
+                        return i < b.size();
+                    if (i >= b.size())
+                        return false;
+
+                    // If exactly one of the chars is a `/`, return true if it's in `a`.
+                    if (int d = (a[i] == '/') - (b[i] == '/'))
+                        return d > 0;
+
+                    if (a[i] != b[i])
+                        return a[i] < b[i];
+
+                    i++;
+                }
+                return false;
+            }
+        };
+
+        struct GlobalState
+        {
+            // All those are filled by the registration code:
+
+            // Those must be in sync: [
+            // All tests.
+            std::vector<const BasicTest *> tests;
+            // Maps test names to indices in `tests`.
+            std::map<std::string_view, std::size_t, TestNameLess> name_to_test_index;
+            // ]
+
+            // Maps each test name, and each prefix (for test `foo/bar/baz` includes `foo/bar/baz`, `foo/bar`, and `foo`)
+            //   to the preferred execution order.
+            // The order matches the registration order, with prefixes keeping the first registration order.
+            std::map<std::string_view, std::size_t, TestNameLess> name_prefixes_to_order;
+
+            // Sorts test `indices` in the preferred execution order.
+            CFG_TA_API void SortTestListInExecutionOrder(std::span<std::size_t> indices) const;
+        };
+        [[nodiscard]] CFG_TA_API GlobalState &State();
+
+        // Stores singletons derived from `BasicTest`.
+        template <std::derived_from<BasicTest> T>
+        inline const T test_singleton{};
+
+        // Registers a test. Pass a pointer to an instance of `test_singleton<??>`.
+        CFG_TA_API void RegisterTest(const BasicTest *singleton);
+
+        // An implementation of `BasicTest` for a specific test.
+        // `P` is a pointer to the test function, see `DETAIL_TA_TEST()` for details.
+        template <auto P, ConstString TestName, ConstString LocFile, int LocLine>
+        struct SpecificTest : BasicTest
+        {
+            static constexpr bool test_name_is_valid = []{
+                if (!std::all_of(TestName.view().begin(), TestName.view().end(), [](char ch){return text::IsIdentifierCharStrict(ch) || ch == '/';}))
+                    return false;
+                if (std::adjacent_find(TestName.view().begin(), TestName.view().end(), [](char a, char b){return a == '/' && b == '/';}) != TestName.view().end())
+                    return false;
+                if (TestName.view().starts_with('/') || TestName.view().ends_with('/'))
+                    return false;
+                return true;
+            }();
+            static_assert(test_name_is_valid, "Test names can only contain letters, digits, underscores, and slashes as separators; can't start or end with a slash or contain consecutive slashes.");
+
+            std::string_view Name() const override
+            {
+                return TestName.view();
+            }
+            BasicModule::SourceLoc Location() const override
+            {
+                return {LocFile.view(), LocLine};
+            }
+
+            void Run() const override
+            {
+                P({}/* Name tag. */);
+            }
+        };
+
+        // Touch to register a test. `T` is `SpecificTest<??>`.
+        template <typename T>
+        inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
+    }
+
+    // Use this to run tests.
+    struct Runner
+    {
+        std::vector<ModulePtr> modules;
+
+        // Fills `modules` arrays with all the default modules. Old contents are destroyed.
+        CFG_TA_API void SetDefaultModules();
+
+        // Runs all tests.
+        CFG_TA_API int Run();
+
+        // Removes all modules of type `T` or derived from `T`.
+        template <typename T>
+        void RemoveModules()
+        {
+            std::erase_if(modules, [](const ModulePtr &ptr){return dynamic_cast<const T *>(ptr.get());});
+        }
+
+        // Calls `func` for every module of type `T` or derived from `T`.
+        // Causes a hard error if there's no such modules.
+        template <typename T, typename F>
+        void FindModule(F &&func)
+        {
+            bool found = false;
+            for (const auto &m : modules)
+            {
+                if (auto base = dynamic_cast<T *>(m.get()))
+                {
+                    found = true;
+                    func(*base);
+                }
+            }
+            if (!found)
+                HardError(CFG_TA_FORMAT("No such module in the list: `{}`.", text::Demangler{}(typeid(T).name())), HardErrorKind::user);
+        }
+
+        // Sets the output stream for every module that prints stuff.
+        void SetOutputStream(FILE *stream)
+        {
+            for (const auto &m : modules)
+            {
+                if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+                    base->output_stream = stream;
+            }
+        }
+
+        // Sets the output stream for every module that prints stuff.
+        void SetTerminalSettings(const Terminal &terminal)
+        {
+            for (const auto &m : modules)
+            {
+                if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+                    base->terminal = terminal;
+            }
+        }
+
+        // Sets the output stream for every module that prints stuff.
+        void SetEnableUnicode(bool enable)
+        {
+            for (const auto &m : modules)
+            {
+                if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+                    base->EnableUnicode(enable);
+            }
+        }
+    };
+
+
+    // --- BUILT-IN MODULES ---
+
+    namespace modules
+    {
+        // Prints the test names as they're being run.
+        struct ProgressPrinter : BasicPrintingModule
+        {
+            // This goes right before each test/group name.
+            std::string chars_test_prefix = "\xE2\x97\x8F "; // BLACK CIRCLE, then a space.
+            // The is used for indenting test names/groups.
+            std::string chars_indentation_guide = "\xC2\xB7   "; // MIDDLE DOT, then a space.
+            // This is printed after the test counter and before the test names/groups (and before their indentation guides).
+            std::string chars_test_counter_separator = " \xE2\x94\x82  "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
+            // This is printed when a test fails, right before the test name.
+            std::string chars_test_failed = "TEST FAILED: ";
+            // After a test fails, we print all the group names again to better show the context.
+            // Those group names are suffixed with this string.
+            std::string chars_continuing_group = " (cont.)";
+
+            // The message when a test starts.
+            TextStyle style_name = {.color = TextColor::light_green, .bold = true};
+            // The message when a test group starts.
+            TextStyle style_group_name = {.color = TextColor::dark_green};
+            // See `chars_continuing_group`.
+            TextStyle style_continuing_group = {.color = TextColor::light_black};
+            // The indentation guides for nested test starts.
+            TextStyle style_indentation_guide = {.color = TextColorGrayscale24(8), .bold = true};
+            // The test index.
+            TextStyle style_index = {.color = TextColor::light_green, .bold = true};
+            // The total test count printed after each test index.
+            TextStyle style_total_count = {.color = TextColor::dark_green};
+            // The line that separates the test counter from the test names/groups.
+            TextStyle style_gutter_border = {.color = TextColorGrayscale24(10), .bold = true};
+
+            // The name of a failed test, printed when it fails.
+            TextStyle style_failed_name = {.color = TextColor::light_red, .bold = true};
+            // The name of a group of a failed test, printed when the test fails.
+            TextStyle style_failed_group_name = {.color = TextColor::dark_red};
+
+          private:
+            std::size_t test_counter = 0;
+            std::vector<std::string_view> stack;
+            // A copy of the stack from the previous test, if it has failed.
+            // We use it to repeat the group names again, to show where we're restarting from.
+            std::vector<std::string_view> failed_test_stack;
+
+          public:
+            void EnableUnicode(bool enable) override;
+            void OnPreRunTests(const RunTestsInfo &data) override;
+            void OnPreRunSingleTest(const SingleTestInfo &data) override;
+            void OnPostRunSingleTest(const SingleTestResults &data) override;
+        };
+
+        // Prints the results of a run.
+        struct ResultsPrinter : BasicPrintingModule
+        {
+            // No tests to run.
+            TextStyle style_no_tests = {.color = TextColor::light_blue, .bold = true};
+            // All tests passed.
+            TextStyle style_all_passed = {.color = TextColor::light_green, .bold = true};
+            // Some tests passed, this part shows how many have passed.
+            TextStyle style_num_passed = {.color = TextColor::light_green};
+            // Some tests passed, this part shows how many have failed.
+            TextStyle style_num_failed = {.color = TextColor::light_red, .bold = true};
+
+            void OnPostRunTests(const RunTestsResults &data) override;
+        };
+
+        // Prints failed assertions.
+        struct AssertionPrinter : BasicPrintingModule
+        {
+            // Whether we should print the values of `$(...)` in the expression.
+            bool decompose_expression = true;
+            // Whether we should print the enclosing assertions.
+            bool print_assertion_stack = true;
+
+            // The primary error message.
+            // Uses `common_styles.error` as a style.
+            std::u32string chars_assertion_failed = U"ASSERTION FAILED:";
+            // The enclosing assertions.
+            TextStyle style_in_assertion = {.color = TextColor::light_magenta, .bold = true};
+            std::u32string chars_in_assertion = U"WHILE CHECKING ASSERTION:";
+
+            // How to print the filename.
+            TextStyle style_filename = {.color = TextColor::none};
+
+            // How to print the assertion macro itself.
+            TextStyle style_assertion_macro = {.color = TextColor::light_red, .bold = true};
+            std::u32string chars_assertion_macro_prefix = U"TA_CHECK( ";
+            std::u32string chars_assertion_macro_suffix = U" )";
+
+            // Styles for the expression tokens.
+            text::expr::Style style_expr;
+
+            // The argument colors. They are cycled in this order.
+            std::vector<TextStyle> style_arguments = {
+                {.color = TextColorRgb6(1,4,1), .bold = true},
+                {.color = TextColorRgb6(1,3,5), .bold = true},
+                {.color = TextColorRgb6(1,0,5), .bold = true},
+                {.color = TextColorRgb6(5,1,0), .bold = true},
+                {.color = TextColorRgb6(5,4,0), .bold = true},
+                {.color = TextColorRgb6(0,4,3), .bold = true},
+                {.color = TextColorRgb6(0,5,5), .bold = true},
+                {.color = TextColorRgb6(3,1,5), .bold = true},
+                {.color = TextColorRgb6(4,0,2), .bold = true},
+                {.color = TextColorRgb6(5,2,1), .bold = true},
+                {.color = TextColorRgb6(4,5,3), .bold = true},
+            };
+            // This is used for brackets above expressions.
+            TextStyle style_overline = {.color = TextColor::light_magenta, .bold = true};
+            // This is used to dim the unwanted parts of expressions.
+            TextColor color_dim = TextColor::light_black;
+
+            // Labels a subexpression that had a nested assertion failure in it.
+            std::u32string chars_in_this_subexpr = U"in here";
+            // Same, but when there's more than one subexpression. This should never happen.
+            std::u32string chars_in_this_subexpr_inexact = U"in here?";
+
+            // Indent the printed code by this many spaces.
+            // The indentation is only applied once, since we don't print multiline code.
+            std::size_t printed_code_indentation = 4;
+
+            void OnAssertionFailed(const BasicAssertionInfo &data) override;
+        };
+
+        // A generic module to analyze exceptions.
+        // `E` is the exception base class.
+        // `F` is a functor to get the error string from an exception, defaults to `e.what()`.
+        template <typename E, typename F = void>
+        struct GenericExceptionAnalyzer : BasicModule
+        {
+            std::optional<ExceptionInfoWithNested> OnExplainException(const std::exception_ptr &e) const override
+            {
+                try
+                {
+                    std::rethrow_exception(e);
+                }
+                catch (E &e)
+                {
+                    ExceptionInfoWithNested ret;
+                    ret.type_name = text::Demangler{}(typeid(e).name());
+                    if constexpr (std::is_void_v<F>)
+                        ret.message = e.what();
+                    else
+                        ret.message = F{}(e);
+
+                    try
+                    {
+                        std::rethrow_if_nested(e);
+                    }
+                    catch (...)
+                    {
+                        ret.nested_exception = std::current_exception();
+                    }
+
+                    return std::move(ret);
+                }
+            }
+        };
+        // Analyzes exceptions derived from `std::exception`.
+        using DefaultExceptionAnalyzer = GenericExceptionAnalyzer<std::exception>;
+
+        // Prints any uncaught exceptions.
+        struct ExceptionPrinter : BasicPrintingModule
+        {
+            TextStyle style_exception_type = {.color = TextColor::dark_magenta};
+            TextStyle style_exception_message = {.color = TextColor::light_blue};
+
+            std::string chars_error = "UNCAUGHT EXCEPTION:";
+            std::string chars_unknown_exception = "Unknown exception.";
+            std::string chars_indent_type = "  ";
+            std::string chars_indent_message = "    ";
+            std::string chars_type_suffix = ": ";
+
+            void OnUncaughtException(const std::exception_ptr &e) override;
+        };
+
+        // Detects whether the debugger is attached in a platform-specific way.
+        struct DebuggerDetector : BasicModule
+        {
+            // If this is not set, will check whether the debugger is attached when an assertion fails, and break if it is.
+            std::optional<bool> break_on_failure;
+
+            CFG_TA_API bool IsDebuggerAttached() const;
+            void OnAssertionFailed(const BasicAssertionInfo &data) override;
+        };
+
+        // A little module that examines `DebuggerDetector` and notifies you when it detected a debugger.
+        struct DebuggerStatePrinter : BasicPrintingModule
+        {
+            void OnPreRunTests(const RunTestsInfo &data) override;
+        };
+    }
+}
+
+// Manually support quoting strings if the formatting library can't do that.
+#if !CFG_TA_FORMAT_SUPPORTS_QUOTED
+namespace ta_test
+{
     template <typename Void>
-    struct ToString<char, Void>
+    struct DefaultToString<char, Void>
     {
         std::string operator()(char value) const
         {
             char ret[12]; // Should be at most 9: `'\x??'\0`, but throwing in a little extra space.
-            detail::formatting::EscapeString({&value, 1}, ret, false);
+            text::EscapeString({&value, 1}, ret, false);
             return ret;
         }
     };
     template <typename Void>
-    struct ToString<std::string, Void>
+    struct DefaultToString<std::string, Void>
     {
         std::string operator()(const std::string &value) const
         {
             std::string ret;
             ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-            detail::formatting::EscapeString(value, std::back_inserter(ret), true);
+            text::EscapeString(value, std::back_inserter(ret), true);
             return ret;
         }
     };
     template <typename Void>
-    struct ToString<std::string_view, Void>
+    struct DefaultToString<std::string_view, Void>
     {
         std::string operator()(const std::string_view &value) const
         {
             std::string ret;
             ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-            detail::formatting::EscapeString(value, std::back_inserter(ret), true);
+            text::EscapeString(value, std::back_inserter(ret), true);
             return ret;
         }
     };
-    template <typename Void> struct ToString<      char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
-    template <typename Void> struct ToString<const char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
+    template <typename Void> struct DefaultToString<      char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
+    template <typename Void> struct DefaultToString<const char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
     // Somehow this catches const arrays too:
-    template <std::size_t N, typename Void> struct ToString<char[N], Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
+    template <std::size_t N, typename Void> struct DefaultToString<char[N], Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
 }
 #endif

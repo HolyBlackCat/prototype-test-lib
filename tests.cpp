@@ -22,7 +22,7 @@ TA_TEST(foo/bar)
 
 TA_TEST(test/lul/beta)
 {
-    // throw std::runtime_error("Text!");
+    TA_CHECK($(true) && $(foo()) == $(true));
 }
 
 TA_TEST( foo/baz )
@@ -35,7 +35,7 @@ TA_TEST( bar/alpha )
 TA_TEST( omega )
 {
 }
-TA_TEST(test/lul/alpha)
+TA_TEST(test/lel/alpha)
 {
 
 }
@@ -48,52 +48,18 @@ TA_TEST( foo/alpha3 ) {}
 
 int main()
 {
-    ta_test::Config().output_stream = stdout;
-    ta_test::Config().text_color = true;
-    (void)ta_test::RunTests();
-
-    // int a = 1, b = 2, c = 3;
-    // TA_CHECK($(sum($(a), $(b), $(c))) == 7);
-
-    // std::string a = "мур", b = "4\n\0333";
-    // char c = 'e';
-    // TA_CHECK($ (sum($(a), $(b), $( c )) ) == true);
-
-    // TA_CHECK( (first + second).ends_with(suffix) );
-    TA_CHECK($(true) && $(foo()) && $(false));
-
-
-    // TA_FOR_TYPES(int, float, double)
-    // {
-    //     using T = TA_TYPE;
-    // };
-    // TA_FOR_VALUES(1, 2.3f, "53")
-    // {
-    //     using T = TA_VALUE;
-    // };
-
-    // if TA_VARIANT(foo)
-    // {
-
-    // }
-    // else if TA_VARIANT(bar)
-    // {
-
-    // }
-
-
-
-
-    // TA_FOR(x, vec)
-    // {
-
-    // }
+    ta_test::Runner runner;
+    runner.SetDefaultModules();
+    runner.SetOutputStream(stdout);
+    runner.SetTerminalSettings({.color = true});
+    return runner.Run();
 }
 
-// Make it so that `$(...)` is impossible to use outside of ASSERT.
-// Make ASSERTs impossible to use outside of tests.
+// Can we use `{:?}` for all types? Test separately in libfmt and std::format.
 
-// When a test prints something to the log, repeat all the group stack for the next test?
+// Make it so that `$(...)` is impossible to use outside of ASSERT?
+
+// Scoped and unscoped logging macros.
 
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
 // Move text around to fit into the bracket. Or maybe not?
@@ -106,9 +72,9 @@ int main()
 // Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
 // Test without RTTI. What about exception type names?
 
-// Opt-in to make asserts from any thread to propagate to the main thread.
+// Print to a custom fprintf-like callback instead of fprintf directly?
 
-// Entirely singlethreaded mode.
+// Multithreading?
 
 
 /* Pending tests:
@@ -131,5 +97,9 @@ canv.Print(true, stdout);
 --- Colors
 
 TA_CHECK($("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && false);
+
+--- Exception printer
+Known and unknown exception types.
+Nested exceptions (containing known and unknown types in them).
 
 */
