@@ -55,8 +55,6 @@ int main()
     return runner.Run();
 }
 
-// Can we use `{:?}` for all types? Test separately in libfmt and std::format.
-
 // Make it so that `$(...)` is impossible to use outside of ASSERT?
 
 // Scoped and unscoped logging macros.

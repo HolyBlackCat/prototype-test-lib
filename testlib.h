@@ -1815,21 +1815,20 @@ namespace ta_test
         {
             // This goes right before each test/group name.
             std::string chars_test_prefix = "\xE2\x97\x8F "; // BLACK CIRCLE, then a space.
+            // This is used when reentering a group after a failed test.
+            std::string chars_test_prefix_continuing_group = "\xE2\x97\x8B "; // WHITE CIRCLE, then a space.
             // The is used for indenting test names/groups.
             std::string chars_indentation_guide = "\xC2\xB7   "; // MIDDLE DOT, then a space.
             // This is printed after the test counter and before the test names/groups (and before their indentation guides).
             std::string chars_test_counter_separator = " \xE2\x94\x82  "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
             // This is printed when a test fails, right before the test name.
             std::string chars_test_failed = "TEST FAILED: ";
-            // After a test fails, we print all the group names again to better show the context.
-            // Those group names are suffixed with this string.
-            std::string chars_continuing_group = " (cont.)";
 
             // The message when a test starts.
             TextStyle style_name = {.color = TextColor::light_green, .bold = true};
             // The message when a test group starts.
             TextStyle style_group_name = {.color = TextColor::dark_green};
-            // See `chars_continuing_group`.
+            // This is used to print a group name when reentering it after a failed test.
             TextStyle style_continuing_group = {.color = TextColor::light_black};
             // The indentation guides for nested test starts.
             TextStyle style_indentation_guide = {.color = TextColorGrayscale24(8), .bold = true};

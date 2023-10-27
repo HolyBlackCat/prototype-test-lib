@@ -906,23 +906,17 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo 
                     std::fprintf(output_stream, "%s", chars_indentation_guide.c_str());
             }
 
+            // Whether we're reentering this group after a failed test.
+            bool is_continued = segment_index < failed_test_stack.size() && failed_test_stack[segment_index] == segment;
+
             // Print the test name.
-            std::fprintf(output_stream, "%s%s%.*s%s",
-                terminal.AnsiDeltaString(cur_style, new_it == test_name.end() ? style_name : style_group_name).data(),
-                chars_test_prefix.c_str(),
+            std::fprintf(output_stream, "%s%s%.*s%s%s\n",
+                terminal.AnsiDeltaString(cur_style, is_continued ? style_continuing_group : new_it == test_name.end() ? style_name : style_group_name).data(),
+                is_continued ? chars_test_prefix_continuing_group.c_str() : chars_test_prefix.c_str(),
                 int(segment.size()), segment.data(),
-                new_it == test_name.end() ? "" : "/"
+                new_it == test_name.end() ? "" : "/",
+                terminal.AnsiResetString().data()
             );
-            // Optionally, add a marker that we're continuing this group after a failed test.
-            if (segment_index < failed_test_stack.size() && failed_test_stack[segment_index] == segment)
-            {
-                std::fprintf(output_stream, "%s%s",
-                    terminal.AnsiDeltaString(cur_style, style_continuing_group).data(),
-                    chars_continuing_group.c_str()
-                );
-            }
-            // Finish the line.
-            std::fprintf(output_stream, "%s\n", terminal.AnsiResetString().data());
 
             // Push to the stack.
             stack.push_back(segment);
