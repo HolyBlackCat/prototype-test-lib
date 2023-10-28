@@ -12,6 +12,7 @@ bool sum(const auto &...){return false;}
 bool foo()
 {
     std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oo\nf", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    TA_SOFT_CHECK( false );
     TA_CHECK( $($(first) + $(second)).ends_with($($(suffix.c_str()) + $(extra) + $("123") + $("456"))) );
     return false;
 }
@@ -22,7 +23,7 @@ TA_TEST(foo/bar)
 
 TA_TEST(test/lul/beta)
 {
-    // TA_CHECK($(true) && $(foo()) == $(true));
+    TA_CHECK($(true) && $(foo()) == $(true));
 }
 
 TA_TEST( foo/baz )
@@ -51,14 +52,16 @@ int main(int argc, char **argv)
     ta_test::Runner runner;
     runner.SetDefaultModules();
     runner.ProcessFlags(argc, argv);
-    runner.SetOutputStream(stdout);
-    runner.SetTerminalSettings({.color = true});
     return runner.Run();
 }
+
+// Enable/disable breakpoints with flags
 
 // Make it so that `$(...)` is impossible to use outside of ASSERT?
 
 // After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
+
+// Attach formatted error messages to assertions.
 
 // Scoped and unscoped logging macros.
 

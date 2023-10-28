@@ -16,6 +16,15 @@
 #endif
 #endif
 
+#if CFG_TA_DETECT_TERMINAL
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__linux__) || defined(__APPLE__)
+#define DETAIL_TA_USE_ISATTY 1
+#include <unistd.h>
+#endif
+#endif
+
 void ta_test::HardError(std::string_view message, HardErrorKind kind)
 {
     // A threadsafe once flag.
@@ -29,9 +38,7 @@ void ta_test::HardError(std::string_view message, HardErrorKind kind)
     if (!once)
         std::terminate(); // We've already been there.
 
-    FILE *stream = stderr;
-
-    std::fprintf(stream, "%s: %.*s\n", kind == HardErrorKind::internal ? "Internal error" : "Error", int(message.size()), message.data());
+    std::fprintf(stderr, "%s: %.*s\n", kind == HardErrorKind::internal ? "Internal error" : "Error", int(message.size()), message.data());
 
     // Stop.
     // Don't need to check whether the debugger is attached, a crash is fine.
@@ -72,9 +79,61 @@ bool ta_test::platform::IsDebuggerAttached()
     #endif
 }
 
+bool ta_test::platform::IsTerminalAttached()
+{
+    // We cache the return value.
+    static bool ret = []{
+        #if defined(_WIN32)
+        return GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == 0;
+        #elif defined(DETAIL_TA_USE_ISATTY)
+        return isatty(STDOUT_FILENO) == 1;
+        #else
+        return false;
+        #endif
+    }();
+    return ret;
+}
+
+ta_test::Terminal::Terminal()
+{
+    SetFileOutput(stdout);
+}
+
+void ta_test::Terminal::SetFileOutput(FILE *stream)
+{
+    output_func = [stream](const char *format, std::va_list args)
+    {
+        std::vfprintf(stream, format, args);
+    };
+}
+
+void ta_test::Terminal::Print(const char *format, ...) const
+{
+    std::va_list list;
+    va_start(list, format);
+    struct Guard
+    {
+        std::va_list *list = nullptr;
+        ~Guard()
+        {
+            // Ok, here's the thing. We formally need to call this even if the callback throws,
+            //   but formally it must be called by the same function that called `va_start()`.
+            // Also it seems that on modern implementations it's a no-op.
+            // Adding a `catch(...)` just for this would interfere with crash dumps, so I'm not doing that.
+            // Simply ignoring exceptions doesn't sound right.
+            // Calling it from a scope guard, while formally undefined, at least has the same behavior regardless of exceptions.
+            // And if we even find ourselves on a platform where we can't call it from a scope guard, we'll know about it immediately,
+            //   without testing throwing exceptions.
+            va_end(*list);
+        }
+    };
+    Guard guard{.list = &list};
+    output_func(format, list);
+}
+
 std::string_view ta_test::Terminal::AnsiResetString() const
 {
-    if (color)
+    if (enable_color)
         return "\033[0m";
     else
         return "";
@@ -85,7 +144,7 @@ ta_test::Terminal::AnsiDeltaStringBuffer ta_test::Terminal::AnsiDeltaString(cons
     AnsiDeltaStringBuffer ret;
     ret[0] = '\0';
 
-    if (!color)
+    if (!enable_color)
         return ret;
 
     std::strcpy(ret.data(), "\033[");
@@ -178,9 +237,9 @@ void ta_test::text::GetExceptionInfo(const std::exception_ptr &e, const std::fun
     func(nullptr);
 }
 
-void ta_test::text::TextCanvas::Print(const Terminal &terminal, FILE *stream) const
+void ta_test::text::TextCanvas::Print(const Terminal &terminal) const
 {
-    PrintToCallback(terminal, [&](std::string_view string){fwrite(string.data(), string.size(), 1, stream);});
+    PrintToCallback(terminal, [&](std::string_view string){terminal.Print("%.*s", int(string.size()), string.data());});
 }
 
 std::size_t ta_test::text::TextCanvas::NumLines() const
@@ -614,7 +673,7 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
 
 void ta_test::BasicPrintingModule::PrintNote(std::string_view text) const
 {
-    std::fprintf(output_stream, "%s%s%s%.*s%s\n",
+    terminal.Print("%s%s%s%.*s%s\n",
         terminal.AnsiResetString().data(),
         terminal.AnsiDeltaString({}, common_styles.note).data(),
         common_chars.note_prefix.c_str(),
@@ -742,7 +801,8 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
 void ta_test::Runner::SetDefaultModules()
 {
     modules.clear();
-    modules.push_back(MakeModule<modules::HelpPrinter>());
+    modules.push_back(MakeModule<modules::HelpPrinter>()); // This is first to print `--help` first in the help page.
+    modules.push_back(MakeModule<modules::PrintingConfigurator>());
     modules.push_back(MakeModule<modules::ProgressPrinter>());
     modules.push_back(MakeModule<modules::ResultsPrinter>());
     modules.push_back(MakeModule<modules::AssertionPrinter>());
@@ -780,14 +840,16 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
             flag = flag->substr(0, sep);
         }
 
+        bool unknown = true;
         for (const auto &m : modules)
         {
             auto flags = m->GetFlags();
+
             for (auto &f : flags)
             {
                 bool already_used_single_arg = false;
                 bool missing_arg = false;
-                bool unknown = !f->ProcessFlag(*this, *m, *flag, [&]() -> std::optional<std::string_view>
+                unknown = !f->ProcessFlag(*this, *m, *flag, [&]() -> std::optional<std::string_view>
                 {
                     if (arg)
                     {
@@ -823,17 +885,8 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
                     }
                 }
 
-                // If the argument is unknown...
-                if (unknown)
-                {
-                    for (const auto &m2 : modules)
-                        m2->OnUnknownFlag(*flag, unknown);
-                    if (unknown)
-                    {
-                        Fail();
-                        break;
-                    }
-                }
+                if (!unknown)
+                    break;
             }
 
             if (ok && !*ok)
@@ -842,6 +895,18 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
 
         if (ok && !*ok)
             break;
+
+        // If the argument is unknown...
+        if (unknown)
+        {
+            for (const auto &m2 : modules)
+                m2->OnUnknownFlag(*flag, unknown);
+            if (unknown)
+            {
+                Fail();
+                break;
+            }
+        }
     }
 }
 
@@ -920,8 +985,9 @@ int ta_test::Runner::Run()
 // --- modules::HelpPrinter ---
 
 ta_test::modules::HelpPrinter::HelpPrinter()
-    : help_flag("help", "Show usage", [](Runner &runner, BasicModule &this_module){
-        std::vector<BasicFlag *> flags;
+    : help_flag("help", "Show usage", [](Runner &runner, BasicModule &this_module)
+    {
+        std::vector<flags::BasicFlag *> flags;
         for (const auto &m : runner.modules)
         {
             auto more_flags = m->GetFlags();
@@ -931,15 +997,15 @@ ta_test::modules::HelpPrinter::HelpPrinter()
         // The case shoudl never fail.
         HelpPrinter &self = dynamic_cast<HelpPrinter &>(this_module);
 
-        std::fprintf(self.output_stream, "This is a test runner based on ta_test.\nAvailable options:\n");
-        for (BasicFlag *flag : flags)
-            std::fprintf(self.output_stream, "  %-12s  - %s\n", flag->HelpFlagSpelling().c_str(), flag->help_desc.c_str());
+        self.terminal.Print("This is a test runner based on ta_test.\nAvailable options:\n");
+        for (flags::BasicFlag *flag : flags)
+            self.terminal.Print("  %-14s - %s\n", flag->HelpFlagSpelling().c_str(), flag->help_desc.c_str());
 
         std::exit(0);
     })
 {}
 
-std::vector<ta_test::BasicModule::BasicFlag *> ta_test::modules::HelpPrinter::GetFlags()
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::HelpPrinter::GetFlags()
 {
     return {&help_flag};
 }
@@ -947,16 +1013,39 @@ std::vector<ta_test::BasicModule::BasicFlag *> ta_test::modules::HelpPrinter::Ge
 void ta_test::modules::HelpPrinter::OnUnknownFlag(std::string_view flag, bool &abort)
 {
     (void)abort;
-    std::fprintf(output_stream, "Unknown flag `%.*s`, run with `%s` for usage.\n", int(flag.size()), flag.data(), help_flag.HelpFlagSpelling().c_str());
+    terminal.Print("Unknown flag `%.*s`, run with `%s` for usage.\n", int(flag.size()), flag.data(), help_flag.HelpFlagSpelling().c_str());
     // Don't exit, rely on `abort`.
 }
 
-void ta_test::modules::HelpPrinter::OnMissingFlagArgument(std::string_view flag, const BasicFlag &flag_obj, bool &abort)
+void ta_test::modules::HelpPrinter::OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort)
 {
     (void)flag_obj;
     (void)abort;
-    std::fprintf(output_stream, "Flag `%.*s` wasn't given enough arguments, run with `%s` for usage.\n", int(flag.size()), flag.data(), help_flag.HelpFlagSpelling().c_str());
+    terminal.Print("Flag `%.*s` wasn't given enough arguments, run with `%s` for usage.\n", int(flag.size()), flag.data(), help_flag.HelpFlagSpelling().c_str());
     // Don't exit, rely on `abort`.
+}
+
+// --- modules::PrintingConfigurator ---
+
+ta_test::modules::PrintingConfigurator::PrintingConfigurator()
+    : flag_color("color", "Color output using ANSI escape sequences (by default enabled when printing to terminal)",
+        [](Runner &runner, BasicModule &this_module, bool enable)
+        {
+            (void)this_module;
+            runner.SetEnableColor(enable);
+        }
+    ), flag_unicode("unicode", "Use Unicode characters for pseudographics (enabled by default)",
+        [](Runner &runner, BasicModule &this_module, bool enable)
+        {
+            (void)this_module;
+            runner.SetEnableUnicode(enable);
+        }
+    )
+{}
+
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::PrintingConfigurator::GetFlags()
+{
+    return {&flag_color, &flag_unicode};
 }
 
 // --- modules::ProgressPrinter ---
@@ -980,7 +1069,7 @@ void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
 void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
 {
     (void)data;
-    *this = {};
+    state = {};
 }
 
 void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo &data)
@@ -999,11 +1088,11 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo 
         std::string_view segment(it, new_it);
 
         // Pop the tail off the stack.
-        if (segment_index < stack.size() && stack[segment_index] != segment)
-            stack.resize(segment_index);
+        if (segment_index < state.stack.size() && state.stack[segment_index] != segment)
+            state.stack.resize(segment_index);
 
         // Push the segment into the stack, and print a line.
-        if (segment_index >= stack.size())
+        if (segment_index >= state.stack.size())
         {
             TextStyle cur_style;
 
@@ -1013,9 +1102,9 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo 
                 auto style_a = terminal.AnsiDeltaString(cur_style, style_index);
                 auto style_b = terminal.AnsiDeltaString(cur_style, style_total_count);
 
-                std::fprintf(output_stream, "%s%*zu%s/%zu",
+                terminal.Print("%s%*zu%s/%zu",
                     style_a.data(),
-                    num_tests_width, test_counter + 1,
+                    num_tests_width, state.test_counter + 1,
                     style_b.data(),
                     data.all_tests->num_tests
                 );
@@ -1023,7 +1112,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo 
                 // Failed test count.
                 if (data.all_tests->num_failed_tests > 0)
                 {
-                    std::fprintf(output_stream, " %s[%zu]",
+                    terminal.Print(" %s[%zu]",
                         terminal.AnsiDeltaString(cur_style, style_failed_count).data(),
                         data.all_tests->num_failed_tests
                     );
@@ -1038,30 +1127,30 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo 
                 if (data.all_tests->num_failed_tests > 0)
                     gap_width += std::snprintf(nullptr, 0, "%zu", data.all_tests->num_failed_tests) + 3;
 
-                std::fprintf(output_stream, "%*s", gap_width, "");
+                terminal.Print("%*s", gap_width, "");
             }
 
             // The gutter border.
-            std::fprintf(output_stream, "%s%s",
+            terminal.Print("%s%s",
                 terminal.AnsiDeltaString(cur_style, style_gutter_border).data(),
                 chars_test_counter_separator.c_str()
             );
 
             // The indentation.
-            if (!stack.empty())
+            if (!state.stack.empty())
             {
                 // Switch to the indentation guide color.
-                std::fprintf(output_stream, "%s", terminal.AnsiDeltaString(cur_style, style_indentation_guide).data());
+                terminal.Print("%s", terminal.AnsiDeltaString(cur_style, style_indentation_guide).data());
                 // Print the required number of guides.
-                for (std::size_t repeat = 0; repeat < stack.size(); repeat++)
-                    std::fprintf(output_stream, "%s", chars_indentation_guide.c_str());
+                for (std::size_t repeat = 0; repeat < state.stack.size(); repeat++)
+                    terminal.Print("%s", chars_indentation_guide.c_str());
             }
 
             // Whether we're reentering this group after a failed test.
-            bool is_continued = segment_index < failed_test_stack.size() && failed_test_stack[segment_index] == segment;
+            bool is_continued = segment_index < state.failed_test_stack.size() && state.failed_test_stack[segment_index] == segment;
 
             // Print the test name.
-            std::fprintf(output_stream, "%s%s%.*s%s%s\n",
+            terminal.Print("%s%s%.*s%s%s\n",
                 terminal.AnsiDeltaString(cur_style, is_continued ? style_continuing_group : new_it == test_name.end() ? style_name : style_group_name).data(),
                 is_continued ? chars_test_prefix_continuing_group.c_str() : chars_test_prefix.c_str(),
                 int(segment.size()), segment.data(),
@@ -1070,7 +1159,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo 
             );
 
             // Push to the stack.
-            stack.push_back(segment);
+            state.stack.push_back(segment);
         }
 
         if (new_it == test_name.end())
@@ -1080,7 +1169,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo 
         it = new_it + 1;
     }
 
-    test_counter++;
+    state.test_counter++;
 }
 
 void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const SingleTestResults &data)
@@ -1103,7 +1192,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const SingleTestResu
             name = name.substr(sep + 1);
         }
 
-        fprintf(output_stream, "%s%s\n%s%s%s%.*s%s%.*s%s\n",
+        terminal.Print("%s%s\n%s%s%s%.*s%s%.*s%s\n",
             terminal.AnsiResetString().data(),
             common_chars.LocationToString(data.test->Location()).c_str(),
             style_message.data(),
@@ -1119,12 +1208,12 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const SingleTestResu
     // Adjust the group name stack to show the group names again after a failed test.
     if (data.failed)
     {
-        failed_test_stack = std::move(stack);
-        stack.clear();
+        state.failed_test_stack = std::move(state.stack);
+        state.stack.clear();
     }
     else
     {
-        failed_test_stack.clear();
+        state.failed_test_stack.clear();
     }
 }
 
@@ -1133,12 +1222,12 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const SingleTestResu
 void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &data)
 {
     // Reset color.
-    std::fprintf(output_stream, "%s\n", terminal.AnsiResetString().data());
+    terminal.Print("%s\n", terminal.AnsiResetString().data());
 
     if (data.num_tests == 0)
     {
         // No tests to run.
-        std::fprintf(output_stream, "%sNO TESTS TO RUN%s\n",
+        terminal.Print("%sNO TESTS TO RUN%s\n",
             terminal.AnsiDeltaString({}, style_no_tests).data(),
             terminal.AnsiResetString().data()
         );
@@ -1148,7 +1237,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
         std::size_t num_passed = data.num_tests - data.num_failed_tests;
         if (num_passed > 0)
         {
-            std::fprintf(output_stream, "%s%s%zu TEST%s PASSED%s\n",
+            terminal.Print("%s%s%zu TEST%s PASSED%s\n",
                 terminal.AnsiDeltaString({}, data.num_failed_tests == 0 ? style_all_passed : style_num_passed).data(),
                 data.num_failed_tests == 0 && data.num_tests > 1 ? "ALL " : "",
                 num_passed,
@@ -1159,7 +1248,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 
         if (data.num_failed_tests > 0)
         {
-            std::fprintf(output_stream, "%s%s%zu TEST%s FAILED%s\n",
+            terminal.Print("%s%s%zu TEST%s FAILED%s\n",
                 terminal.AnsiDeltaString({}, style_num_failed).data(),
                 num_passed == 0 && data.num_failed_tests > 1 ? "ALL " : "",
                 data.num_failed_tests,
@@ -1196,7 +1285,7 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
             std::size_t column = printed_code_indentation;
 
             const text::TextCanvas::CellInfo assertion_macro_cell_info = {.style = style_assertion_macro, .important = true};
-            column += canvas.DrawText(line_counter, column, chars_assertion_macro_prefix, assertion_macro_cell_info);
+            column += canvas.DrawText(line_counter, column, data.IsSoft() ? chars_assertion_macro_prefix_soft : chars_assertion_macro_prefix, assertion_macro_cell_info);
             column += text::expr::DrawExprToCanvas(canvas, style_expr, line_counter, column, data.Expr());
             column += canvas.DrawText(line_counter, column, chars_assertion_macro_suffix, assertion_macro_cell_info);
             line_counter++;
@@ -1332,7 +1421,7 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
 
         canvas.InsertLineBefore(canvas.NumLines());
 
-        canvas.Print(terminal, output_stream);
+        canvas.Print(terminal);
 
         if (print_assertion_stack && data.enclosing_assertion)
             lambda(lambda, *data.enclosing_assertion, depth + 1);
@@ -1347,7 +1436,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const std::exceptio
 {
     TextStyle cur_style;
 
-    std::fprintf(output_stream, "%s%s%s\n",
+    terminal.Print("%s%s%s\n",
         terminal.AnsiResetString().data(),
         terminal.AnsiDeltaString(cur_style, common_styles.error).data(),
         chars_error.c_str()
@@ -1359,7 +1448,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const std::exceptio
         {
             auto style_a = terminal.AnsiDeltaString(cur_style, style_exception_type);
             auto style_b = terminal.AnsiDeltaString(cur_style, style_exception_message);
-            std::fprintf(output_stream, "%s%s%s%s\n%s%s%s\n",
+            terminal.Print("%s%s%s%s\n%s%s%s\n",
                 style_a.data(),
                 chars_indent_type.c_str(),
                 info->type_name.c_str(),
@@ -1371,7 +1460,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const std::exceptio
         }
         else
         {
-            std::fprintf(output_stream, "%s%s%s\n",
+            terminal.Print("%s%s%s\n",
                 terminal.AnsiDeltaString(cur_style, style_exception_type).data(),
                 chars_indent_type.c_str(),
                 chars_unknown_exception.c_str()
@@ -1379,10 +1468,27 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const std::exceptio
         }
     });
 
-    std::fprintf(output_stream, "%s\n", terminal.AnsiResetString().data());
+    terminal.Print("%s\n", terminal.AnsiResetString().data());
 }
 
 // --- modules::DebuggerDetector ---
+
+ta_test::modules::DebuggerDetector::DebuggerDetector()
+    : flag_break("break", "Trigger a breakpoint on any failure, this will crash if no debugger is attached (by default enabled if a debugger is attached)",
+        [](Runner &runner, BasicModule &this_module, bool enable)
+        {
+            (void)runner;
+
+            // The cast should never fail.
+            dynamic_cast<DebuggerDetector &>(this_module).break_on_failure = enable;
+        }
+    )
+{}
+
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::DebuggerDetector::GetFlags()
+{
+    return {&flag_break};
+}
 
 bool ta_test::modules::DebuggerDetector::IsDebuggerAttached() const
 {
@@ -1391,7 +1497,7 @@ bool ta_test::modules::DebuggerDetector::IsDebuggerAttached() const
 
 void ta_test::modules::DebuggerDetector::OnAssertionFailed(const BasicAssertionInfo &data)
 {
-    if (IsDebuggerAttached())
+    if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
         data.should_break = true;
 }
 

@@ -4,6 +4,7 @@
 #include <array>
 #include <compare>
 #include <concepts>
+#include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <version>
 
 #ifndef CFG_TA_API
 #if defined(_WIN32) && CFG_TA_SHARED
@@ -107,28 +109,35 @@
 #define CFG_TA_EXTRA_ARG_MACROS
 #endif
 
-// Whether to use libfmt.
+// Whether to use libfmt instead of `std::format`.
+// If you manually override the formatting function using other macros below, this will be ignored.
 #ifndef CFG_TA_USE_LIBFMT
+#ifdef __cpp_lib_format
 #define CFG_TA_USE_LIBFMT 0
+#elif __has_include(<fmt/format.h>)
+#define CFG_TA_USE_LIBFMT 1
+#else
+#error ta_test needs a compiler supporting `#include <format>`, or installed libfmt, or a custom formatting function to be configured.
+#endif
 #endif
 
-// Which formatting function to use.
+// The formatting function, `::std::format` or something similar.
 #ifndef CFG_TA_FORMAT
 #if CFG_TA_USE_LIBFMT
 #include <fmt/format.h>
-#define CFG_TA_FORMAT(...) ::fmt::format(__VA_ARGS__)
+#define CFG_TA_FORMAT ::fmt::format
 #else
 #include <format>
-#define CFG_TA_FORMAT(...) ::std::format(__VA_ARGS__)
+#define CFG_TA_FORMAT ::std::format
 #endif
 #endif
 
-// Whether `{:?}` is a valid format string for strings and characters.
-#ifndef CFG_TA_FORMAT_SUPPORTS_QUOTED
+// Whether `{:?}` is a valid format for strings and characters.
+#ifndef CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS
 #if CFG_TA_CXX_STANDARD >= 23 || CFG_TA_USE_LIBFMT
-#define CFG_TA_FORMAT_SUPPORTS_QUOTED 1
+#define CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS 1
 #else
-#define CFG_TA_FORMAT_SUPPORTS_QUOTED 0
+#define CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS 0
 #endif
 #endif
 
@@ -139,15 +148,20 @@
 #define CFG_TA_DETECT_DEBUGGER 1
 #endif
 
-// Check condition, immediately fail the test if false.
-#define TA_CHECK(...) DETAIL_TA_CHECK(throw ::ta_test::InterruptTestException(::ta_test::detail::ConstructInterruptTestException{});, #__VA_ARGS__, __VA_ARGS__)
-// Check condition, later fail the test if false.
-#define TA_SOFT_CHECK(...) DETAIL_TA_CHECK(, #__VA_ARGS__, __VA_ARGS__)
+// Whether we should try to detect stdout being attached to an interactive terminal,
+#ifndef CFG_TA_DETECT_TERMINAL
+#define CFG_TA_DETECT_TERMINAL 1
+#endif
 
-#define DETAIL_TA_CHECK(on_fail_, str_, ...) \
+// Check condition, immediately fail the test if false.
+#define TA_CHECK(...) DETAIL_TA_CHECK(false, throw ::ta_test::InterruptTestException(::ta_test::detail::ConstructInterruptTestException{});, #__VA_ARGS__, __VA_ARGS__)
+// Check condition, later fail the test if false.
+#define TA_SOFT_CHECK(...) DETAIL_TA_CHECK(true,, #__VA_ARGS__, __VA_ARGS__)
+
+#define DETAIL_TA_CHECK(is_soft_, on_fail_, str_, ...) \
     /* Using `_ta_test_name_tag` to force this to be called only in tests. */\
     /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (::ta_test::detail::AssertWrapper<str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion((__VA_ARGS__) ? true : false)) {} else {\
+    if (::ta_test::detail::AssertWrapper<is_soft_, str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion((__VA_ARGS__) ? true : false)) {} else {\
         if (_ta_assertion.should_break) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
         on_fail_ \
     }
@@ -178,20 +192,11 @@
 namespace ta_test
 {
     struct Runner;
+    struct BasicModule;
 
-    // The common base of all modules.
-    struct BasicModule
+    // Parsing command line arguments.
+    namespace flags
     {
-        virtual ~BasicModule() = default;
-
-        BasicModule() = default;
-        BasicModule(const BasicModule &) = default;
-        BasicModule(BasicModule &&) = default;
-        BasicModule &operator=(const BasicModule &) = default;
-        BasicModule &operator=(BasicModule &&) = default;
-
-        // --- PARSING COMMAND LINE ARGUMENTS ---
-
         // The common base for command line flags.
         struct BasicFlag
         {
@@ -208,6 +213,7 @@ namespace ta_test
             // If `request_arg` runs out of arguments and returns null, you can immediately return false too, this will be reported as an error regardless.
             virtual bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) = 0;
         };
+
         // A command line flag taking no arguments.
         struct SimpleFlag : BasicFlag
         {
@@ -240,6 +246,7 @@ namespace ta_test
                 return true;
             }
         };
+
         // A command line flag for a boolean.
         struct BoolFlag : BasicFlag
         {
@@ -280,14 +287,66 @@ namespace ta_test
             }
         };
 
+        // A command line flag that takes a string.
+        struct StringFlag : BasicFlag
+        {
+            std::string flag;
+
+            using Callback = std::function<void(Runner &runner, BasicModule &this_module, std::string_view value)>;
+            Callback callback;
+
+            StringFlag(std::string flag, std::string help_desc, Callback callback)
+                : BasicFlag(std::move(help_desc)), flag(std::move(flag)), callback(std::move(callback))
+            {}
+
+            std::string HelpFlagSpelling() const override
+            {
+                return "--" + flag + " ...";
+            }
+
+            bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
+            {
+                (void)request_arg;
+
+                if (!input.starts_with("--"))
+                    return false;
+                input.remove_prefix(2);
+
+                if (input != flag)
+                    return false;
+
+                auto arg = request_arg();
+                if (!arg)
+                    return false;
+
+                callback(runner, this_module, *arg);
+                return true;
+            }
+        };
+    }
+
+    // The common base of all modules.
+    struct BasicModule
+    {
+        virtual ~BasicModule() = default;
+
+        BasicModule() = default;
+        BasicModule(const BasicModule &) = default;
+        BasicModule(BasicModule &&) = default;
+        BasicModule &operator=(const BasicModule &) = default;
+        BasicModule &operator=(BasicModule &&) = default;
+
+        // --- PARSING COMMAND LINE ARGUMENTS ---
+
+
         // Should return a list of the supported command line flags.
         // Store the flags permanently in your class, those pointers are obviously non-owning.
-        [[nodiscard]] virtual std::vector<BasicFlag *> GetFlags() {return {};}
+        [[nodiscard]] virtual std::vector<flags::BasicFlag *> GetFlags() {return {};}
         // This is called when an unknown flag is passed to the command line.
         // `abort` defaults to true. If it remains true after this is called on all modules, the application is terminated.
         virtual void OnUnknownFlag(std::string_view flag, bool &abort) {(void)flag; (void)abort;}
         // Same, but for when a flag lacks an argument.
-        virtual void OnMissingFlagArgument(std::string_view flag, const BasicFlag &flag_obj, bool &abort) {(void)flag; (void)flag_obj; (void)abort;}
+        virtual void OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort) {(void)flag; (void)flag_obj; (void)abort;}
 
         // --- RUNNING TESTS ---
 
@@ -368,6 +427,9 @@ namespace ta_test
 
             // Where the assertion is located in the source.
             [[nodiscard]] virtual const SourceLoc &SourceLocation() const = 0;
+
+            // Whether this is a 'soft' assertion, i.e. doesn't immediately fail the test when false.
+            [[nodiscard]] virtual bool IsSoft() const = 0;
 
             // How many assertions are currently running.
             [[nodiscard]] int AssertionStackDepth() const
@@ -565,6 +627,9 @@ namespace ta_test
         // Whether the debugger is currently attached.
         // `false` if unknown or disabled with `CFG_TA_DETECT_DEBUGGER`
         CFG_TA_API bool IsDebuggerAttached();
+
+        // Whether stdout is attached to a terminal.
+        CFG_TA_API bool IsTerminalAttached();
     }
 
 
@@ -631,7 +696,22 @@ namespace ta_test
     // Configuration for printing text.
     struct Terminal
     {
-        bool color = true;
+        bool enable_color = platform::IsTerminalAttached();
+
+        // The characters are written to this `std::vprintf`-style callback.
+        // Defaults to `SetFileOutput(stdout)`.
+        std::function<void(const char *format, std::va_list args)> output_func;
+
+        CFG_TA_API Terminal();
+
+        // Sets `output_func` to print to `stream`.
+        CFG_TA_API void SetFileOutput(FILE *stream);
+
+        // Prints a message using `output_func`.
+        #ifdef __GNUC__
+        __attribute__((__format__(__printf__, 2, 3)))
+        #endif
+        CFG_TA_API void Print(const char *format, ...) const;
 
         // Printing this string resets the text styles. It's always null-terminated.
         [[nodiscard]] CFG_TA_API std::string_view AnsiResetString() const;
@@ -711,7 +791,7 @@ namespace ta_test
                 bracket_bottom = '_';
                 bracket_corner_bottom_left = '|';
                 bracket_corner_bottom_right = '|';
-                bracket_bottom_tail = '.';
+                bracket_bottom_tail = '_';
                 bracket_top = '-';
                 bracket_corner_top_left = '|';
                 bracket_corner_top_right = '|';
@@ -1064,7 +1144,7 @@ namespace ta_test
                         segment_start = end_pos;
                     };
 
-                    if (terminal.color)
+                    if (terminal.enable_color)
                     {
                         for (std::size_t i = 0; i < line.text.size(); i++)
                         {
@@ -1080,15 +1160,15 @@ namespace ta_test
 
                     // Reset the style after the last line.
                     // Must do it before the line feed, otherwise the "core dumped" message also gets colored.
-                    if (terminal.color && &line == &lines.back() && cur_style != TextStyle{})
+                    if (terminal.enable_color && &line == &lines.back() && cur_style != TextStyle{})
                         func(terminal.AnsiResetString());
 
                     func(std::string_view("\n"));
                 }
             }
 
-            // Prints to a stream.
-            CFG_TA_API void Print(const Terminal &terminal, FILE *stream) const;
+            // Prints to a `terminal` stream.
+            CFG_TA_API void Print(const Terminal &terminal) const;
 
             // The number of lines.
             [[nodiscard]] CFG_TA_API std::size_t NumLines() const;
@@ -1502,7 +1582,6 @@ namespace ta_test
         BasicPrintingModule &operator=(const BasicPrintingModule &) = default;
         BasicPrintingModule &operator=(BasicPrintingModule &&) = default;
 
-        FILE *output_stream = stdout;
         Terminal terminal;
         CommonStyles common_styles;
         CommonChars common_chars;
@@ -1525,7 +1604,7 @@ namespace ta_test
     {
         std::string operator()(const T &value) const
         {
-            #if CFG_TA_FORMAT_SUPPORTS_QUOTED
+            #if CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS
             if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
             {
                 return CFG_TA_FORMAT("{:?}", value);
@@ -1588,7 +1667,7 @@ namespace ta_test
             CFG_TA_API ~BasicAssertWrapper();
         };
 
-        template <ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
+        template <bool IsSoftAssertion, ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
         struct AssertWrapper : BasicAssertWrapper
         {
             // The number of arguments.
@@ -1617,10 +1696,10 @@ namespace ta_test
             struct ArgData
             {
                 // Information about each individual argument.
-                std::array<ArgInfo, num_args> info;
+                std::array<ArgInfo, num_args> info{};
 
                 // Maps `__COUNTER__` values to argument indices. Sorted by counter, but the values might not be consecutive.
-                std::array<CounterIndexPair, num_args> counter_to_arg_index;
+                std::array<CounterIndexPair, num_args> counter_to_arg_index{};
 
                 // Arguments in the order they should be printed. Which is: highest depth first, then smaller counter values first.
                 std::array<std::size_t, num_args> args_in_draw_order{};
@@ -1629,98 +1708,101 @@ namespace ta_test
             static constexpr ArgData arg_data = []{
                 ArgData ret;
 
-                // Parse expanded string.
-                std::size_t pos = 0;
-                text::expr::ParseExpr(ExpandedString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
+                if constexpr (num_args > 0)
                 {
-                    if (name != "_ta_handle_arg_")
-                        return;
-
-                    if (pos >= num_args)
-                        HardError("More `$(...)`s than expected.");
-
-                    ArgInfo &new_info = ret.info[pos];
-                    new_info.depth = depth;
-
-                    for (const char &ch : args)
+                    // Parse expanded string.
+                    std::size_t pos = 0;
+                    text::expr::ParseExpr(ExpandedString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
                     {
-                        if (text::IsDigit(ch))
-                            new_info.counter = new_info.counter * 10 + (ch - '0');
-                        else if (ch == ',')
-                            break;
-                        else
-                            HardError("Lexer error: Unexpected character after the counter macro.");
-                    }
+                        if (name != "_ta_handle_arg_")
+                            return;
 
-                    CounterIndexPair &new_pair = ret.counter_to_arg_index[pos];
-                    new_pair.index = pos;
-                    new_pair.counter = new_info.counter;
+                        if (pos >= num_args)
+                            HardError("More `$(...)`s than expected.");
 
-                    pos++;
-                });
-                if (pos != num_args)
-                    HardError("Less `$(...)`s than expected.");
+                        ArgInfo &new_info = ret.info[pos];
+                        new_info.depth = depth;
 
-                // Parse raw string.
-                pos = 0;
-                text::expr::ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
-                {
-                    (void)depth;
-
-                    if (!text::IsArgMacroName(name))
-                        return;
-
-                    if (pos >= num_args)
-                        HardError("More `$(...)`s than expected.");
-
-                    ArgInfo &this_info = ret.info[pos];
-
-                    this_info.expr_offset = std::size_t(args.data() - RawString.view().data());
-                    this_info.expr_size = args.size();
-
-                    this_info.ident_offset = std::size_t(name.data() - RawString.view().data());
-                    this_info.ident_size = name.size();
-
-                    // Trim side whitespace from `args`.
-                    std::string_view trimmed_args = args;
-                    while (!trimmed_args.empty() && text::IsWhitespace(trimmed_args.front()))
-                        trimmed_args.remove_prefix(1);
-                    while (!trimmed_args.empty() && text::IsWhitespace(trimmed_args.back()))
-                        trimmed_args.remove_suffix(1);
-
-                    // Decide if we should draw a bracket for this argument.
-                    for (char ch : trimmed_args)
-                    {
-                        // Whatever the condition is, it should trigger for all arguments with nested arguments.
-                        if (!text::IsIdentifierChar(ch))
+                        for (const char &ch : args)
                         {
-                            this_info.need_bracket = true;
-                            break;
+                            if (text::IsDigit(ch))
+                                new_info.counter = new_info.counter * 10 + (ch - '0');
+                            else if (ch == ',')
+                                break;
+                            else
+                                HardError("Lexer error: Unexpected character after the counter macro.");
                         }
-                    }
 
-                    pos++;
-                });
-                if (pos != num_args)
-                    HardError("Less `$(...)`s than expected.");
+                        CounterIndexPair &new_pair = ret.counter_to_arg_index[pos];
+                        new_pair.index = pos;
+                        new_pair.counter = new_info.counter;
 
-                // Sort `counter_to_arg_index` by counter, to allow binary search.
-                // Sorting is necessary when the arguments are nested.
-                std::sort(ret.counter_to_arg_index.begin(), ret.counter_to_arg_index.end(),
-                    [](const CounterIndexPair &a, const CounterIndexPair &b){return a.counter < b.counter;}
-                );
+                        pos++;
+                    });
+                    if (pos != num_args)
+                        HardError("Less `$(...)`s than expected.");
 
-                // Fill and sort `args_in_draw_order`.
-                for (std::size_t i = 0; i < num_args; i++)
-                    ret.args_in_draw_order[i] = i;
-                std::sort(ret.args_in_draw_order.begin(), ret.args_in_draw_order.end(), [&](std::size_t a, std::size_t b)
-                {
-                    if (auto d = ret.info[a].depth <=> ret.info[b].depth; d != 0)
-                        return d > 0;
-                    if (auto d = ret.info[a].counter <=> ret.info[b].counter; d != 0)
-                        return d < 0;
-                    return false;
-                });
+                    // Parse raw string.
+                    pos = 0;
+                    text::expr::ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
+                    {
+                        (void)depth;
+
+                        if (!text::IsArgMacroName(name))
+                            return;
+
+                        if (pos >= num_args)
+                            HardError("More `$(...)`s than expected.");
+
+                        ArgInfo &this_info = ret.info[pos];
+
+                        this_info.expr_offset = std::size_t(args.data() - RawString.view().data());
+                        this_info.expr_size = args.size();
+
+                        this_info.ident_offset = std::size_t(name.data() - RawString.view().data());
+                        this_info.ident_size = name.size();
+
+                        // Trim side whitespace from `args`.
+                        std::string_view trimmed_args = args;
+                        while (!trimmed_args.empty() && text::IsWhitespace(trimmed_args.front()))
+                            trimmed_args.remove_prefix(1);
+                        while (!trimmed_args.empty() && text::IsWhitespace(trimmed_args.back()))
+                            trimmed_args.remove_suffix(1);
+
+                        // Decide if we should draw a bracket for this argument.
+                        for (char ch : trimmed_args)
+                        {
+                            // Whatever the condition is, it should trigger for all arguments with nested arguments.
+                            if (!text::IsIdentifierChar(ch))
+                            {
+                                this_info.need_bracket = true;
+                                break;
+                            }
+                        }
+
+                        pos++;
+                    });
+                    if (pos != num_args)
+                        HardError("Less `$(...)`s than expected.");
+
+                    // Sort `counter_to_arg_index` by counter, to allow binary search.
+                    // Sorting is necessary when the arguments are nested.
+                    std::sort(ret.counter_to_arg_index.begin(), ret.counter_to_arg_index.end(),
+                        [](const CounterIndexPair &a, const CounterIndexPair &b){return a.counter < b.counter;}
+                    );
+
+                    // Fill and sort `args_in_draw_order`.
+                    for (std::size_t i = 0; i < num_args; i++)
+                        ret.args_in_draw_order[i] = i;
+                    std::sort(ret.args_in_draw_order.begin(), ret.args_in_draw_order.end(), [&](std::size_t a, std::size_t b)
+                    {
+                        if (auto d = ret.info[a].depth <=> ret.info[b].depth; d != 0)
+                            return d > 0;
+                        if (auto d = ret.info[a].counter <=> ret.info[b].counter; d != 0)
+                            return d < 0;
+                        return false;
+                    });
+                }
 
                 return ret;
             }();
@@ -1728,6 +1810,7 @@ namespace ta_test
             static constexpr BasicModule::SourceLoc location{.file = FileName.view(), .line = LineNumber};
             const BasicModule::SourceLoc &SourceLocation() const override {return location;}
 
+            bool IsSoft() const override {return IsSoftAssertion;}
             std::string_view Expr() const override {return RawString.view();}
             std::span<const ArgInfo> ArgsInfo() const override {return arg_data.info;}
             std::span<const std::size_t> ArgsInDrawOrder() const override {return arg_data.args_in_draw_order;}
@@ -1815,6 +1898,8 @@ namespace ta_test
         struct SpecificTest : BasicTest
         {
             static constexpr bool test_name_is_valid = []{
+                if (TestName.view().empty())
+                    return false;
                 if (!std::all_of(TestName.view().begin(), TestName.view().end(), [](char ch){return text::IsIdentifierCharStrict(ch) || ch == '/';}))
                     return false;
                 if (std::adjacent_find(TestName.view().begin(), TestName.view().end(), [](char a, char b){return a == '/' && b == '/';}) != TestName.view().end())
@@ -1914,24 +1999,22 @@ namespace ta_test
                 HardError(CFG_TA_FORMAT("No such module in the list: `{}`.", text::Demangler{}(typeid(T).name())), HardErrorKind::user);
         }
 
-        // Sets the output stream for every module that prints stuff.
+        // Configures every `BasicPrintingModule` to print to `stream`.
         void SetOutputStream(FILE *stream)
         {
-            for (const auto &m : modules)
+            SetTerminalSettings([&](Terminal &terminal)
             {
-                if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
-                    base->output_stream = stream;
-            }
+                terminal.SetFileOutput(stream);
+            });
         }
 
-        // Sets the output stream for every module that prints stuff.
-        void SetTerminalSettings(const Terminal &terminal)
+        // Configures every `BasicPrintingModule` to print to `stream`.
+        void SetEnableColor(bool enable)
         {
-            for (const auto &m : modules)
+            SetTerminalSettings([&](Terminal &terminal)
             {
-                if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
-                    base->terminal = terminal;
-            }
+                terminal.enable_color = enable;
+            });
         }
 
         // Sets the output stream for every module that prints stuff.
@@ -1941,6 +2024,16 @@ namespace ta_test
             {
                 if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
                     base->EnableUnicode(enable);
+            }
+        }
+
+        // Calls `func` on `Terminal` of every `BasicPrintingModule`.
+        void SetTerminalSettings(std::function<void(Terminal &terminal)> func)
+        {
+            for (const auto &m : modules)
+            {
+                if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+                    func(base->terminal);
             }
         }
     };
@@ -1953,12 +2046,22 @@ namespace ta_test
         // Responds to `--help` by printing the flags provided by all other modules.
         struct HelpPrinter : BasicPrintingModule
         {
-            SimpleFlag help_flag;
+            flags::SimpleFlag help_flag;
 
             CFG_TA_API HelpPrinter();
-            CFG_TA_API std::vector<BasicFlag *> GetFlags() override;
-            CFG_TA_API void OnUnknownFlag(std::string_view flag, bool &abort) override;
-            CFG_TA_API void OnMissingFlagArgument(std::string_view flag, const BasicFlag &flag_obj, bool &abort) override;
+            std::vector<flags::BasicFlag *> GetFlags() override;
+            void OnUnknownFlag(std::string_view flag, bool &abort) override;
+            void OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort) override;
+        };
+
+        // Responds to various command line flags to configure other printing modules.
+        struct PrintingConfigurator : BasicModule
+        {
+            flags::BoolFlag flag_color;
+            flags::BoolFlag flag_unicode;
+
+            CFG_TA_API PrintingConfigurator();
+            std::vector<flags::BasicFlag *> GetFlags() override;
         };
 
         // Prints the test names as they're being run.
@@ -1998,11 +2101,15 @@ namespace ta_test
             TextStyle style_failed_group_name = {.color = TextColor::dark_red};
 
           private:
-            std::size_t test_counter = 0;
-            std::vector<std::string_view> stack;
-            // A copy of the stack from the previous test, if it has failed.
-            // We use it to repeat the group names again, to show where we're restarting from.
-            std::vector<std::string_view> failed_test_stack;
+            struct State
+            {
+                std::size_t test_counter = 0;
+                std::vector<std::string_view> stack;
+                // A copy of the stack from the previous test, if it has failed.
+                // We use it to repeat the group names again, to show where we're restarting from.
+                std::vector<std::string_view> failed_test_stack;
+            };
+            State state;
 
           public:
             void EnableUnicode(bool enable) override;
@@ -2047,6 +2154,7 @@ namespace ta_test
             // How to print the assertion macro itself.
             TextStyle style_assertion_macro = {.color = TextColor::light_red, .bold = true};
             std::u32string chars_assertion_macro_prefix = U"TA_CHECK( ";
+            std::u32string chars_assertion_macro_prefix_soft = U"TA_SOFT_CHECK( ";
             std::u32string chars_assertion_macro_suffix = U" )";
 
             // Styles for the expression tokens.
@@ -2141,6 +2249,12 @@ namespace ta_test
             // If this is not set, will check whether the debugger is attached when an assertion fails, and break if it is.
             std::optional<bool> break_on_failure;
 
+            flags::BoolFlag flag_break;
+
+            CFG_TA_API DebuggerDetector();
+
+            std::vector<flags::BasicFlag *> GetFlags() override;
+
             CFG_TA_API bool IsDebuggerAttached() const;
             void OnAssertionFailed(const BasicAssertionInfo &data) override;
         };
@@ -2154,7 +2268,7 @@ namespace ta_test
 }
 
 // Manually support quoting strings if the formatting library can't do that.
-#if !CFG_TA_FORMAT_SUPPORTS_QUOTED
+#if !CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS
 namespace ta_test
 {
     template <typename Void>
