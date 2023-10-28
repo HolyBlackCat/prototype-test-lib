@@ -889,6 +889,8 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
                     break;
             }
 
+            if (!unknown)
+                break;
             if (ok && !*ok)
                 break;
         }
