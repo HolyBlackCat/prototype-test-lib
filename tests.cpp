@@ -22,7 +22,7 @@ TA_TEST(foo/bar)
 
 TA_TEST(test/lul/beta)
 {
-    TA_CHECK($(true) && $(foo()) == $(true));
+    // TA_CHECK($(true) && $(foo()) == $(true));
 }
 
 TA_TEST( foo/baz )
@@ -46,16 +46,19 @@ TA_TEST( foo/alpha1 ) {}
 TA_TEST( foo/alpha2 ) {}
 TA_TEST( foo/alpha3 ) {}
 
-int main()
+int main(int argc, char **argv)
 {
     ta_test::Runner runner;
     runner.SetDefaultModules();
+    runner.ProcessFlags(argc, argv);
     runner.SetOutputStream(stdout);
     runner.SetTerminalSettings({.color = true});
     return runner.Run();
 }
 
 // Make it so that `$(...)` is impossible to use outside of ASSERT?
+
+// After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
 
 // Scoped and unscoped logging macros.
 
@@ -73,6 +76,8 @@ int main()
 // Print to a custom fprintf-like callback instead of fprintf directly?
 
 // Multithreading?
+
+// Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
 
 
 /* Pending tests:

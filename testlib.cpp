@@ -742,6 +742,7 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
 void ta_test::Runner::SetDefaultModules()
 {
     modules.clear();
+    modules.push_back(MakeModule<modules::HelpPrinter>());
     modules.push_back(MakeModule<modules::ProgressPrinter>());
     modules.push_back(MakeModule<modules::ResultsPrinter>());
     modules.push_back(MakeModule<modules::AssertionPrinter>());
@@ -749,6 +750,99 @@ void ta_test::Runner::SetDefaultModules()
     modules.push_back(MakeModule<modules::ExceptionPrinter>());
     modules.push_back(MakeModule<modules::DebuggerDetector>());
     modules.push_back(MakeModule<modules::DebuggerStatePrinter>());
+}
+
+void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>()> next_flag, bool *ok)
+{
+    if (ok)
+        *ok = true;
+
+    auto Fail = [&]
+    {
+        if (ok)
+            *ok = false;
+        else
+            std::exit(2);
+    };
+
+    while (true)
+    {
+        std::optional<std::string_view> flag = next_flag();
+        if (!flag)
+            return;
+
+        std::optional<std::string_view> arg;
+
+        auto sep = flag->find_first_of('=');
+        if (sep != std::string_view::npos)
+        {
+            arg = flag->substr(sep + 1);
+            flag = flag->substr(0, sep);
+        }
+
+        for (const auto &m : modules)
+        {
+            auto flags = m->GetFlags();
+            for (auto &f : flags)
+            {
+                bool already_used_single_arg = false;
+                bool missing_arg = false;
+                bool unknown = !f->ProcessFlag(*this, *m, *flag, [&]() -> std::optional<std::string_view>
+                {
+                    if (arg)
+                    {
+                        if (already_used_single_arg)
+                        {
+                            // If the argument was specified with `=`, we don't allow additional arguments after that.
+                            missing_arg = true;
+                            return {};
+                        }
+                        already_used_single_arg = true;
+                        return *arg;
+                    }
+                    else
+                    {
+                        if (missing_arg)
+                            return {};
+                        auto ret = next_flag();
+                        if (!ret)
+                            missing_arg = true;
+                        return ret;
+                    }
+                });
+
+                // If we're missing an argument...
+                if (missing_arg)
+                {
+                    for (const auto &m2 : modules)
+                        m2->OnMissingFlagArgument(*flag, *f, missing_arg);
+                    if (missing_arg)
+                    {
+                        Fail();
+                        break;
+                    }
+                }
+
+                // If the argument is unknown...
+                if (unknown)
+                {
+                    for (const auto &m2 : modules)
+                        m2->OnUnknownFlag(*flag, unknown);
+                    if (unknown)
+                    {
+                        Fail();
+                        break;
+                    }
+                }
+            }
+
+            if (ok && !*ok)
+                break;
+        }
+
+        if (ok && !*ok)
+            break;
+    }
 }
 
 int ta_test::Runner::Run()
@@ -821,6 +915,48 @@ int ta_test::Runner::Run()
         m->OnPostRunTests(results);
 
     return results.num_failed_tests != 0;
+}
+
+// --- modules::HelpPrinter ---
+
+ta_test::modules::HelpPrinter::HelpPrinter()
+    : help_flag("help", "Show usage", [](Runner &runner, BasicModule &this_module){
+        std::vector<BasicFlag *> flags;
+        for (const auto &m : runner.modules)
+        {
+            auto more_flags = m->GetFlags();
+            flags.insert(flags.end(), more_flags.begin(), more_flags.end());
+        }
+
+        // The case shoudl never fail.
+        HelpPrinter &self = dynamic_cast<HelpPrinter &>(this_module);
+
+        std::fprintf(self.output_stream, "This is a test runner based on ta_test.\nAvailable options:\n");
+        for (BasicFlag *flag : flags)
+            std::fprintf(self.output_stream, "  %-12s  - %s\n", flag->HelpFlagSpelling().c_str(), flag->help_desc.c_str());
+
+        std::exit(0);
+    })
+{}
+
+std::vector<ta_test::BasicModule::BasicFlag *> ta_test::modules::HelpPrinter::GetFlags()
+{
+    return {&help_flag};
+}
+
+void ta_test::modules::HelpPrinter::OnUnknownFlag(std::string_view flag, bool &abort)
+{
+    (void)abort;
+    std::fprintf(output_stream, "Unknown flag `%.*s`, run with `%s` for usage.\n", int(flag.size()), flag.data(), help_flag.HelpFlagSpelling().c_str());
+    // Don't exit, rely on `abort`.
+}
+
+void ta_test::modules::HelpPrinter::OnMissingFlagArgument(std::string_view flag, const BasicFlag &flag_obj, bool &abort)
+{
+    (void)flag_obj;
+    (void)abort;
+    std::fprintf(output_stream, "Flag `%.*s` wasn't given enough arguments, run with `%s` for usage.\n", int(flag.size()), flag.data(), help_flag.HelpFlagSpelling().c_str());
+    // Don't exit, rely on `abort`.
 }
 
 // --- modules::ProgressPrinter ---

@@ -6,6 +6,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <functional>
@@ -15,6 +16,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <string_view>
 #include <string>
@@ -188,6 +190,107 @@ namespace ta_test
         BasicModule &operator=(const BasicModule &) = default;
         BasicModule &operator=(BasicModule &&) = default;
 
+        // --- PARSING COMMAND LINE ARGUMENTS ---
+
+        // The common base for command line flags.
+        struct BasicFlag
+        {
+            // The description of this flag in the help menu.
+            std::string help_desc;
+
+            BasicFlag(std::string help_desc) : help_desc(std::move(help_desc)) {}
+
+            // The spelling of this flag in the help menu, such as `--foo`, possibly with extra decorations around.
+            virtual std::string HelpFlagSpelling() const = 0;
+
+            // Given a string, try matching it against this flag. Return true if matched.
+            // Call `request_arg` if you need an extra argument. You can call it any number of times to request extra arguments.
+            // If `request_arg` runs out of arguments and returns null, you can immediately return false too, this will be reported as an error regardless.
+            virtual bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) = 0;
+        };
+        // A command line flag taking no arguments.
+        struct SimpleFlag : BasicFlag
+        {
+            std::string flag;
+
+            using Callback = std::function<void(Runner &runner, BasicModule &this_module)>;
+            Callback callback;
+
+            SimpleFlag(std::string flag, std::string help_desc, Callback callback)
+                : BasicFlag(std::move(help_desc)), flag(std::move(flag)), callback(std::move(callback))
+            {}
+
+            std::string HelpFlagSpelling() const override
+            {
+                return "--" + flag;
+            }
+
+            bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
+            {
+                (void)request_arg;
+
+                if (!input.starts_with("--"))
+                    return false;
+                input.remove_prefix(2);
+
+                if (input != flag)
+                    return false;
+
+                callback(runner, this_module);
+                return true;
+            }
+        };
+        // A command line flag for a boolean.
+        struct BoolFlag : BasicFlag
+        {
+            std::string flag;
+
+            using Callback = std::function<void(Runner &runner, BasicModule &this_module, bool value)>;
+            Callback callback;
+
+            BoolFlag(std::string flag, std::string help_desc, Callback callback)
+                : BasicFlag(std::move(help_desc)), flag(std::move(flag)), callback(std::move(callback))
+            {}
+
+            std::string HelpFlagSpelling() const override
+            {
+                return "--[no-]" + flag;
+            }
+
+            bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
+            {
+                (void)request_arg;
+
+                if (!input.starts_with("--"))
+                    return false;
+                input.remove_prefix(2);
+
+                bool value = true;
+                if (input.starts_with("no-"))
+                {
+                    value = false;
+                    input.remove_prefix(3);
+                }
+
+                if (input != flag)
+                    return false;
+
+                callback(runner, this_module, value);
+                return true;
+            }
+        };
+
+        // Should return a list of the supported command line flags.
+        // Store the flags permanently in your class, those pointers are obviously non-owning.
+        [[nodiscard]] virtual std::vector<BasicFlag *> GetFlags() {return {};}
+        // This is called when an unknown flag is passed to the command line.
+        // `abort` defaults to true. If it remains true after this is called on all modules, the application is terminated.
+        virtual void OnUnknownFlag(std::string_view flag, bool &abort) {(void)flag; (void)abort;}
+        // Same, but for when a flag lacks an argument.
+        virtual void OnMissingFlagArgument(std::string_view flag, const BasicFlag &flag_obj, bool &abort) {(void)flag; (void)flag_obj; (void)abort;}
+
+        // --- RUNNING TESTS ---
+
         // A simple source location.
         struct SourceLoc
         {
@@ -217,7 +320,7 @@ namespace ta_test
             [[nodiscard]] virtual SourceLoc Location() const = 0;
         };
         // Whether the test should run.
-        // This is called for every module, with `enable` initially set to true. If it ends up false, the test is skipped.
+        // This is called once for every test, with `enable` initially set to true. If it ends up false, the test is skipped.
         virtual void OnFilterTest(const BasicTestInfo &test, bool &enable) {(void)test; (void)enable;}
 
         struct RunTestsInfo
@@ -248,6 +351,8 @@ namespace ta_test
         virtual void OnPreRunSingleTest(const SingleTestInfo &data) {(void)data;}
         // This is called after every single test runs.
         virtual void OnPostRunSingleTest(const SingleTestResults &data) {(void)data;}
+
+        // --- FAILING TESTS ---
 
         struct BasicAssertionInfo
         {
@@ -329,6 +434,8 @@ namespace ta_test
 
         // An exception falls out of a test. This is called right before the test fails.
         virtual void OnUncaughtException(const std::exception_ptr &e) {(void)e;}
+
+        // --- MISC ---
 
         struct ExceptionInfo
         {
@@ -616,7 +723,7 @@ namespace ta_test
             if (enable)
             {
                 filename_linenumber_separator = "(";
-                filename_linenumber_suffix = ") :"; // Huh.
+                filename_linenumber_suffix = "):";
             }
             else
             {
@@ -1746,6 +1853,39 @@ namespace ta_test
         // Fills `modules` arrays with all the default modules. Old contents are destroyed.
         CFG_TA_API void SetDefaultModules();
 
+        // Handles the command line arguments in argc&argv style.
+        // If `ok` is null and something goes wrong, aborts the application. If `ok` isn't null, sets it to true on success or to false on failure.
+        // `argv[0]` is ignored.
+        void ProcessFlags(int argc, char **argv, bool *ok = nullptr)
+        {
+            ProcessFlags([argc = argc-1, argv = argv+1]() mutable -> std::optional<std::string_view>
+            {
+                if (argc <= 0)
+                    return {};
+                argc--;
+                return *argv++;
+            }, ok);
+        }
+        // Handles command line arguments from a list of strings.
+        // If `ok` is null and something goes wrong, aborts the application. If `ok` isn't null, sets it to true on success or to false on failure.
+        // The first element is not ignored (not considered to be the program name).
+        template <std::ranges::input_range R = std::initializer_list<std::string_view>>
+        requires std::convertible_to<std::ranges::range_value_t<R>, std::string_view>
+        void ProcessFlags(R &&range, bool *ok = nullptr)
+        {
+            ProcessFlags([it = range.begin(), end = range.end()]() mutable -> std::optional<std::string_view>
+            {
+                if (it == end)
+                    return {};
+                return std::string_view(*it++);
+            }, ok);
+        }
+        // The most low-level function to process command line flags.
+        // `next_flag()` should return the next flag, or null if none.
+        // If `ok` is null and something goes wrong, aborts the application. If `ok` isn't null, sets it to true on success or to false on failure.
+        CFG_TA_API void ProcessFlags(std::function<std::optional<std::string_view>()> next_flag, bool *ok = nullptr);
+
+
         // Runs all tests.
         CFG_TA_API int Run();
 
@@ -1810,6 +1950,17 @@ namespace ta_test
 
     namespace modules
     {
+        // Responds to `--help` by printing the flags provided by all other modules.
+        struct HelpPrinter : BasicPrintingModule
+        {
+            SimpleFlag help_flag;
+
+            CFG_TA_API HelpPrinter();
+            CFG_TA_API std::vector<BasicFlag *> GetFlags() override;
+            CFG_TA_API void OnUnknownFlag(std::string_view flag, bool &abort) override;
+            CFG_TA_API void OnMissingFlagArgument(std::string_view flag, const BasicFlag &flag_obj, bool &abort) override;
+        };
+
         // Prints the test names as they're being run.
         struct ProgressPrinter : BasicPrintingModule
         {
