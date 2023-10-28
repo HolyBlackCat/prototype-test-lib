@@ -849,8 +849,8 @@ void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
 
 void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo &data)
 {
-    // How much characters in the test counter.
-    const int test_counter_width = std::snprintf(nullptr, 0, "%zu", data.all_tests->num_tests);
+    // How much characters in the total test count.
+    const int num_tests_width = std::snprintf(nullptr, 0, "%zu", data.all_tests->num_tests);
 
     std::string_view test_name = data.test->Name();
 
@@ -879,15 +879,30 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo 
 
                 std::fprintf(output_stream, "%s%*zu%s/%zu",
                     style_a.data(),
-                    test_counter_width, test_counter + 1,
+                    num_tests_width, test_counter + 1,
                     style_b.data(),
                     data.all_tests->num_tests
                 );
+
+                // Failed test count.
+                if (data.all_tests->num_failed_tests > 0)
+                {
+                    std::fprintf(output_stream, " %s[%zu]",
+                        terminal.AnsiDeltaString(cur_style, style_failed_count).data(),
+                        data.all_tests->num_failed_tests
+                    );
+                }
             }
             else
             {
                 // No test index, just a gap.
-                std::fprintf(output_stream, "%*s", test_counter_width * 2 + 1, "");
+
+                int gap_width = num_tests_width * 2 + 1;
+
+                if (data.all_tests->num_failed_tests > 0)
+                    gap_width += std::snprintf(nullptr, 0, "%zu", data.all_tests->num_failed_tests) + 3;
+
+                std::fprintf(output_stream, "%*s", gap_width, "");
             }
 
             // The gutter border.

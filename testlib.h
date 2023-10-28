@@ -237,7 +237,7 @@ namespace ta_test
 
         struct SingleTestInfo
         {
-            const RunTestsInfo *all_tests = nullptr;
+            const RunTestsResults *all_tests = nullptr;
             const BasicTestInfo *test = nullptr;
         };
         struct SingleTestResults : SingleTestInfo
@@ -1836,6 +1836,8 @@ namespace ta_test
             TextStyle style_index = {.color = TextColor::light_green, .bold = true};
             // The total test count printed after each test index.
             TextStyle style_total_count = {.color = TextColor::dark_green};
+            // The failed test counter.
+            TextStyle style_failed_count = {.color = TextColor::light_red};
             // The line that separates the test counter from the test names/groups.
             TextStyle style_gutter_border = {.color = TextColorGrayscale24(10), .bold = true};
 
