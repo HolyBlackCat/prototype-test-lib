@@ -1203,11 +1203,12 @@ namespace ta_test
             // Accesses the cell info for the specified cell. The cell must exist.
             [[nodiscard]] CFG_TA_API CellInfo &CellInfoAt(std::size_t line, std::size_t pos);
 
-            // Draws a text.
+            // Draws a string.
+            // Wanted to call this `DrawText`, but that conflicts with a WinAPI macro! >:o
             // Returns `text.size()`.
-            CFG_TA_API std::size_t DrawText(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info = {.style = {}, .important = true});
+            CFG_TA_API std::size_t DrawString(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info = {.style = {}, .important = true});
             // Draws a UTF8 text. Returns the text size after converting to UTF32.
-            CFG_TA_API std::size_t DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true});
+            CFG_TA_API std::size_t DrawString(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true});
 
             // Draws a horizontal row of `ch`, starting at `(column, line_start)`, of width `width`.
             // If `skip_important == true`, don't overwrite important cells.
@@ -2092,6 +2093,8 @@ namespace ta_test
             TextStyle style_total_count = {.color = TextColor::dark_green};
             // The failed test counter.
             TextStyle style_failed_count = {.color = TextColor::light_red};
+            // Some decorations around the failed test counter.
+            TextStyle style_failed_count_decorations = {.color = TextColor::dark_red};
             // The line that separates the test counter from the test names/groups.
             TextStyle style_gutter_border = {.color = TextColorGrayscale24(10), .bold = true};
 

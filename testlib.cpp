@@ -4,6 +4,11 @@
 
 #include "testlib.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX 1
+#endif
+
 #if CFG_TA_CXXABI_DEMANGLE
 #include <cxxabi.h>
 #endif
@@ -84,7 +89,7 @@ bool ta_test::platform::IsTerminalAttached()
     // We cache the return value.
     static bool ret = []{
         #if defined(_WIN32)
-        return GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == 0;
+        return GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
         #elif defined(DETAIL_TA_USE_ISATTY)
         return isatty(STDOUT_FILENO) == 1;
         #else
@@ -131,12 +136,32 @@ void ta_test::Terminal::Print(const char *format, ...) const
     output_func(format, list);
 }
 
+static void ConfigureTerminalIfNeeded()
+{
+    #ifdef _WIN32
+    if (ta_test::platform::IsTerminalAttached() )
+    {
+        SetConsoleOutputCP(CP_UTF8);
+
+        auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD current_mode{};
+        GetConsoleMode(handle, &current_mode);
+        SetConsoleMode(handle, current_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+    #endif
+}
+
 std::string_view ta_test::Terminal::AnsiResetString() const
 {
     if (enable_color)
+    {
+        ConfigureTerminalIfNeeded();
         return "\033[0m";
+    }
     else
+    {
         return "";
+    }
 }
 
 ta_test::Terminal::AnsiDeltaStringBuffer ta_test::Terminal::AnsiDeltaString(const TextStyle &&cur, const TextStyle &next) const
@@ -174,6 +199,8 @@ ta_test::Terminal::AnsiDeltaStringBuffer ta_test::Terminal::AnsiDeltaString(cons
     {
         // `sprintf` automatically null-terminates the buffer.
         ptr[-1] = 'm';
+
+        ConfigureTerminalIfNeeded();
         return ret;
     }
 
@@ -362,7 +389,7 @@ ta_test::text::TextCanvas::CellInfo &ta_test::text::TextCanvas::CellInfoAt(std::
     return this_line.info[pos];
 }
 
-std::size_t ta_test::text::TextCanvas::DrawText(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info)
+std::size_t ta_test::text::TextCanvas::DrawString(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info)
 {
     EnsureNumLines(line + 1);
     EnsureLineSize(line, start + text.size());
@@ -372,11 +399,11 @@ std::size_t ta_test::text::TextCanvas::DrawText(std::size_t line, std::size_t st
     return text.size();
 }
 
-std::size_t ta_test::text::TextCanvas::DrawText(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info)
+std::size_t ta_test::text::TextCanvas::DrawString(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info)
 {
     std::u32string decoded_text;
     uni::Decode(text, decoded_text);
-    return DrawText(line, start, decoded_text, info);
+    return DrawString(line, start, decoded_text, info);
 }
 
 std::size_t ta_test::text::TextCanvas::DrawRow(char32_t ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info)
@@ -452,7 +479,7 @@ void ta_test::text::TextCanvas::DrawOverline(std::size_t line, std::size_t colum
 
 std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Style &style, std::size_t line, std::size_t start, std::string_view expr)
 {
-    canvas.DrawText(line, start, expr);
+    canvas.DrawString(line, start, expr);
     std::size_t i = 0;
     CharKind prev_kind = CharKind::normal;
     bool is_number = false;
@@ -1114,9 +1141,15 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo 
                 // Failed test count.
                 if (data.all_tests->num_failed_tests > 0)
                 {
-                    terminal.Print(" %s[%zu]",
-                        terminal.AnsiDeltaString(cur_style, style_failed_count).data(),
-                        data.all_tests->num_failed_tests
+                    auto style_c = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
+                    auto style_d = terminal.AnsiDeltaString(cur_style, style_failed_count);
+                    auto style_e = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
+
+                    terminal.Print(" %s[%s%zu%s]",
+                        style_c.data(),
+                        style_d.data(),
+                        data.all_tests->num_failed_tests,
+                        style_e.data()
                     );
                 }
             }
@@ -1271,13 +1304,13 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
         std::size_t line_counter = 0;
 
         // The file path.
-        canvas.DrawText(line_counter++, 0, common_chars.LocationToString(data.SourceLocation()), {.style = style_filename, .important = true});
+        canvas.DrawString(line_counter++, 0, common_chars.LocationToString(data.SourceLocation()), {.style = style_filename, .important = true});
 
         // The main error message.
         if (depth == 0)
-            canvas.DrawText(line_counter++, 0, chars_assertion_failed, {.style = common_styles.error, .important = true});
+            canvas.DrawString(line_counter++, 0, chars_assertion_failed, {.style = common_styles.error, .important = true});
         else
-            canvas.DrawText(line_counter++, 0, chars_in_assertion, {.style = style_in_assertion, .important = true});
+            canvas.DrawString(line_counter++, 0, chars_in_assertion, {.style = style_in_assertion, .important = true});
 
         line_counter++;
 
@@ -1287,9 +1320,9 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
             std::size_t column = printed_code_indentation;
 
             const text::TextCanvas::CellInfo assertion_macro_cell_info = {.style = style_assertion_macro, .important = true};
-            column += canvas.DrawText(line_counter, column, data.IsSoft() ? chars_assertion_macro_prefix_soft : chars_assertion_macro_prefix, assertion_macro_cell_info);
+            column += canvas.DrawString(line_counter, column, data.IsSoft() ? chars_assertion_macro_prefix_soft : chars_assertion_macro_prefix, assertion_macro_cell_info);
             column += text::expr::DrawExprToCanvas(canvas, style_expr, line_counter, column, data.Expr());
-            column += canvas.DrawText(line_counter, column, chars_assertion_macro_suffix, assertion_macro_cell_info);
+            column += canvas.DrawString(line_counter, column, chars_assertion_macro_suffix, assertion_macro_cell_info);
             line_counter++;
         }
 
@@ -1348,7 +1381,7 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
                     if (!this_info.need_bracket)
                     {
                         std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1, 2) + 1;
-                        canvas.DrawText(value_y, value_x, this_value, this_cell_info);
+                        canvas.DrawString(value_y, value_x, this_value, this_cell_info);
                         canvas.DrawColumn(common_chars.bar, line_counter, center_x, value_y - line_counter, true, this_cell_info);
 
                         // Color the contents.
@@ -1370,7 +1403,7 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
                         std::size_t value_y = canvas.FindFreeSpace(bracket_y + 1, value_x, 1, this_value.size(), 1, 2);
 
                         canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x, this_cell_info);
-                        canvas.DrawText(value_y, value_x, this_value, this_cell_info);
+                        canvas.DrawString(value_y, value_x, this_value, this_cell_info);
 
                         // Add the tail to the bracket.
                         if (center_x > bracket_left_x && center_x + 1 < bracket_right_x)
@@ -1413,7 +1446,7 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
                 canvas.InsertLineBefore(expr_line++);
 
                 canvas.DrawOverline(expr_line - 1, expr_column + overline_start, overline_end - overline_start, {.style = style_overline, .important = true});
-                canvas.DrawText(expr_line - 2, value_x, this_value, {.style = style_overline, .important = true});
+                canvas.DrawString(expr_line - 2, value_x, this_value, {.style = style_overline, .important = true});
 
                 // Color the parentheses.
                 canvas.CellInfoAt(expr_line, expr_column + overline_start).style.color = style_overline.color;
