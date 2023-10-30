@@ -175,7 +175,8 @@
 #define DETAIL_TA_ARG(counter, ...) \
     /* Note the parentheses, they allow this to be transparently used e.g. as a single function parameter. */\
     /* Passing `counter` the second time is redundant, but helps with our parsing. */\
-    (::ta_test::detail::ArgWrapper(__FILE__, __LINE__, counter)._ta_handle_arg_(counter, __VA_ARGS__))
+    /* Note `void(_ta_assertion)`, which prevents this from being used outside of an assertion. */\
+    (void(_ta_assertion), ::ta_test::detail::ArgWrapper(__FILE__, __LINE__, counter)._ta_handle_arg_(counter, __VA_ARGS__))
 
 #define TA_TEST(name) DETAIL_TA_TEST(name)
 
@@ -577,18 +578,7 @@ namespace ta_test
 
             // Finds an argument in the currently running assertions.
             // Results in a hard error on failure.
-            BasicModule::BasicAssertionInfo::StoredArg &FindStoredArgument(const BasicModule::SourceLocCounter &loc)
-            {
-                const BasicModule::BasicAssertionInfo *cur = current_assertion;
-                while (cur)
-                {
-                    if (auto ret = cur->FindStoredArgumentByLocation(loc))
-                        return const_cast<BasicModule::BasicAssertionInfo::StoredArg &>(*ret);
-                    cur = cur->enclosing_assertion;
-                }
-
-                HardError("This `$(...)` isn't enclosed in any assertion macro.", HardErrorKind::user);
-            }
+            CFG_TA_API BasicModule::BasicAssertionInfo::StoredArg &FindStoredArgument(const BasicModule::SourceLocCounter &loc);
         };
         [[nodiscard]] CFG_TA_API GlobalThreadState &ThreadState();
 

@@ -63,8 +63,6 @@ int main(int argc, char **argv)
 
 // Generate module lists for faster calls.
 
-// Make it so that `$(...)` is impossible to use outside of ASSERT?
-
 // Attach formatted error messages to assertions.
 
 // Scoped and unscoped logging macros.
@@ -128,5 +126,26 @@ Nested exceptions (containing known and unknown types in them).
 --- Assertion stack
 Due to failed assertion.
 Due to exception.
+
+--- Test name validation
+Bad test names:
+    Empty name
+    Starts with slash
+    Ends with slash
+    Two consecutive slashes
+    Bad characters
+    Dollar in name
+Good test names:
+    a-zA-Z0-9_/
+
+--- Build errors when:
+    $(...) lexically outside of ASSERT().
+    No error when ASSERT() is lexically outside of a test.
+    Unformattable $(...) type
+
+--- Runtime errors when:
+    Same test name registered from two different places
+    But no error when it's in header, and two TUs register it with the same location
+    One test name is a prefix of the other (a test can't double as a group)
 
 */
