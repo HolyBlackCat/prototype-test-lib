@@ -711,7 +711,11 @@ void ta_test::BasicPrintingModule::PrintNote(std::string_view text) const
 
 ta_test::detail::BasicAssertWrapper::BasicAssertWrapper()
 {
-    auto &cur = ThreadState().current_assertion;
+    GlobalThreadState &thread_state = ThreadState();
+    if (!thread_state.current_test)
+        HardError("This thread doesn't have a test currently running, yet it tries to use an assertion.");
+
+    auto &cur = thread_state.current_assertion;
     enclosing_assertion = cur;
     cur = this;
 }
@@ -720,7 +724,11 @@ ta_test::detail::BasicAssertWrapper::~BasicAssertWrapper()
 {
     // We don't check `finished` here. It can be false when a nested assertion fails.
 
-    ThreadState().current_assertion = const_cast<BasicModule::BasicAssertionInfo *>(enclosing_assertion);
+    GlobalThreadState &thread_state = ThreadState();
+    if (thread_state.current_assertion != this)
+        HardError("Something is wrong. Are we in a coroutine that was transfered to a different thread in the middle on an assertion?");
+
+    thread_state.current_assertion = const_cast<BasicModule::BasicAssertionInfo *>(enclosing_assertion);
 }
 
 void ta_test::detail::BasicAssertWrapper::PreEvaluate()
@@ -730,7 +738,7 @@ void ta_test::detail::BasicAssertWrapper::PreEvaluate()
 
     GlobalThreadState &thread_state = ThreadState();
     if (!thread_state.current_test)
-        HardError("This thread doesn't have a test currently running, yet it tries to use an assertion.");
+        HardError("Something is wrong, the current test information disappeared while the assertion was evaluated.");
     if (thread_state.current_assertion != this)
         HardError("The assertion being evaluated is not on the top of the assertion stack.");
 }

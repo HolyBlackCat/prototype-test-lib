@@ -57,15 +57,11 @@ int main(int argc, char **argv)
     return runner.Run();
 }
 
-// Some form of except_throw.
+// Some form of expect_throw.
 
 // Error summary in results, with file paths.
 
-// What should happen when a wrong thread calls an assertion.
-
 // Generate module lists for faster calls.
-
-// Try-catch in assertions to print an exception stack?
 
 // Make it so that `$(...)` is impossible to use outside of ASSERT?
 
@@ -76,7 +72,11 @@ int main(int argc, char **argv)
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
 // Allow more characters in bracket-less form: `:`, `.`, `->`?
 
-// Length cap on serialized values, configurable.
+// Length cap on serialized values, configurable. Maybe libfmt can do the clipping for us?
+
+// Single-letter flag shorthands. But what to do with boolean negation?
+
+// Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
 
 // Test without exceptions.
 // Test without RTTI. What about exception type names?
@@ -85,7 +85,7 @@ int main(int argc, char **argv)
 
 // Later:
 //     Multithreading? Thread inheritance system.
-//     Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
+//     What's the deal with SEH? Do we need to do anything?
 
 // Maybe not?
 //     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
@@ -95,6 +95,9 @@ int main(int argc, char **argv)
 // Unclear how:
 //     Print user messages from assertions that didn't execute to completion.
 
+// Selling points:
+//     * Expression unwrapping
+//     * Printing nested exceptions out of the box
 
 
 /* Pending tests:
