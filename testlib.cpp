@@ -828,8 +828,11 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
 void ta_test::Runner::SetDefaultModules()
 {
     modules.clear();
-    modules.push_back(MakeModule<modules::HelpPrinter>()); // This is first to print `--help` first in the help page.
+    // Those are ordered in a certain way to print the `--help` page in the nice order: [
+    modules.push_back(MakeModule<modules::HelpPrinter>());
+    modules.push_back(MakeModule<modules::TestSelector>());
     modules.push_back(MakeModule<modules::PrintingConfigurator>());
+    // ]
     modules.push_back(MakeModule<modules::ProgressPrinter>());
     modules.push_back(MakeModule<modules::ResultsPrinter>());
     modules.push_back(MakeModule<modules::AssertionPrinter>());
@@ -849,7 +852,7 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
         if (ok)
             *ok = false;
         else
-            std::exit(2);
+            std::exit(int(ExitCodes::bad_command_line_arguments));
     };
 
     while (true)
@@ -965,6 +968,7 @@ int ta_test::Runner::Run()
     BasicModule::RunTestsResults results;
     results.runner = this;
     results.num_tests = ordered_tests.size();
+    results.num_tests_with_skipped = state.tests.size();
     for (const auto &m : modules)
         m->OnPreRunTests(results);
 
@@ -1008,7 +1012,7 @@ int ta_test::Runner::Run()
     for (const auto &m : modules)
         m->OnPostRunTests(results);
 
-    return results.num_failed_tests != 0;
+    return results.num_failed_tests > 0 ? int(ExitCodes::test_failed) : 0;
 }
 
 // --- modules::HelpPrinter ---
@@ -1052,6 +1056,112 @@ void ta_test::modules::HelpPrinter::OnMissingFlagArgument(std::string_view flag,
     (void)abort;
     terminal.Print("Flag `%.*s` wasn't given enough arguments, run with `%s` for usage.\n", int(flag.size()), flag.data(), help_flag.HelpFlagSpelling().c_str());
     // Don't exit, rely on `abort`.
+}
+
+// --- modules::TestSelector ---
+
+ta_test::modules::TestSelector::TestSelector()
+    : flag_include("include",
+        "Enable tests matching a pattern. The pattern must either match the whole test name, or its prefix up to and possibly including a slash. "
+        "The pattern can be a regex. This flag can be repeated multiple times, and the order with respect to `--exclude` matters. "
+        "If the first time this flag appears is before `--exclude`, all tests start disabled by default.",
+        GetFlagCallback(false)
+    ),
+    flag_exclude("exclude",
+        "Disable tests matching a pattern. Uses the same pattern format as `--include`.",
+        GetFlagCallback(true)
+    )
+{}
+
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::TestSelector::GetFlags()
+{
+    return {&flag_include, &flag_exclude};
+}
+
+void ta_test::modules::TestSelector::OnFilterTest(const BasicTestInfo &test, bool &enable)
+{
+    if (patterns.empty())
+        return;
+
+    // Disable by default is the first pattern is `--include`.
+    if (!patterns.front().exclude)
+        enable = false;
+
+    for (Pattern &pattern : patterns)
+    {
+        if (enable != pattern.exclude)
+            continue; // The test is already enabled/disabled.
+
+        std::string_view name_prefix = test.Name();
+
+        auto TryMatchPrefix = [&]() -> bool
+        {
+            if (std::regex_match(name_prefix.begin(), name_prefix.end(), pattern.regex))
+            {
+                pattern.was_used = true;
+                enable = !pattern.exclude;
+                return true;
+            }
+
+            return false;
+        };
+
+        // Try matching the whole name.
+        if (TryMatchPrefix())
+            continue;
+
+        // Try prefixes.
+        while (!name_prefix.empty())
+        {
+            name_prefix.remove_suffix(1);
+
+            if (name_prefix.ends_with('/'))
+            {
+                // Try matching with the slash.
+                if (TryMatchPrefix())
+                    continue;
+
+                // Try again without slash.
+                name_prefix.remove_suffix(1);
+                if (TryMatchPrefix())
+                    continue;
+            }
+        }
+    }
+}
+
+ta_test::flags::StringFlag::Callback ta_test::modules::TestSelector::GetFlagCallback(bool exclude)
+{
+    return [exclude](Runner &runner, BasicModule &this_module, std::string_view pattern)
+    {
+        (void)runner;
+        TestSelector &self = dynamic_cast<TestSelector &>(this_module); // This cast should never fail.
+
+        Pattern new_pattern{
+            .exclude = exclude,
+            .regex_string = std::string(pattern),
+            .regex = std::regex(new_pattern.regex_string, std::regex_constants::ECMAScript/*the default syntax*/ | std::regex_constants::optimize),
+        };
+        self.patterns.push_back(std::move(new_pattern));
+    };
+}
+
+void ta_test::modules::TestSelector::OnPreRunTests(const RunTestsInfo &data)
+{
+    (void)data;
+
+    // Make sure all patterns were used.
+    bool fail = false;
+    for (const Pattern &pattern : patterns)
+    {
+        if (!pattern.was_used)
+        {
+            std::fprintf(stderr, "Pattern `--%s %s` didn't match any tests.\n", pattern.exclude ? "exclude" : "include", pattern.regex_string.c_str());
+            fail = true;
+        }
+    }
+    if (fail)
+        std::exit(int(ExitCodes::bad_test_name_pattern));
 }
 
 // --- modules::PrintingConfigurator ---
@@ -1099,6 +1209,23 @@ void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
 {
     (void)data;
     state = {};
+
+    // Print a message when some tests are skipped.
+    if (data.num_tests < data.num_tests_with_skipped)
+    {
+        std::size_t num_skipped = data.num_tests_with_skipped - data.num_tests;
+
+        terminal.Print("%s%sSkipping %zu test%s, will run %zu/%zu test%s.%s\n",
+            terminal.AnsiResetString().data(),
+            terminal.AnsiDeltaString({}, style_skipped_tests).data(),
+            num_skipped,
+            num_skipped != 1 ? "s" : "",
+            data.num_tests,
+            data.num_tests_with_skipped,
+            data.num_tests != 1 ? "s" : "",
+            terminal.AnsiResetString().data()
+        );
+    }
 }
 
 void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo &data)
@@ -1259,6 +1386,20 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
     // Reset color.
     terminal.Print("%s\n", terminal.AnsiResetString().data());
 
+    std::size_t num_passed = data.num_tests - data.num_failed_tests;
+    std::size_t num_skipped = data.num_tests_with_skipped - data.num_tests;
+
+    // The number of skipped tests.
+    if (num_skipped > 0 && data.num_tests > 0)
+    {
+        terminal.Print("%s%zu test%s skipped%s\n",
+            terminal.AnsiDeltaString({}, style_num_skipped).data(),
+            num_skipped,
+            num_skipped != 1 ? "s" : "",
+            terminal.AnsiResetString().data()
+        );
+    }
+
     if (data.num_tests == 0)
     {
         // No tests to run.
@@ -1267,30 +1408,41 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
             terminal.AnsiResetString().data()
         );
     }
+    else if (data.num_failed_tests == 0)
+    {
+        // All passed.
+
+        terminal.Print("%s%s%zu TEST%s PASSED%s\n",
+            terminal.AnsiDeltaString({}, style_all_passed).data(),
+            num_passed > 1 ? "ALL " : "",
+            num_passed,
+            num_passed != 1 ? "S" : "",
+            terminal.AnsiResetString().data()
+        );
+    }
     else
     {
-        std::size_t num_passed = data.num_tests - data.num_failed_tests;
+        // Some or all failed.
+
+        // Passed tests, if any.
         if (num_passed > 0)
         {
-            terminal.Print("%s%s%zu TEST%s PASSED%s\n",
-                terminal.AnsiDeltaString({}, data.num_failed_tests == 0 ? style_all_passed : style_num_passed).data(),
-                data.num_failed_tests == 0 && data.num_tests > 1 ? "ALL " : "",
+            terminal.Print("%s%zu test%s passed%s\n",
+                terminal.AnsiDeltaString({}, style_num_passed).data(),
                 num_passed,
-                num_passed == 1 ? "" : "S",
+                num_passed != 1 ? "s" : "",
                 terminal.AnsiResetString().data()
             );
         }
 
-        if (data.num_failed_tests > 0)
-        {
-            terminal.Print("%s%s%zu TEST%s FAILED%s\n",
-                terminal.AnsiDeltaString({}, style_num_failed).data(),
-                num_passed == 0 && data.num_failed_tests > 1 ? "ALL " : "",
-                data.num_failed_tests,
-                data.num_failed_tests == 1 ? "" : "S",
-                terminal.AnsiResetString().data()
-            );
-        }
+        // Failed tests.
+        terminal.Print("%s%s%zu TEST%s FAILED%s\n",
+            terminal.AnsiDeltaString({}, style_num_failed).data(),
+            num_passed == 0 && data.num_failed_tests > 1 ? "ALL " : "",
+            data.num_failed_tests,
+            data.num_failed_tests == 1 ? "" : "S",
+            terminal.AnsiResetString().data()
+        );
     }
 }
 

@@ -18,6 +18,7 @@
 #include <numeric>
 #include <optional>
 #include <ranges>
+#include <regex>
 #include <span>
 #include <string_view>
 #include <string>
@@ -193,6 +194,15 @@ namespace ta_test
 {
     struct Runner;
     struct BasicModule;
+
+    // The exit codes we're using. This is mostly for reference.
+    enum class ExitCodes
+    {
+        ok = 0,
+        test_failed = 1, // One or more tests failed.
+        bad_command_line_arguments = 2, // A generic issue with command line arguments.
+        bad_test_name_pattern = 3, // `--include` or `--exclude` didn't match any tests.
+    };
 
     // Parsing command line arguments.
     namespace flags
@@ -386,7 +396,10 @@ namespace ta_test
         {
             Runner *runner = nullptr;
 
+            // The number of tests to run.
             std::size_t num_tests = 0;
+            // The total number of known tests, including the skipped ones.
+            std::size_t num_tests_with_skipped = 0;
         };
         struct RunTestsResults : RunTestsInfo
         {
@@ -2055,7 +2068,32 @@ namespace ta_test
             void OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort) override;
         };
 
-        // Responds to various command line flags to configure other printing modules.
+        // Responds to `--include` and `--exclude` to select which tests to run.
+        struct TestSelector : BasicModule
+        {
+            flags::StringFlag flag_include;
+            flags::StringFlag flag_exclude;
+
+            struct Pattern
+            {
+                bool exclude = false;
+
+                std::string regex_string;
+                std::regex regex;
+
+                bool was_used = false;
+            };
+            std::vector<Pattern> patterns;
+
+            CFG_TA_API TestSelector();
+            std::vector<flags::BasicFlag *> GetFlags() override;
+            void OnFilterTest(const BasicTestInfo &test, bool &enable) override;
+            void OnPreRunTests(const RunTestsInfo &data) override;
+
+            CFG_TA_API static flags::StringFlag::Callback GetFlagCallback(bool exclude);
+        };
+
+        // Responds to various command line flags to configure the output of all printing modules.
         struct PrintingConfigurator : BasicModule
         {
             flags::BoolFlag flag_color;
@@ -2079,6 +2117,8 @@ namespace ta_test
             // This is printed when a test fails, right before the test name.
             std::string chars_test_failed = "TEST FAILED: ";
 
+            // Optional message at startup when some tests are skipped.
+            TextStyle style_skipped_tests = {.color = TextColor::light_blue, .bold = true};
             // The message when a test starts.
             TextStyle style_name = {.color = TextColor::light_green, .bold = true};
             // The message when a test group starts.
@@ -2124,6 +2164,8 @@ namespace ta_test
         // Prints the results of a run.
         struct ResultsPrinter : BasicPrintingModule
         {
+            // The number of skipped tests.
+            TextStyle style_num_skipped = {.color = TextColor::light_blue};
             // No tests to run.
             TextStyle style_no_tests = {.color = TextColor::light_blue, .bold = true};
             // All tests passed.

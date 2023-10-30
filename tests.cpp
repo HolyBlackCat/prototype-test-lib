@@ -55,32 +55,36 @@ int main(int argc, char **argv)
     return runner.Run();
 }
 
-// Enable/disable breakpoints with flags
+// Error summary in results, with file paths.
+
+// Generate module lists for faster calls.
+
+// Try-catch in assertions to print an exception stack?
 
 // Make it so that `$(...)` is impossible to use outside of ASSERT?
-
-// After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
 
 // Attach formatted error messages to assertions.
 
 // Scoped and unscoped logging macros.
 
 // Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
-// Move text around to fit into the bracket. Or maybe not?
 // Allow more characters in bracket-less form: `:`, `.`, `->`?
 
-// A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
+// Length cap on serialized values, configurable.
 
-// Length cap on serialized values, configurable
-
-// Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
+// Test without exceptions.
 // Test without RTTI. What about exception type names?
 
-// Print to a custom fprintf-like callback instead of fprintf directly?
-
-// Multithreading?
-
 // Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
+
+// Later:
+//     Multithreading?
+//     Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
+
+// Maybe not?
+//     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
+//     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
+
 
 
 /* Pending tests:
