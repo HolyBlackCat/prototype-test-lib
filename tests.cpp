@@ -11,6 +11,8 @@ bool sum(const auto &...){return false;}
 
 bool foo()
 {
+    // throw std::runtime_error("Blah!");
+
     std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oo\nf", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     TA_SOFT_CHECK( false );
     TA_CHECK( $($(first) + $(second)).ends_with($($(suffix.c_str()) + $(extra) + $("123") + $("456"))) );
@@ -55,7 +57,11 @@ int main(int argc, char **argv)
     return runner.Run();
 }
 
+// Some form of except_throw.
+
 // Error summary in results, with file paths.
+
+// What should happen when a wrong thread calls an assertion.
 
 // Generate module lists for faster calls.
 
@@ -78,12 +84,16 @@ int main(int argc, char **argv)
 // Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
 
 // Later:
-//     Multithreading?
+//     Multithreading? Thread inheritance system.
 //     Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
 
 // Maybe not?
 //     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
 //     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
+//     Deduplicate assertions in stacks? Both when an assertion fails and when an exception is triggered.
+
+// Unclear how:
+//     Print user messages from assertions that didn't execute to completion.
 
 
 
@@ -111,5 +121,9 @@ TA_CHECK($("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") &&
 --- Exception printer
 Known and unknown exception types.
 Nested exceptions (containing known and unknown types in them).
+
+--- Assertion stack
+Due to failed assertion.
+Due to exception.
 
 */

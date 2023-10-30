@@ -716,8 +716,14 @@ ta_test::detail::BasicAssertWrapper::BasicAssertWrapper()
     cur = this;
 }
 
-// Checks `value`, reports an error if it's false. In any case, returns `value` unchanged.
-bool ta_test::detail::BasicAssertWrapper::operator()(bool value)
+ta_test::detail::BasicAssertWrapper::~BasicAssertWrapper()
+{
+    // We don't check `finished` here. It can be false when a nested assertion fails.
+
+    ThreadState().current_assertion = const_cast<BasicModule::BasicAssertionInfo *>(enclosing_assertion);
+}
+
+void ta_test::detail::BasicAssertWrapper::PreEvaluate()
 {
     if (finished)
         HardError("Invalid usage, `operator()` called more than once on an `AssertWrapper`.");
@@ -727,23 +733,36 @@ bool ta_test::detail::BasicAssertWrapper::operator()(bool value)
         HardError("This thread doesn't have a test currently running, yet it tries to use an assertion.");
     if (thread_state.current_assertion != this)
         HardError("The assertion being evaluated is not on the top of the assertion stack.");
-
-    if (!value)
-    {
-        for (const auto &m : thread_state.current_test->all_tests->runner->modules)
-            m->OnAssertionFailed(*this);
-        thread_state.current_test->failed = true;
-    }
-
-    thread_state.current_assertion = const_cast<BasicModule::BasicAssertionInfo *>(enclosing_assertion);
-
-    finished = true;
-    return value;
 }
 
-ta_test::detail::BasicAssertWrapper::~BasicAssertWrapper()
+void ta_test::detail::BasicAssertWrapper::UncaughtException()
 {
-    // We don't check `finished` here. It can be false when a nested assertion fails.
+    GlobalThreadState &thread_state = ThreadState();
+    thread_state.current_test->failed = true;
+
+    auto e = std::current_exception();
+    for (const auto &m : thread_state.current_test->all_tests->runner->modules)
+        m->OnUncaughtException(*thread_state.current_test, this, e);
+
+    finished = true;
+}
+
+void ta_test::detail::BasicAssertWrapper::PostEvaluate(bool value, const std::optional<std::string> &fail_message)
+{
+    if (!value)
+    {
+        GlobalThreadState &thread_state = ThreadState();
+        thread_state.current_test->failed = true;
+
+        std::optional<std::string_view> fail_message_view;
+        if (fail_message)
+            fail_message_view = *fail_message;
+
+        for (const auto &m : thread_state.current_test->all_tests->runner->modules)
+            m->OnAssertionFailed(*this, fail_message_view);
+    }
+
+    finished = true;
 }
 
 void ta_test::detail::GlobalState::SortTestListInExecutionOrder(std::span<std::size_t> indices) const
@@ -998,8 +1017,9 @@ int ta_test::Runner::Run()
         catch (...)
         {
             guard.state.failed = true;
+            auto e = std::current_exception();
             for (const auto &m : modules)
-                m->OnUncaughtException(std::current_exception());
+                m->OnUncaughtException(guard.state, nullptr, e);
         }
 
         for (const auto &m : modules)
@@ -1448,214 +1468,238 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 
 // --- modules::AssertionPrinter ---
 
-void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data)
+void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message)
 {
-    auto lambda = [this](auto &lambda, const BasicAssertionInfo &data, int depth) -> void
-    {
-        text::TextCanvas canvas(&common_chars);
-        std::size_t line_counter = 0;
+    PrintAssertionFramesLow(data, message, 0);
+}
 
-        // The file path.
-        canvas.DrawString(line_counter++, 0, common_chars.LocationToString(data.SourceLocation()), {.style = style_filename, .important = true});
+void ta_test::modules::AssertionPrinter::PrintAssertionStack(const BasicModule::BasicAssertionInfo &data) const
+{
+    PrintAssertionFramesLow(data, {}, 1 /*sic*/);
+}
 
-        // The main error message.
+void ta_test::modules::AssertionPrinter::PrintAssertionFramesLow(const BasicAssertionInfo &data, std::optional<std::string_view> message, int depth) const
+{
+    text::TextCanvas canvas(&common_chars);
+    std::size_t line_counter = 0;
+
+    // The file path.
+    canvas.DrawString(line_counter++, 0, common_chars.LocationToString(data.SourceLocation()), {.style = style_filename, .important = true});
+
+    { // The main error message.
+        std::size_t column = 0;
         if (depth == 0)
-            canvas.DrawString(line_counter++, 0, chars_assertion_failed, {.style = common_styles.error, .important = true});
+            column = canvas.DrawString(line_counter, 0, chars_assertion_failed, {.style = common_styles.error, .important = true});
         else
-            canvas.DrawString(line_counter++, 0, chars_in_assertion, {.style = style_in_assertion, .important = true});
+            column = canvas.DrawString(line_counter, 0, chars_in_assertion, {.style = style_in_assertion, .important = true});
+
+        if (message)
+            canvas.DrawString(line_counter, column + 1, *message, {.style = style_user_message, .important = true});
 
         line_counter++;
+    }
 
-        std::size_t expr_line = line_counter;
+    line_counter++;
 
-        { // The assertion call.
-            std::size_t column = printed_code_indentation;
+    std::size_t expr_line = line_counter;
 
-            const text::TextCanvas::CellInfo assertion_macro_cell_info = {.style = style_assertion_macro, .important = true};
-            column += canvas.DrawString(line_counter, column, data.IsSoft() ? chars_assertion_macro_prefix_soft : chars_assertion_macro_prefix, assertion_macro_cell_info);
-            column += text::expr::DrawExprToCanvas(canvas, style_expr, line_counter, column, data.Expr());
-            column += canvas.DrawString(line_counter, column, chars_assertion_macro_suffix, assertion_macro_cell_info);
-            line_counter++;
-        }
+    { // The assertion call.
+        std::size_t column = printed_code_indentation;
 
-        // The expression.
-        if (decompose_expression)
+        const text::TextCanvas::CellInfo assertion_macro_cell_info = {.style = style_assertion_macro, .important = true};
+        column += canvas.DrawString(line_counter, column, data.IsSoft() ? chars_assertion_macro_prefix_soft : chars_assertion_macro_prefix, assertion_macro_cell_info);
+        column += text::expr::DrawExprToCanvas(canvas, style_expr, line_counter, column, data.Expr());
+        column += canvas.DrawString(line_counter, column, chars_assertion_macro_suffix, assertion_macro_cell_info);
+        line_counter++;
+    }
+
+    // The expression.
+    if (decompose_expression)
+    {
+        std::size_t expr_column = printed_code_indentation + chars_assertion_macro_prefix.size();
+
+        std::u32string this_value;
+
+        // The bracket above the expression.
+        std::size_t overline_start = 0;
+        std::size_t overline_end = 0;
+        // How many subexpressions want an overline.
+        // More than one should be impossible, but if it happens, we just combine them into a single fat one.
+        int num_overline_parts = 0;
+
+        // Incremented when we print an argument.
+        std::size_t color_index = 0;
+
+        for (std::size_t i = 0; i < data.NumArgs(); i++)
         {
-            std::size_t expr_column = printed_code_indentation + chars_assertion_macro_prefix.size();
+            const std::size_t arg_index = data.ArgsInDrawOrder()[i];
+            const BasicAssertionInfo::StoredArg &this_arg = data.StoredArgs()[arg_index];
+            const BasicAssertionInfo::ArgInfo &this_info = data.ArgsInfo()[arg_index];
 
-            std::u32string this_value;
+            bool dim_parentheses = true;
 
-            // The bracket above the expression.
-            std::size_t overline_start = 0;
-            std::size_t overline_end = 0;
-            // How many subexpressions want an overline.
-            // More than one should be impossible, but if it happens, we just combine them into a single fat one.
-            int num_overline_parts = 0;
-
-            // Incremented when we print an argument.
-            std::size_t color_index = 0;
-
-            for (std::size_t i = 0; i < data.NumArgs(); i++)
+            if (this_arg.state == BasicAssertionInfo::StoredArg::State::in_progress)
             {
-                const std::size_t arg_index = data.ArgsInDrawOrder()[i];
-                const BasicAssertionInfo::StoredArg &this_arg = data.StoredArgs()[arg_index];
-                const BasicAssertionInfo::ArgInfo &this_info = data.ArgsInfo()[arg_index];
-
-                bool dim_parentheses = true;
-
-                if (this_arg.state == BasicAssertionInfo::StoredArg::State::in_progress)
+                if (num_overline_parts == 0)
                 {
-                    if (num_overline_parts == 0)
-                    {
-                        overline_start = this_info.expr_offset;
-                        overline_end = this_info.expr_offset + this_info.expr_size;
-                    }
-                    else
-                    {
-                        overline_start = std::min(overline_start, this_info.expr_offset);
-                        overline_end = std::max(overline_end, this_info.expr_offset + this_info.expr_size);
-                    }
-                    num_overline_parts++;
+                    overline_start = this_info.expr_offset;
+                    overline_end = this_info.expr_offset + this_info.expr_size;
                 }
-
-                if (this_arg.state == BasicAssertionInfo::StoredArg::State::done)
+                else
                 {
-                    text::uni::Decode(this_arg.value, this_value);
+                    overline_start = std::min(overline_start, this_info.expr_offset);
+                    overline_end = std::max(overline_end, this_info.expr_offset + this_info.expr_size);
+                }
+                num_overline_parts++;
+            }
 
-                    std::size_t center_x = expr_column + this_info.expr_offset + (this_info.expr_size + 1) / 2 - 1;
-                    std::size_t value_x = center_x - (this_value.size() + 1) / 2 + 1;
-                    // Make sure `value_x` didn't underflow.
-                    if (value_x > std::size_t(-1) / 2)
-                        value_x = 0;
+            if (this_arg.state == BasicAssertionInfo::StoredArg::State::done)
+            {
+                text::uni::Decode(this_arg.value, this_value);
 
-                    const text::TextCanvas::CellInfo this_cell_info = {.style = style_arguments[color_index++ % style_arguments.size()], .important = true};
+                std::size_t center_x = expr_column + this_info.expr_offset + (this_info.expr_size + 1) / 2 - 1;
+                std::size_t value_x = center_x - (this_value.size() + 1) / 2 + 1;
+                // Make sure `value_x` didn't underflow.
+                if (value_x > std::size_t(-1) / 2)
+                    value_x = 0;
 
-                    if (!this_info.need_bracket)
+                const text::TextCanvas::CellInfo this_cell_info = {.style = style_arguments[color_index++ % style_arguments.size()], .important = true};
+
+                if (!this_info.need_bracket)
+                {
+                    std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1, 2) + 1;
+                    canvas.DrawString(value_y, value_x, this_value, this_cell_info);
+                    canvas.DrawColumn(common_chars.bar, line_counter, center_x, value_y - line_counter, true, this_cell_info);
+
+                    // Color the contents.
+                    for (std::size_t i = 0; i < this_info.expr_size; i++)
                     {
-                        std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1, 2) + 1;
-                        canvas.DrawString(value_y, value_x, this_value, this_cell_info);
-                        canvas.DrawColumn(common_chars.bar, line_counter, center_x, value_y - line_counter, true, this_cell_info);
-
-                        // Color the contents.
-                        for (std::size_t i = 0; i < this_info.expr_size; i++)
-                        {
-                            TextStyle &style = canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + i).style;
-                            style.color = this_cell_info.style.color;
-                            style.bold = true;
-                        }
-                    }
-                    else
-                    {
-                        std::size_t bracket_left_x = expr_column + this_info.expr_offset;
-                        std::size_t bracket_right_x = bracket_left_x + this_info.expr_size + 1;
-                        if (bracket_left_x > 0)
-                            bracket_left_x--;
-
-                        std::size_t bracket_y = canvas.FindFreeSpace(line_counter, bracket_left_x, 2, bracket_right_x - bracket_left_x, 0, 2);
-                        std::size_t value_y = canvas.FindFreeSpace(bracket_y + 1, value_x, 1, this_value.size(), 1, 2);
-
-                        canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x, this_cell_info);
-                        canvas.DrawString(value_y, value_x, this_value, this_cell_info);
-
-                        // Add the tail to the bracket.
-                        if (center_x > bracket_left_x && center_x + 1 < bracket_right_x)
-                            canvas.CharAt(bracket_y, center_x) = common_chars.bracket_bottom_tail;
-
-                        // Draw the column connecting us to the text, if it's not directly below.
-                        canvas.DrawColumn(common_chars.bar, bracket_y + 1, center_x, value_y - bracket_y - 1, true, this_cell_info);
-
-                        // Color the parentheses with the argument color.
-                        dim_parentheses = false;
-                        canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = this_cell_info.style.color;
-                        canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = this_cell_info.style.color;
+                        TextStyle &style = canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + i).style;
+                        style.color = this_cell_info.style.color;
+                        style.bold = true;
                     }
                 }
-
-                // Dim the macro name.
-                for (std::size_t i = 0; i < this_info.ident_size; i++)
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.ident_offset + i).style.color = color_dim;
-
-                // Dim the parentheses.
-                if (dim_parentheses)
+                else
                 {
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = color_dim;
-                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = color_dim;
+                    std::size_t bracket_left_x = expr_column + this_info.expr_offset;
+                    std::size_t bracket_right_x = bracket_left_x + this_info.expr_size + 1;
+                    if (bracket_left_x > 0)
+                        bracket_left_x--;
+
+                    std::size_t bracket_y = canvas.FindFreeSpace(line_counter, bracket_left_x, 2, bracket_right_x - bracket_left_x, 0, 2);
+                    std::size_t value_y = canvas.FindFreeSpace(bracket_y + 1, value_x, 1, this_value.size(), 1, 2);
+
+                    canvas.DrawHorBracket(line_counter, bracket_left_x, bracket_y - line_counter + 1, bracket_right_x - bracket_left_x, this_cell_info);
+                    canvas.DrawString(value_y, value_x, this_value, this_cell_info);
+
+                    // Add the tail to the bracket.
+                    if (center_x > bracket_left_x && center_x + 1 < bracket_right_x)
+                        canvas.CharAt(bracket_y, center_x) = common_chars.bracket_bottom_tail;
+
+                    // Draw the column connecting us to the text, if it's not directly below.
+                    canvas.DrawColumn(common_chars.bar, bracket_y + 1, center_x, value_y - bracket_y - 1, true, this_cell_info);
+
+                    // Color the parentheses with the argument color.
+                    dim_parentheses = false;
+                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = this_cell_info.style.color;
+                    canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = this_cell_info.style.color;
                 }
             }
 
-            // The overline.
-            if (num_overline_parts > 0)
+            // Dim the macro name.
+            for (std::size_t i = 0; i < this_info.ident_size; i++)
+                canvas.CellInfoAt(line_counter - 1, expr_column + this_info.ident_offset + i).style.color = color_dim;
+
+            // Dim the parentheses.
+            if (dim_parentheses)
             {
-                if (overline_start > 0)
-                    overline_start--;
-                overline_end++;
-
-                std::u32string_view this_value = num_overline_parts > 1 ? chars_in_this_subexpr_inexact : chars_in_this_subexpr;
-
-                std::size_t center_x = expr_column + overline_start + (overline_end - overline_start) / 2;
-                std::size_t value_x = center_x - this_value.size() / 2;
-
-                canvas.InsertLineBefore(expr_line++);
-
-                canvas.DrawOverline(expr_line - 1, expr_column + overline_start, overline_end - overline_start, {.style = style_overline, .important = true});
-                canvas.DrawString(expr_line - 2, value_x, this_value, {.style = style_overline, .important = true});
-
-                // Color the parentheses.
-                canvas.CellInfoAt(expr_line, expr_column + overline_start).style.color = style_overline.color;
-                canvas.CellInfoAt(expr_line, expr_column + overline_end - 1).style.color = style_overline.color;
+                canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = color_dim;
+                canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = color_dim;
             }
         }
 
-        canvas.InsertLineBefore(canvas.NumLines());
+        // The overline.
+        if (num_overline_parts > 0)
+        {
+            if (overline_start > 0)
+                overline_start--;
+            overline_end++;
 
-        canvas.Print(terminal);
+            std::u32string_view this_value = num_overline_parts > 1 ? chars_in_this_subexpr_inexact : chars_in_this_subexpr;
 
-        if (print_assertion_stack && data.enclosing_assertion)
-            lambda(lambda, *data.enclosing_assertion, depth + 1);
-    };
+            std::size_t center_x = expr_column + overline_start + (overline_end - overline_start) / 2;
+            std::size_t value_x = center_x - this_value.size() / 2;
 
-    lambda(lambda, data, 0);
+            canvas.InsertLineBefore(expr_line++);
+
+            canvas.DrawOverline(expr_line - 1, expr_column + overline_start, overline_end - overline_start, {.style = style_overline, .important = true});
+            canvas.DrawString(expr_line - 2, value_x, this_value, {.style = style_overline, .important = true});
+
+            // Color the parentheses.
+            canvas.CellInfoAt(expr_line, expr_column + overline_start).style.color = style_overline.color;
+            canvas.CellInfoAt(expr_line, expr_column + overline_end - 1).style.color = style_overline.color;
+        }
+    }
+
+    canvas.InsertLineBefore(canvas.NumLines());
+
+    canvas.Print(terminal);
+
+    if (print_assertion_stack && data.enclosing_assertion)
+        PrintAssertionFramesLow(*data.enclosing_assertion, {}, depth + 1);
 }
 
 // --- modules::ExceptionPrinter ---
 
-void ta_test::modules::ExceptionPrinter::OnUncaughtException(const std::exception_ptr &e)
+void ta_test::modules::ExceptionPrinter::OnUncaughtException(const SingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e)
 {
-    TextStyle cur_style;
+    { // Print the exception itself.
+        TextStyle cur_style;
 
-    terminal.Print("%s%s%s\n",
-        terminal.AnsiResetString().data(),
-        terminal.AnsiDeltaString(cur_style, common_styles.error).data(),
-        chars_error.c_str()
-    );
+        terminal.Print("%s%s%s\n",
+            terminal.AnsiResetString().data(),
+            terminal.AnsiDeltaString(cur_style, common_styles.error).data(),
+            chars_error.c_str()
+        );
 
-    text::GetExceptionInfo(e, [&](const ExceptionInfo* info)
+        text::GetExceptionInfo(e, [&](const ExceptionInfo* info)
+        {
+            if (info)
+            {
+                auto style_a = terminal.AnsiDeltaString(cur_style, style_exception_type);
+                auto style_b = terminal.AnsiDeltaString(cur_style, style_exception_message);
+                terminal.Print("%s%s%s%s\n%s%s%s\n",
+                    style_a.data(),
+                    chars_indent_type.c_str(),
+                    info->type_name.c_str(),
+                    chars_type_suffix.c_str(),
+                    style_b.data(),
+                    chars_indent_message.c_str(),
+                    info->message.c_str()
+                );
+            }
+            else
+            {
+                terminal.Print("%s%s%s\n",
+                    terminal.AnsiDeltaString(cur_style, style_exception_type).data(),
+                    chars_indent_type.c_str(),
+                    chars_unknown_exception.c_str()
+                );
+            }
+        });
+
+        terminal.Print("%s\n", terminal.AnsiResetString().data());
+    }
+
+    // Print the assertion stack, if any.
+    if (assertion)
     {
-        if (info)
+        test.all_tests->runner->FindModule<AssertionStackPrinterInterface>([&](const AssertionStackPrinterInterface &printer)
         {
-            auto style_a = terminal.AnsiDeltaString(cur_style, style_exception_type);
-            auto style_b = terminal.AnsiDeltaString(cur_style, style_exception_message);
-            terminal.Print("%s%s%s%s\n%s%s%s\n",
-                style_a.data(),
-                chars_indent_type.c_str(),
-                info->type_name.c_str(),
-                chars_type_suffix.c_str(),
-                style_b.data(),
-                chars_indent_message.c_str(),
-                info->message.c_str()
-            );
-        }
-        else
-        {
-            terminal.Print("%s%s%s\n",
-                terminal.AnsiDeltaString(cur_style, style_exception_type).data(),
-                chars_indent_type.c_str(),
-                chars_unknown_exception.c_str()
-            );
-        }
-    });
-
-    terminal.Print("%s\n", terminal.AnsiResetString().data());
+            printer.PrintAssertionStack(*assertion);
+            return true;
+        });
+    }
 }
 
 // --- modules::DebuggerDetector ---
@@ -1682,8 +1726,10 @@ bool ta_test::modules::DebuggerDetector::IsDebuggerAttached() const
     return platform::IsDebuggerAttached();
 }
 
-void ta_test::modules::DebuggerDetector::OnAssertionFailed(const BasicAssertionInfo &data)
+void ta_test::modules::DebuggerDetector::OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message)
 {
+    (void)message;
+
     if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
         data.should_break = true;
 }
@@ -1698,5 +1744,6 @@ void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const RunTestsInfo &d
             PrintNote("Will break on failure.");
         else if (!detector.break_on_failure && detector.IsDebuggerAttached())
             PrintNote("A debugger is attached, will break on failure.");
+        return true;
     });
 }

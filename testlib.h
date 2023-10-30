@@ -162,7 +162,7 @@
 #define DETAIL_TA_CHECK(is_soft_, on_fail_, str_, ...) \
     /* Using `_ta_test_name_tag` to force this to be called only in tests. */\
     /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (::ta_test::detail::AssertWrapper<is_soft_, str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion((__VA_ARGS__) ? true : false)) {} else {\
+    if (::ta_test::detail::AssertWrapper<is_soft_, str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion([&](auto &&_ta_func){_ta_func(__VA_ARGS__);})) {} else {\
         if (_ta_assertion.should_break) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
         on_fail_ \
     }
@@ -505,10 +505,12 @@ namespace ta_test
             // Mostly for internal use.
             [[nodiscard]] virtual const StoredArg *FindStoredArgumentByLocation(const SourceLocCounter &loc) const = 0;
         };
-        virtual void OnAssertionFailed(const BasicAssertionInfo &data) {(void)data;}
+        // Called when an assertion fails.
+        // `message` is the associated user message, if any.
+        virtual void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) {(void)data; (void)message;}
 
-        // An exception falls out of a test. This is called right before the test fails.
-        virtual void OnUncaughtException(const std::exception_ptr &e) {(void)e;}
+        // Called when an exception falls out of an assertion or out of the entire test (in the latter case `assertion` is null).
+        virtual void OnUncaughtException(const SingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) {(void)test; (void)assertion; (void)e;}
 
         // --- MISC ---
 
@@ -826,7 +828,7 @@ namespace ta_test
         }
 
         // Converts a source location to a string in the current preferred format.
-        [[nodiscard]] std::string LocationToString(const BasicModule::SourceLoc &loc)
+        [[nodiscard]] std::string LocationToString(const BasicModule::SourceLoc &loc) const
         {
             return CFG_TA_FORMAT("{}{}{}{}", loc.file, filename_linenumber_separator, loc.line, filename_linenumber_suffix);
         }
@@ -1130,10 +1132,10 @@ namespace ta_test
             };
             std::vector<Line> lines;
 
-            CommonChars *chars = nullptr;
+            const CommonChars *chars = nullptr;
 
           public:
-            TextCanvas(CommonChars *chars) : chars(chars) {}
+            TextCanvas(const CommonChars *chars) : chars(chars) {}
 
             // Prints the canvas to a callback `func`, which is `(std::string_view string) -> void`.
             template <typename F>
@@ -1666,19 +1668,62 @@ namespace ta_test
         };
 
         // An intermediate base class that `AssertWrapper<T>` inherits from.
-        struct BasicAssertWrapper : BasicModule::BasicAssertionInfo
+        class BasicAssertWrapper : public BasicModule::BasicAssertionInfo
         {
             bool finished = false;
+            std::string user_message;
 
+          public:
             CFG_TA_API BasicAssertWrapper();
             BasicAssertWrapper(const BasicAssertWrapper &) = delete;
             BasicAssertWrapper &operator=(const BasicAssertWrapper &) = delete;
 
-            // Checks `value`, reports an error if it's false. In any case, returns `value` unchanged.
-            CFG_TA_API bool operator()(bool value);
+            template <typename F>
+            bool operator()(F &&func)
+            {
+                PreEvaluate();
+
+                bool value = false;
+
+                std::optional<std::string> message;
+
+                try
+                {
+                    func([&]<typename C, typename ...P>(C &&cond, P &&... message_parts)
+                    {
+                        // `?:` to force a contextual bool conversion.
+                        value = std::forward<C>(cond) ? true : false;
+
+                        if constexpr (sizeof...(P) > 0)
+                        {
+                            if (!value)
+                                message = CFG_TA_FORMAT(std::forward<P>(message_parts)...);
+                        }
+                    });
+                }
+                catch (InterruptTestException)
+                {
+                    // We don't want any additional errors here.
+                    return false;
+                }
+                catch (...)
+                {
+                    UncaughtException();
+                    return false;
+                }
+
+                PostEvaluate(value, message);
+
+                return value;
+            }
 
           protected:
             CFG_TA_API ~BasicAssertWrapper();
+
+          private:
+            CFG_TA_API void PreEvaluate();
+            CFG_TA_API void UncaughtException();
+            CFG_TA_API void PostEvaluate(bool value, const std::optional<std::string> &fail_message);
         };
 
         template <bool IsSoftAssertion, ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
@@ -1996,21 +2041,19 @@ namespace ta_test
         }
 
         // Calls `func` for every module of type `T` or derived from `T`.
-        // Causes a hard error if there's no such modules.
+        // If `func` returns true, then stops immediately and also returns true.
         template <typename T, typename F>
-        void FindModule(F &&func)
+        bool FindModule(F &&func)
         {
-            bool found = false;
             for (const auto &m : modules)
             {
                 if (auto base = dynamic_cast<T *>(m.get()))
                 {
-                    found = true;
-                    func(*base);
+                    if (func(*base))
+                        return true;
                 }
             }
-            if (!found)
-                HardError(CFG_TA_FORMAT("No such module in the list: `{}`.", text::Demangler{}(typeid(T).name())), HardErrorKind::user);
+            return false;
         }
 
         // Configures every `BasicPrintingModule` to print to `stream`.
@@ -2178,8 +2221,18 @@ namespace ta_test
             void OnPostRunTests(const RunTestsResults &data) override;
         };
 
+        // An interface to print assertion stacks.
+        struct AssertionStackPrinterInterface
+        {
+          protected:
+            ~AssertionStackPrinterInterface() = default;
+
+          public:
+            virtual void PrintAssertionStack(const BasicModule::BasicAssertionInfo &data) const = 0;
+        };
+
         // Prints failed assertions.
-        struct AssertionPrinter : BasicPrintingModule
+        struct AssertionPrinter : BasicPrintingModule, AssertionStackPrinterInterface
         {
             // Whether we should print the values of `$(...)` in the expression.
             bool decompose_expression = true;
@@ -2195,6 +2248,9 @@ namespace ta_test
 
             // How to print the filename.
             TextStyle style_filename = {.color = TextColor::none};
+
+            // How to print the custom error message coming from the user (passed to the assertion macro).
+            TextStyle style_user_message = {.color = TextColor::none, .bold = true};
 
             // How to print the assertion macro itself.
             TextStyle style_assertion_macro = {.color = TextColor::light_red, .bold = true};
@@ -2233,7 +2289,10 @@ namespace ta_test
             // The indentation is only applied once, since we don't print multiline code.
             std::size_t printed_code_indentation = 4;
 
-            void OnAssertionFailed(const BasicAssertionInfo &data) override;
+            void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) override;
+            void PrintAssertionStack(const BasicModule::BasicAssertionInfo &data) const override;
+
+            CFG_TA_API void PrintAssertionFramesLow(const BasicAssertionInfo &data, std::optional<std::string_view> message, int depth) const;
         };
 
         // A generic module to analyze exceptions.
@@ -2285,7 +2344,7 @@ namespace ta_test
             std::string chars_indent_message = "    ";
             std::string chars_type_suffix = ": ";
 
-            void OnUncaughtException(const std::exception_ptr &e) override;
+            void OnUncaughtException(const SingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) override;
         };
 
         // Detects whether the debugger is attached in a platform-specific way.
@@ -2301,7 +2360,7 @@ namespace ta_test
             std::vector<flags::BasicFlag *> GetFlags() override;
 
             CFG_TA_API bool IsDebuggerAttached() const;
-            void OnAssertionFailed(const BasicAssertionInfo &data) override;
+            void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) override;
         };
 
         // A little module that examines `DebuggerDetector` and notifies you when it detected a debugger.
