@@ -149,4 +149,12 @@ Good test names:
     But no error when it's in header, and two TUs register it with the same location
     One test name is a prefix of the other (a test can't double as a group)
 
+--- Evaluation order weirdness
+    ASSERT evaluated when no test is running.
+    ASSERT evaluated in a wrong thread.
+    $(...) evaluation delayed until after the assertion.
+    $(...) evaluation
+    If $(...) is evaluated more than once, should keep the latest value.
+    Try duplicating $(...) with a macro, what then?
+
 */

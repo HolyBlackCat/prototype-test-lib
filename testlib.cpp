@@ -709,6 +709,20 @@ void ta_test::BasicPrintingModule::PrintNote(std::string_view text) const
     );
 }
 
+void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
+{
+    const BasicModule::BasicAssertionInfo *cur = ThreadState().current_assertion;
+
+    while (cur)
+    {
+        if (cur == assertion)
+            return;
+        cur = cur->enclosing_assertion;
+    }
+
+    HardError("`$(...)` was evaluated when an assertion owning it already finished executing, or in a wrong thread.", HardErrorKind::user);
+}
+
 ta_test::detail::BasicAssertWrapper::BasicAssertWrapper()
 {
     GlobalThreadState &thread_state = ThreadState();

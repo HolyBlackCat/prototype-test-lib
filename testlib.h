@@ -1620,11 +1620,16 @@ namespace ta_test
         // Stores a pointer to a `StoredArg` in an `AssertWrapper` where it will write the argument as a string.
         struct ArgWrapper
         {
+            BasicModule::BasicAssertionInfo *assertion = nullptr;
             BasicModule::BasicAssertionInfo::StoredArg *target = nullptr;
 
-            ArgWrapper(BasicModule::BasicAssertionInfo::StoredArg &target)
-                : target(&target)
+            // Raises a hard error if the assertion owning this argument isn't currently running in this thread.
+            CFG_TA_API void EnsureAssertionIsRunning();
+
+            ArgWrapper(BasicModule::BasicAssertionInfo &assertion, BasicModule::BasicAssertionInfo::StoredArg &target)
+                : assertion(&assertion), target(&target)
             {
+                EnsureAssertionIsRunning();
                 target.state = BasicModule::BasicAssertionInfo::StoredArg::State::in_progress;
             }
             ArgWrapper(const ArgWrapper &) = default;
@@ -1635,6 +1640,7 @@ namespace ta_test
             T &&_ta_handle_arg_(int counter, T &&arg) &&
             {
                 (void)counter; // Unused, but passing it helps with parsing.
+                EnsureAssertionIsRunning();
                 target->value = ToString<std::remove_cvref_t<T>>{}(arg);
                 target->state = BasicModule::BasicAssertionInfo::StoredArg::State::done;
                 return std::forward<T>(arg);
@@ -1857,7 +1863,7 @@ namespace ta_test
                 if (it == arg_data.counter_to_arg_index.end() || it->counter != counter)
                     HardError("`TA_CHECK` isn't aware of this `$(...)`.");
 
-                return stored_args[it->index];
+                return {*this, stored_args[it->index]};
             }
         };
 
