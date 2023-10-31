@@ -841,7 +841,7 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
             BasicModule::SourceLoc old_loc = state.tests[it->second]->Location();
             BasicModule::SourceLoc new_loc = singleton->Location();
             if (new_loc != old_loc)
-                HardError(CFG_TA_FORMAT("Conflicting definitions for test `{}`. One at `{}:{}`, another at `{}:{}`.", name, old_loc.file, old_loc.line, new_loc.file, new_loc.line), HardErrorKind::user);
+                HardError(CFG_TA_FMT_NAMESPACE::format("Conflicting definitions for test `{}`. One at `{}:{}`, another at `{}:{}`.", name, old_loc.file, old_loc.line, new_loc.file, new_loc.line), HardErrorKind::user);
             return; // Already registered.
         }
         else
@@ -850,7 +850,7 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
             // Note, don't need to check `name.size() > it->first.size()` here, because if it was equal,
             // we wouldn't enter `else` at all, and if it was less, `.starts_with()` would return false.
             if (name.starts_with(it->first) && name[it->first.size()] == '/')
-                HardError(CFG_TA_FORMAT("A test name (`{}`) can't double as a category name (`{}`). Append `/something` to the first name.", it->first, name), HardErrorKind::user);
+                HardError(CFG_TA_FMT_NAMESPACE::format("A test name (`{}`) can't double as a category name (`{}`). Append `/something` to the first name.", it->first, name), HardErrorKind::user);
         }
     }
 

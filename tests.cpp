@@ -14,7 +14,7 @@ bool foo()
     // throw std::runtime_error("Blah!");
 
     std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oo\nf", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    TA_SOFT_CHECK( false );
+    TA_SOFT_CHECK( false, "Hello {}!", first);
     TA_CHECK( $($(first) + $(second)).ends_with($($(suffix.c_str()) + $(extra) + $("123") + $("456"))) );
     return false;
 }
@@ -25,7 +25,7 @@ TA_TEST(foo/bar)
 
 TA_TEST(test/lul/beta)
 {
-    TA_CHECK($(true) && $(foo()) == $(true));
+    TA_CHECK($(true) && $(foo()) == $(true), "huh");
 }
 
 TA_TEST( foo/baz )
@@ -70,8 +70,10 @@ int main(int argc, char **argv)
 
 // Scoped and unscoped logging macros.
 
-// Force remove \n from strings. Replace it with configurable character, something from Unicode by default.
+// Force remove \n from strings. Replace it with configurable character, something from Unicode by default. Unicode has icons for all control characters, maybe that?
 // Allow more characters in bracket-less form: `:`, `.`, `->`?
+
+// Review token styles. In particular, string literals are ugly bright cyan.
 
 // Length cap on serialized values, configurable. Maybe libfmt can do the clipping for us?
 
@@ -84,6 +86,7 @@ int main(int argc, char **argv)
 
 // Later:
 //     Multithreading? Thread inheritance system.
+//         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
 //     What's the deal with SEH? Do we need to do anything?
 
 // Maybe not?
@@ -93,6 +96,7 @@ int main(int argc, char **argv)
 
 // Unclear how:
 //     Print user messages from assertions that didn't execute to completion.
+//     Don't show the assertion user message the second time when printing the expression
 
 // Selling points:
 //     * Expression unwrapping
@@ -128,6 +132,9 @@ Nested exceptions (containing known and unknown types in them).
 Due to failed assertion.
 Due to exception.
 
+User messages in assertions.
+    But not in assertion stack, since it's hard to do with our current implementation.
+
 --- Test name validation
 Bad test names:
     Empty name
@@ -156,5 +163,7 @@ Good test names:
     $(...) evaluation
     If $(...) is evaluated more than once, should keep the latest value.
     Try duplicating $(...) with a macro, what then?
+
+--- Formatting errors shouldn't compile.
 
 */

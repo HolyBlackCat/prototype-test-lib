@@ -122,23 +122,23 @@
 #endif
 #endif
 
-// The formatting function, `::std::format` or something similar.
-#ifndef CFG_TA_FORMAT
+// The namespace of the formatting function. We'll use `CFG_TA_FMT_NAMESPACE::format()` and `CFG_TA_FMT_NAMESPACE::format_string`.
+#ifndef CFG_TA_FMT_NAMESPACE
 #if CFG_TA_USE_LIBFMT
 #include <fmt/format.h>
-#define CFG_TA_FORMAT ::fmt::format
+#define CFG_TA_FMT_NAMESPACE ::fmt
 #else
 #include <format>
-#define CFG_TA_FORMAT ::std::format
+#define CFG_TA_FMT_NAMESPACE ::std
 #endif
 #endif
 
 // Whether `{:?}` is a valid format for strings and characters.
-#ifndef CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS
+#ifndef CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
 #if CFG_TA_CXX_STANDARD >= 23 || CFG_TA_USE_LIBFMT
-#define CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS 1
+#define CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS 1
 #else
-#define CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS 0
+#define CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS 0
 #endif
 #endif
 
@@ -608,6 +608,12 @@ namespace ta_test
         static constexpr auto value = X;
     };
 
+    // The lambda overloader.
+    template <typename ...P>
+    struct Overload : P... {using P::operator()...;};
+    template <typename ...P>
+    Overload(P...) -> Overload<P...>;
+
 
     // --- PLATFORM INFORMATION ---
 
@@ -804,7 +810,7 @@ namespace ta_test
         // Converts a source location to a string in the current preferred format.
         [[nodiscard]] std::string LocationToString(const BasicModule::SourceLoc &loc) const
         {
-            return CFG_TA_FORMAT("{}{}{}{}", loc.file, filename_linenumber_separator, loc.line, filename_linenumber_suffix);
+            return CFG_TA_FMT_NAMESPACE::format("{}{}{}{}", loc.file, filename_linenumber_separator, loc.line, filename_linenumber_suffix);
         }
     };
 
@@ -1594,15 +1600,15 @@ namespace ta_test
     {
         std::string operator()(const T &value) const
         {
-            #if CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS
+            #if CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
             if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
             {
-                return CFG_TA_FORMAT("{:?}", value);
+                return CFG_TA_FMT_NAMESPACE::format("{:?}", value);
             }
             else
             #endif
             {
-                return CFG_TA_FORMAT("{}", value);
+                return CFG_TA_FMT_NAMESPACE::format("{}", value);
             }
         }
     };
@@ -1669,16 +1675,20 @@ namespace ta_test
 
                 try
                 {
-                    func([&]<typename C, typename ...P>(C &&cond, P &&... message_parts)
-                    {
-                        // `?:` to force a contextual bool conversion.
-                        value = std::forward<C>(cond) ? true : false;
-
-                        if constexpr (sizeof...(P) > 0)
+                    func(Overload{
+                        [&]<typename C>(C &&cond)
                         {
+                            // `?:` to force a contextual bool conversion.
+                            value = std::forward<C>(cond) ? true : false;
+                        },
+                        // This is lame, but I can't just make `format` one of the variadic arguments, because then it's not constexpr enough for `format()`.
+                        [&]<typename C, typename ...P>(C &&cond, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... message_parts)
+                        {
+                            // `?:` to force a contextual bool conversion.
+                            value = std::forward<C>(cond) ? true : false;
                             if (!value)
-                                message = CFG_TA_FORMAT(std::forward<P>(message_parts)...);
-                        }
+                                message = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(message_parts)...);
+                        },
                     });
                 }
                 catch (InterruptTestException)
@@ -2349,7 +2359,7 @@ namespace ta_test
 }
 
 // Manually support quoting strings if the formatting library can't do that.
-#if !CFG_TA_FORMAT_SUPPORTS_DEBUG_STRINGS
+#if !CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
 namespace ta_test
 {
     template <typename Void>
@@ -2357,7 +2367,7 @@ namespace ta_test
     {
         std::string operator()(char value) const
         {
-            char ret[12]; // Should be at most 9: `'\x??'\0`, but throwing in a little extra space.
+            char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
             text::EscapeString({&value, 1}, ret, false);
             return ret;
         }
