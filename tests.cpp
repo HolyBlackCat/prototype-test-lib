@@ -57,7 +57,6 @@ int main(int argc, char **argv)
     return runner.Run();
 }
 
-// -i,-e for include/exclude
 // --[no-]catch to disable all try/catch
 
 // Some form of expect_throw.
@@ -165,5 +164,12 @@ Good test names:
     Try duplicating $(...) with a macro, what then?
 
 --- Formatting errors shouldn't compile.
+
+--- Various flag styles:
+    --include foo
+    --include=foo
+    -ifoo
+    -i foo
+    But not -i=foo
 
 */

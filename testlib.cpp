@@ -904,8 +904,16 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
 
         std::optional<std::string_view> arg;
 
-        auto sep = flag->find_first_of('=');
-        if (sep != std::string_view::npos)
+        // Handle arguments embedded in the flag.
+
+        // Short form.
+        if (flag->size() > 2 && flag->starts_with('-') && (*flag)[1] != '-')
+        {
+            arg = flag->substr(2);
+            flag = flag->substr(0, 2);
+        }
+        // Long form.
+        else if (auto sep = flag->find_first_of('='); sep != std::string_view::npos)
         {
             arg = flag->substr(sep + 1);
             flag = flag->substr(0, sep);
@@ -1060,7 +1068,8 @@ int ta_test::Runner::Run()
 // --- modules::HelpPrinter ---
 
 ta_test::modules::HelpPrinter::HelpPrinter()
-    : help_flag("help", "Show usage", [](Runner &runner, BasicModule &this_module)
+    : expected_flag_width(16),
+    help_flag("help", "Show usage", [](Runner &runner, BasicModule &this_module)
     {
         std::vector<flags::BasicFlag *> flags;
         for (const auto &m : runner.modules)
@@ -1074,7 +1083,7 @@ ta_test::modules::HelpPrinter::HelpPrinter()
 
         self.terminal.Print("This is a test runner based on ta_test.\nAvailable options:\n");
         for (flags::BasicFlag *flag : flags)
-            self.terminal.Print("  %-14s - %s\n", flag->HelpFlagSpelling().c_str(), flag->help_desc.c_str());
+            self.terminal.Print("  %-*s - %s\n", self.expected_flag_width, flag->HelpFlagSpelling().c_str(), flag->help_desc.c_str());
 
         std::exit(0);
     })
@@ -1103,13 +1112,13 @@ void ta_test::modules::HelpPrinter::OnMissingFlagArgument(std::string_view flag,
 // --- modules::TestSelector ---
 
 ta_test::modules::TestSelector::TestSelector()
-    : flag_include("include",
+    : flag_include("include", 'i',
         "Enable tests matching a pattern. The pattern must either match the whole test name, or its prefix up to and possibly including a slash. "
         "The pattern can be a regex. This flag can be repeated multiple times, and the order with respect to `--exclude` matters. "
         "If the first time this flag appears is before `--exclude`, all tests start disabled by default.",
         GetFlagCallback(false)
     ),
-    flag_exclude("exclude",
+    flag_exclude("exclude", 'e',
         "Disable tests matching a pattern. Uses the same pattern format as `--include`.",
         GetFlagCallback(true)
     )

@@ -302,26 +302,49 @@ namespace ta_test
         struct StringFlag : BasicFlag
         {
             std::string flag;
+            char short_flag = '\0'; // Zero if none.
 
             using Callback = std::function<void(Runner &runner, BasicModule &this_module, std::string_view value)>;
             Callback callback;
 
-            StringFlag(std::string flag, std::string help_desc, Callback callback)
-                : BasicFlag(std::move(help_desc)), flag(std::move(flag)), callback(std::move(callback))
+            // `short_flag` can be zero if none.
+            StringFlag(std::string flag, char short_flag, std::string help_desc, Callback callback)
+                : BasicFlag(std::move(help_desc)), flag(std::move(flag)), short_flag(short_flag), callback(std::move(callback))
             {}
 
             std::string HelpFlagSpelling() const override
             {
-                return "--" + flag + " ...";
+                std::string ret;
+                if (short_flag)
+                {
+                    ret += '-';
+                    ret += short_flag;
+                    ret += ',';
+                }
+                return ret + "--" + flag + " ...";
             }
 
             bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
             {
                 (void)request_arg;
 
-                if (!input.starts_with("--"))
+                if (!input.starts_with('-'))
                     return false;
-                input.remove_prefix(2);
+                input.remove_prefix(1);
+
+                // The short form.
+                if (short_flag && input == std::string_view(&short_flag, 1))
+                {
+                    auto arg = request_arg();
+                    if (!arg)
+                        return false;
+                    callback(runner, this_module, *arg);
+                    return true;
+                }
+
+                if (!input.starts_with('-'))
+                    return false;
+                input.remove_prefix(1);
 
                 if (input != flag)
                     return false;
@@ -2090,6 +2113,10 @@ namespace ta_test
         // Responds to `--help` by printing the flags provided by all other modules.
         struct HelpPrinter : BasicPrintingModule
         {
+            // Pad flag spelling with spaces to be at least this long.
+            // We could detect this automatically, but A: that's more work, and B: then very long flags would cause worse formatting for all other flags.
+            int expected_flag_width = 0;
+
             flags::SimpleFlag help_flag;
 
             CFG_TA_API HelpPrinter();
