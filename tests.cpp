@@ -57,10 +57,6 @@ int main(int argc, char **argv)
     return runner.Run();
 }
 
-// `--catch --break` should break on exceptions (or just unknown failures) in a destructor of a test func parameter.
-
-// --[no-]catch to disable all try/catch
-
 // Some form of expect_throw.
 
 // Error summary in results, with file paths.

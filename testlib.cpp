@@ -1077,6 +1077,9 @@ int ta_test::Runner::Run()
 
         if (guard.state.failed)
             results.num_failed_tests++;
+
+        if (guard.state.should_break)
+            test->Breakpoint();
     }
 
     for (const auto &m : modules)
@@ -1811,6 +1814,12 @@ void ta_test::modules::DebuggerDetector::OnPreTryCatch(bool &should_catch)
 {
     if (catch_exceptions ? !*catch_exceptions : IsDebuggerAttached())
         should_catch = false;
+}
+
+void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const SingleTestResults &data)
+{
+    if (data.failed && (break_on_failure ? *break_on_failure : IsDebuggerAttached()))
+        data.should_break = true;
 }
 
 // --- modules::DebuggerStatePrinter ---

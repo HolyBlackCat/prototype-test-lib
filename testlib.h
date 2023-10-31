@@ -186,7 +186,9 @@
         const std::nullptr_t *, &::ta_test::detail::register_test_helper<\
             ::ta_test::detail::SpecificTest<static_cast<void(*)(\
                 ::ta_test::ConstStringTag<#name>\
-            )>(_ta_test_func), #name, __FILE__, __LINE__>\
+            )>(_ta_test_func),\
+            []{CFG_TA_BREAKPOINT(); ::std::terminate();},\
+            #name, __FILE__, __LINE__>\
         >\
     >{})) {} \
     inline void _ta_test_func(::ta_test::ConstStringTag<#name>)
@@ -434,6 +436,9 @@ namespace ta_test
         struct SingleTestResults : SingleTestInfo
         {
             bool failed = false;
+
+            // You can set this to true to break after the test.
+            mutable bool should_break = false;
         };
         // This is called before every single test runs.
         virtual void OnPreRunSingleTest(const SingleTestInfo &data) {(void)data;}
@@ -1919,6 +1924,9 @@ namespace ta_test
         struct BasicTest : BasicModule::BasicTestInfo
         {
             virtual void Run() const = 0;
+
+            // Magically trigger a breakpoint at the test declaration.
+            virtual void Breakpoint() const = 0;
         };
 
         // A comparator for test names, that orders `/` before any other character.
@@ -1979,7 +1987,8 @@ namespace ta_test
 
         // An implementation of `BasicTest` for a specific test.
         // `P` is a pointer to the test function, see `DETAIL_TA_TEST()` for details.
-        template <auto P, ConstString TestName, ConstString LocFile, int LocLine>
+        // `B` is a lambda that triggers a breakpoint in the test location itself when called.
+        template <auto P, auto B, ConstString TestName, ConstString LocFile, int LocLine>
         struct SpecificTest : BasicTest
         {
             static constexpr bool test_name_is_valid = []{
@@ -2007,6 +2016,11 @@ namespace ta_test
             void Run() const override
             {
                 P({}/* Name tag. */);
+            }
+
+            void Breakpoint() const override
+            {
+                B();
             }
         };
 
@@ -2396,6 +2410,7 @@ namespace ta_test
             CFG_TA_API bool IsDebuggerAttached() const;
             void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) override;
             void OnPreTryCatch(bool &should_catch) override;
+            void OnPostRunSingleTest(const SingleTestResults &data) override;
         };
 
         // A little module that examines `DebuggerDetector` and notifies you when it detected a debugger.
