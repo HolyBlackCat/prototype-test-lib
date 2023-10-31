@@ -11,7 +11,7 @@ bool sum(const auto &...){return false;}
 
 bool foo()
 {
-    // throw std::runtime_error("Blah!");
+    throw std::runtime_error("Blah!");
 
     std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oo\nf", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     TA_SOFT_CHECK( false, "Hello {}!", first);
@@ -56,6 +56,8 @@ int main(int argc, char **argv)
     runner.ProcessFlags(argc, argv);
     return runner.Run();
 }
+
+// `--catch --break` should break on exceptions (or just unknown failures) in a destructor of a test func parameter.
 
 // --[no-]catch to disable all try/catch
 

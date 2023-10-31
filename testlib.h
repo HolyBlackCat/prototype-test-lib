@@ -543,6 +543,10 @@ namespace ta_test
         // Return the information on your custom exception type, if they don't inherit from `std::exception`.
         // Do nothing (or throw) to let some other module handle this.
         [[nodiscard]] virtual std::optional<ExceptionInfoWithNested> OnExplainException(const std::exception_ptr &e) const {(void)e; return {};}
+
+        // This is called before entering try/catch blocks, so you can choose between that and just executing directly. (See `--catch`.)
+        // `should_catch` defaults to true.
+        virtual void OnPreTryCatch(bool &should_catch) {(void)should_catch;}
     };
 
     // A pointer to a class derived from `BasicModule`.
@@ -1690,13 +1694,13 @@ namespace ta_test
             template <typename F>
             bool operator()(F &&func)
             {
-                PreEvaluate();
+                bool should_catch = PreEvaluate();
 
                 bool value = false;
 
                 std::optional<std::string> message;
 
-                try
+                auto lambda = [&]
                 {
                     func(Overload{
                         [&]<typename C>(C &&cond)
@@ -1713,16 +1717,28 @@ namespace ta_test
                                 message = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(message_parts)...);
                         },
                     });
-                }
-                catch (InterruptTestException)
+                };
+
+                if (should_catch)
                 {
-                    // We don't want any additional errors here.
-                    return false;
+                    try
+                    {
+                        lambda();
+                    }
+                    catch (InterruptTestException)
+                    {
+                        // We don't want any additional errors here.
+                        return false;
+                    }
+                    catch (...)
+                    {
+                        UncaughtException();
+                        return false;
+                    }
                 }
-                catch (...)
+                else
                 {
-                    UncaughtException();
-                    return false;
+                    lambda();
                 }
 
                 PostEvaluate(value, message);
@@ -1734,7 +1750,7 @@ namespace ta_test
             CFG_TA_API ~BasicAssertWrapper();
 
           private:
-            CFG_TA_API void PreEvaluate();
+            [[nodiscard]] CFG_TA_API bool PreEvaluate(); // Returns true if we should catch exceptions.
             CFG_TA_API void UncaughtException();
             CFG_TA_API void PostEvaluate(bool value, const std::optional<std::string> &fail_message);
         };
@@ -2362,12 +2378,16 @@ namespace ta_test
         };
 
         // Detects whether the debugger is attached in a platform-specific way.
+        // Responds to `--debug`, `--break`, `--catch` to override the debugger detection.
         struct DebuggerDetector : BasicModule
         {
             // If this is not set, will check whether the debugger is attached when an assertion fails, and break if it is.
             std::optional<bool> break_on_failure;
+            std::optional<bool> catch_exceptions;
 
+            flags::BoolFlag flag_common;
             flags::BoolFlag flag_break;
+            flags::BoolFlag flag_catch;
 
             CFG_TA_API DebuggerDetector();
 
@@ -2375,6 +2395,7 @@ namespace ta_test
 
             CFG_TA_API bool IsDebuggerAttached() const;
             void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) override;
+            void OnPreTryCatch(bool &should_catch) override;
         };
 
         // A little module that examines `DebuggerDetector` and notifies you when it detected a debugger.

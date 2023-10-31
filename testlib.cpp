@@ -745,7 +745,7 @@ ta_test::detail::BasicAssertWrapper::~BasicAssertWrapper()
     thread_state.current_assertion = const_cast<BasicModule::BasicAssertionInfo *>(enclosing_assertion);
 }
 
-void ta_test::detail::BasicAssertWrapper::PreEvaluate()
+bool ta_test::detail::BasicAssertWrapper::PreEvaluate()
 {
     if (finished)
         HardError("Invalid usage, `operator()` called more than once on an `AssertWrapper`.");
@@ -755,6 +755,11 @@ void ta_test::detail::BasicAssertWrapper::PreEvaluate()
         HardError("Something is wrong, the current test information disappeared while the assertion was evaluated.");
     if (thread_state.current_assertion != this)
         HardError("The assertion being evaluated is not on the top of the assertion stack.");
+
+    bool should_catch = true;
+    for (const auto &m : thread_state.current_test->all_tests->runner->modules)
+        m->OnPreTryCatch(should_catch);
+    return should_catch;
 }
 
 void ta_test::detail::BasicAssertWrapper::UncaughtException()
@@ -1038,18 +1043,33 @@ int ta_test::Runner::Run()
         for (const auto &m : modules)
             m->OnPreRunSingleTest(guard.state);
 
+        bool should_catch = true;
+        for (const auto &m : modules)
+            m->OnPreTryCatch(should_catch);
 
-        try
+        auto lambda = [&]
         {
             test->Run();
-        }
-        catch (InterruptTestException) {}
-        catch (...)
+        };
+
+        if (should_catch)
         {
-            guard.state.failed = true;
-            auto e = std::current_exception();
-            for (const auto &m : modules)
-                m->OnUncaughtException(guard.state, nullptr, e);
+            try
+            {
+                lambda();
+            }
+            catch (InterruptTestException) {}
+            catch (...)
+            {
+                guard.state.failed = true;
+                auto e = std::current_exception();
+                for (const auto &m : modules)
+                    m->OnUncaughtException(guard.state, nullptr, e);
+            }
+        }
+        else
+        {
+            lambda();
         }
 
         for (const auto &m : modules)
@@ -1069,7 +1089,7 @@ int ta_test::Runner::Run()
 
 ta_test::modules::HelpPrinter::HelpPrinter()
     : expected_flag_width(16),
-    help_flag("help", "Show usage", [](Runner &runner, BasicModule &this_module)
+    help_flag("help", "Show usage.", [](Runner &runner, BasicModule &this_module)
     {
         std::vector<flags::BasicFlag *> flags;
         for (const auto &m : runner.modules)
@@ -1218,13 +1238,13 @@ void ta_test::modules::TestSelector::OnPreRunTests(const RunTestsInfo &data)
 // --- modules::PrintingConfigurator ---
 
 ta_test::modules::PrintingConfigurator::PrintingConfigurator()
-    : flag_color("color", "Color output using ANSI escape sequences (by default enabled when printing to terminal)",
+    : flag_color("color", "Color output using ANSI escape sequences (by default enabled when printing to terminal).",
         [](Runner &runner, BasicModule &this_module, bool enable)
         {
             (void)this_module;
             runner.SetEnableColor(enable);
         }
-    ), flag_unicode("unicode", "Use Unicode characters for pseudographics (enabled by default)",
+    ), flag_unicode("unicode", "Use Unicode characters for pseudographics (enabled by default).",
         [](Runner &runner, BasicModule &this_module, bool enable)
         {
             (void)this_module;
@@ -1258,7 +1278,6 @@ void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
 
 void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
 {
-    (void)data;
     state = {};
 
     // Print a message when some tests are skipped.
@@ -1736,7 +1755,18 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const SingleTestInf
 // --- modules::DebuggerDetector ---
 
 ta_test::modules::DebuggerDetector::DebuggerDetector()
-    : flag_break("break", "Trigger a breakpoint on any failure, this will crash if no debugger is attached (by default enabled if a debugger is attached)",
+    : flag_common("debug", "Act as if a debugger was or wasn't attached, bypassing debugger detection. Enabling this is a shorthand for `--break --no-catch`, and vice versa.",
+        [](Runner &runner, BasicModule &this_module, bool enable)
+        {
+            (void)runner;
+
+            // The cast should never fail.
+            auto &self = dynamic_cast<DebuggerDetector &>(this_module);
+            self.break_on_failure = enable;
+            self.catch_exceptions = !enable;
+        }
+    ),
+    flag_break("break", "Trigger a breakpoint on any failure, this will crash if no debugger is attached (by default enabled if a debugger is attached).",
         [](Runner &runner, BasicModule &this_module, bool enable)
         {
             (void)runner;
@@ -1744,12 +1774,24 @@ ta_test::modules::DebuggerDetector::DebuggerDetector()
             // The cast should never fail.
             dynamic_cast<DebuggerDetector &>(this_module).break_on_failure = enable;
         }
+    ),
+    flag_catch("catch", "Catch exceptions. Disabling this means that the application will terminate on a first exception, "
+        "but this improves debugging experience by letting you configure your debugger to only break on uncaught exceptions, "
+        "which means you don't need to manually skip the ones that are thrown and successfully caught. Enabling this while debugging "
+        "will give you only approximate exception locations (the innermost enclosing assertion or test), rather than precise ones. (By default enabled if a debugger is not attached.)",
+        [](Runner &runner, BasicModule &this_module, bool enable)
+        {
+            (void)runner;
+
+            // The cast should never fail.
+            dynamic_cast<DebuggerDetector &>(this_module).catch_exceptions = enable;
+        }
     )
 {}
 
 std::vector<ta_test::flags::BasicFlag *> ta_test::modules::DebuggerDetector::GetFlags()
 {
-    return {&flag_break};
+    return {&flag_common, &flag_break, &flag_catch};
 }
 
 bool ta_test::modules::DebuggerDetector::IsDebuggerAttached() const
@@ -1765,6 +1807,12 @@ void ta_test::modules::DebuggerDetector::OnAssertionFailed(const BasicAssertionI
         data.should_break = true;
 }
 
+void ta_test::modules::DebuggerDetector::OnPreTryCatch(bool &should_catch)
+{
+    if (catch_exceptions ? !*catch_exceptions : IsDebuggerAttached())
+        should_catch = false;
+}
+
 // --- modules::DebuggerStatePrinter ---
 
 void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const RunTestsInfo &data)
@@ -1774,7 +1822,12 @@ void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const RunTestsInfo &d
         if (detector.break_on_failure && *detector.break_on_failure)
             PrintNote("Will break on failure.");
         else if (!detector.break_on_failure && detector.IsDebuggerAttached())
-            PrintNote("A debugger is attached, will break on failure.");
+            PrintNote("Will break on failure (because a debugger is attached, `--catch` to override).");
+
+        if (detector.catch_exceptions && !*detector.catch_exceptions)
+            PrintNote("Will not catch exceptions.");
+        else if (!detector.catch_exceptions && detector.IsDebuggerAttached())
+            PrintNote("Will not catch exceptions (because a debugger is attached, `--no-break` to override).");
         return true;
     });
 }
