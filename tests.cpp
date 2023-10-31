@@ -57,6 +57,9 @@ int main(int argc, char **argv)
     return runner.Run();
 }
 
+// -i,-e for include/exclude
+// --[no-]catch to disable all try/catch
+
 // Some form of expect_throw.
 
 // Error summary in results, with file paths.
@@ -71,8 +74,6 @@ int main(int argc, char **argv)
 // Allow more characters in bracket-less form: `:`, `.`, `->`?
 
 // Length cap on serialized values, configurable. Maybe libfmt can do the clipping for us?
-
-// Single-letter flag shorthands. But what to do with boolean negation?
 
 // Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
 

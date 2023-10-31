@@ -173,10 +173,10 @@
 #define $(...) TA_ARG(__VA_ARGS__)
 #endif
 #define DETAIL_TA_ARG(counter, ...) \
-    /* Note the parentheses, they allow this to be transparently used e.g. as a single function parameter. */\
+    /* Note the outer parentheses, they allow this to be transparently used e.g. as a single function parameter. */\
     /* Passing `counter` the second time is redundant, but helps with our parsing. */\
     /* Note `void(_ta_assertion)`, which prevents this from being used outside of an assertion. */\
-    (void(_ta_assertion), ::ta_test::detail::ArgWrapper(__FILE__, __LINE__, counter)._ta_handle_arg_(counter, __VA_ARGS__))
+    (_ta_assertion.BeginArg(counter)._ta_handle_arg_(counter, __VA_ARGS__))
 
 #define TA_TEST(name) DETAIL_TA_TEST(name)
 
@@ -368,14 +368,6 @@ namespace ta_test
             int line = 0;
             friend auto operator<=>(const SourceLoc &, const SourceLoc &) = default;
         };
-        // A source location augumented with the value of `__COUNTER__`.
-        struct SourceLocCounter
-        {
-            std::string_view file;
-            int line = 0;
-            int counter = 0;
-            friend auto operator<=>(const SourceLocCounter &, const SourceLocCounter &) = default;
-        };
 
         struct BasicTestInfo
         {
@@ -501,10 +493,6 @@ namespace ta_test
             [[nodiscard]] virtual std::span<const std::size_t> ArgsInDrawOrder() const = 0;
             // The current values of the arguments.
             [[nodiscard]] virtual std::span<const StoredArg> StoredArgs() const = 0;
-
-            // Gets the `StoredArg` from its location in the source. Returns null on failure.
-            // Mostly for internal use.
-            [[nodiscard]] virtual const StoredArg *FindStoredArgumentByLocation(const SourceLocCounter &loc) const = 0;
         };
         // Called when an assertion fails.
         // `message` is the associated user message, if any.
@@ -575,10 +563,6 @@ namespace ta_test
         {
             BasicModule::SingleTestResults *current_test = nullptr;
             BasicModule::BasicAssertionInfo *current_assertion = nullptr;
-
-            // Finds an argument in the currently running assertions.
-            // Results in a hard error on failure.
-            CFG_TA_API BasicModule::BasicAssertionInfo::StoredArg &FindStoredArgument(const BasicModule::SourceLocCounter &loc);
         };
         [[nodiscard]] CFG_TA_API GlobalThreadState &ThreadState();
 
@@ -1632,16 +1616,16 @@ namespace ta_test
     // Don't touch this.
     namespace detail
     {
-        // `TA_ARG` expands to this.
-        // Stores a pointer into an `AssertWrapper` where it will write the argument as a string.
+        // `TA_ARG` ultimately expands to this.
+        // Stores a pointer to a `StoredArg` in an `AssertWrapper` where it will write the argument as a string.
         struct ArgWrapper
         {
             BasicModule::BasicAssertionInfo::StoredArg *target = nullptr;
 
-            ArgWrapper(std::string_view file, int line, int counter)
-                : target(&ThreadState().FindStoredArgument(BasicModule::SourceLocCounter{.file = file, .line = line, .counter = counter}))
+            ArgWrapper(BasicModule::BasicAssertionInfo::StoredArg &target)
+                : target(&target)
             {
-                target->state = BasicModule::BasicAssertionInfo::StoredArg::State::in_progress;
+                target.state = BasicModule::BasicAssertionInfo::StoredArg::State::in_progress;
             }
             ArgWrapper(const ArgWrapper &) = default;
             ArgWrapper &operator=(const ArgWrapper &) = default;
@@ -1865,18 +1849,15 @@ namespace ta_test
             std::span<const std::size_t> ArgsInDrawOrder() const override {return arg_data.args_in_draw_order;}
             std::span<const StoredArg> StoredArgs() const override {return stored_args;}
 
-            const StoredArg *FindStoredArgumentByLocation(const BasicModule::SourceLocCounter &loc) const override
+            [[nodiscard]] ArgWrapper BeginArg(int counter)
             {
-                if (loc.line != LineNumber || loc.file != FileName.view())
-                    return nullptr;
-
                 auto it = std::partition_point(arg_data.counter_to_arg_index.begin(), arg_data.counter_to_arg_index.end(),
-                    [&](const CounterIndexPair &pair){return pair.counter < loc.counter;}
+                    [&](const CounterIndexPair &pair){return pair.counter < counter;}
                 );
-                if (it == arg_data.counter_to_arg_index.end() || it->counter != loc.counter)
-                    return nullptr;
+                if (it == arg_data.counter_to_arg_index.end() || it->counter != counter)
+                    HardError("`TA_CHECK` isn't aware of this `$(...)`.");
 
-                return &stored_args[it->index];
+                return stored_args[it->index];
             }
         };
 

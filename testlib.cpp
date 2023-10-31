@@ -51,19 +51,6 @@ void ta_test::HardError(std::string_view message, HardErrorKind kind)
     std::terminate();
 }
 
-ta_test::BasicModule::BasicAssertionInfo::StoredArg &ta_test::detail::GlobalThreadState::FindStoredArgument(const BasicModule::SourceLocCounter &loc)
-{
-    const BasicModule::BasicAssertionInfo *cur = current_assertion;
-    while (cur)
-    {
-        if (auto ret = cur->FindStoredArgumentByLocation(loc))
-            return const_cast<BasicModule::BasicAssertionInfo::StoredArg &>(*ret);
-        cur = cur->enclosing_assertion;
-    }
-
-    HardError("This `$(...)` isn't enclosed in any assertion macro.", HardErrorKind::user);
-}
-
 ta_test::detail::GlobalThreadState &ta_test::detail::ThreadState()
 {
     thread_local GlobalThreadState ret;
