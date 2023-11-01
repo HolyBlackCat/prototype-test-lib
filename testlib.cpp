@@ -393,7 +393,17 @@ std::size_t ta_test::text::TextCanvas::DrawString(std::size_t line, std::size_t 
 {
     EnsureNumLines(line + 1);
     EnsureLineSize(line, start + text.size());
-    std::copy(text.begin(), text.end(), lines[line].text.begin() + (std::ptrdiff_t)start);
+
+    auto out = lines[line].text.begin() + (std::ptrdiff_t)start;
+    for (char32_t ch : text)
+    {
+        // Replace control characters with their Unicode printable representations.
+        if (ch >= '\0' && ch < ' ')
+            ch += 0x2400;
+
+        *out++ = ch;
+    }
+
     for (std::size_t i = start; i < start + text.size(); i++)
         lines[line].info[i] = info;
     return text.size();

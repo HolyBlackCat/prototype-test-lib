@@ -11,10 +11,10 @@ bool sum(const auto &...){return false;}
 
 bool foo()
 {
-    throw std::runtime_error("Blah!");
+    // throw std::runtime_error("Blah!");
 
-    std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oo\nf", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    TA_SOFT_CHECK( false, "Hello {}!", first);
+    std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oof", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    // TA_SOFT_CHECK( false, "Hello {}!", first);
     TA_CHECK( $($(first) + $(second)).ends_with($($(suffix.c_str()) + $(extra) + $("123") + $("456"))) );
     return false;
 }
@@ -67,9 +67,6 @@ int main(int argc, char **argv)
 
 // Scoped and unscoped logging macros.
 
-// Force remove \n from strings. Replace it with configurable character, something from Unicode by default. Unicode has icons for all control characters, maybe that?
-// Allow more characters in bracket-less form: `:`, `.`, `->`?
-
 // Review token styles. In particular, string literals are ugly bright cyan.
 
 // Length cap on serialized values, configurable. Maybe libfmt can do the clipping for us?
@@ -81,12 +78,15 @@ int main(int argc, char **argv)
 
 // Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
 
+// Subsections, for_types, and for_values (for_values optional?)
+
 // Later:
 //     Multithreading? Thread inheritance system.
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
 //     What's the deal with SEH? Do we need to do anything?
 
 // Maybe not?
+//     Allow more characters in bracket-less form: `:`, `.`, `->`?
 //     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
 //     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
 //     Deduplicate assertions in stacks? Both when an assertion fails and when an exception is triggered.
@@ -169,5 +169,9 @@ Good test names:
     -ifoo
     -i foo
     But not -i=foo
+
+--- Control characters are replaced with their symbolic representations in:
+    Stringified arguments
+    User assertion messages
 
 */
