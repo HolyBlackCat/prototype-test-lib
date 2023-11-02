@@ -51,6 +51,22 @@ void ta_test::HardError(std::string_view message, HardErrorKind kind)
     std::terminate();
 }
 
+// Gracefully fails the current test, if not already failed.
+// Call this first, before printing any messages.
+void ta_test::detail::GlobalThreadState::FailCurrentTest()
+{
+    if (!current_test)
+        HardError("Trying to fail the current test, but no test is currently running.");
+
+    if (current_test->failed)
+        return; // Already failed.
+
+    current_test->failed = true;
+
+    for (const auto &m : current_test->all_tests->runner->modules)
+        m->OnPreFailTest(*current_test);
+}
+
 ta_test::detail::GlobalThreadState &ta_test::detail::ThreadState()
 {
     thread_local GlobalThreadState ret;
@@ -775,7 +791,7 @@ bool ta_test::detail::BasicAssertWrapper::PreEvaluate()
 void ta_test::detail::BasicAssertWrapper::UncaughtException()
 {
     GlobalThreadState &thread_state = ThreadState();
-    thread_state.current_test->failed = true;
+    thread_state.FailCurrentTest();
 
     auto e = std::current_exception();
     for (const auto &m : thread_state.current_test->all_tests->runner->modules)
@@ -789,7 +805,7 @@ void ta_test::detail::BasicAssertWrapper::PostEvaluate(bool value, const std::op
     if (!value)
     {
         GlobalThreadState &thread_state = ThreadState();
-        thread_state.current_test->failed = true;
+        thread_state.FailCurrentTest();
 
         std::optional<std::string_view> fail_message_view;
         if (fail_message)
@@ -1042,7 +1058,7 @@ int ta_test::Runner::Run()
 
         struct StateGuard
         {
-            BasicModule::SingleTestResults state;
+            BasicModule::RunSingleTestResults state;
             StateGuard() {detail::ThreadState().current_test = &state;}
             ~StateGuard() {detail::ThreadState().current_test = nullptr;}
         };
@@ -1071,7 +1087,7 @@ int ta_test::Runner::Run()
             catch (InterruptTestException) {}
             catch (...)
             {
-                guard.state.failed = true;
+                detail::ThreadState().FailCurrentTest();
                 auto e = std::current_exception();
                 for (const auto &m : modules)
                     m->OnUncaughtException(guard.state, nullptr, e);
@@ -1086,7 +1102,7 @@ int ta_test::Runner::Run()
             m->OnPostRunSingleTest(guard.state);
 
         if (guard.state.failed)
-            results.num_failed_tests++;
+            results.failed_tests.push_back(test);
 
         if (guard.state.should_break)
             test->Breakpoint();
@@ -1095,7 +1111,7 @@ int ta_test::Runner::Run()
     for (const auto &m : modules)
         m->OnPostRunTests(results);
 
-    return results.num_failed_tests > 0 ? int(ExitCodes::test_failed) : 0;
+    return results.failed_tests.size() > 0 ? int(ExitCodes::test_failed) : 0;
 }
 
 // --- modules::HelpPrinter ---
@@ -1273,19 +1289,32 @@ std::vector<ta_test::flags::BasicFlag *> ta_test::modules::PrintingConfigurator:
 
 // --- modules::ProgressPrinter ---
 
+ta_test::modules::ProgressPrinter::ProgressPrinter()
+{
+    EnableUnicode(true);
+}
+
 void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
 {
     if (enable)
     {
         chars_test_prefix = "\xE2\x97\x8F "; // BLACK CIRCLE, then a space.
-        chars_indentation_guide = "\xC2\xB7   "; // MIDDLE DOT, then a space.
+        chars_test_prefix_continuing_group = "\xE2\x97\x8B "; // WHITE CIRCLE, then a space.
+        chars_indentation = "\xC2\xB7   "; // MIDDLE DOT, then a space.
         chars_test_counter_separator = " \xE2\x94\x82  "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
+        chars_test_failed_separator = "\xE2\x94\x81"; // BOX DRAWINGS HEAVY HORIZONTAL
+        chars_test_failed_ending_separator = "\xE2\x94\x80"; // BOX DRAWINGS LIGHT HORIZONTAL
+        chars_summary_path_separator = "      \xE2\x94\x82 "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
     }
     else
     {
         chars_test_prefix = "* ";
-        chars_indentation_guide = "    ";
+        chars_test_prefix_continuing_group = ". ";
+        chars_indentation = "    ";
         chars_test_counter_separator = " |  ";
+        chars_test_failed_separator = "#";
+        chars_test_failed_ending_separator = "-";
+        chars_summary_path_separator = "      | ";
     }
 }
 
@@ -1311,141 +1340,195 @@ void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
     }
 }
 
-void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const SingleTestInfo &data)
+void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &data)
 {
+    if (!data.failed_tests.empty())
+    {
+        TextStyle cur_style;
+        terminal.Print("%s\n%s%s\n\n",
+            terminal.AnsiResetString().data(),
+            terminal.AnsiDeltaString(cur_style, common_styles.error).data(),
+            chars_summary_tests_failed.c_str()
+        );
+
+        std::size_t max_test_name_width = 0;
+        std::size_t indentation_width = text::uni::CountFirstBytes(chars_indentation);
+        std::size_t prefix_width = text::uni::CountFirstBytes(chars_test_prefix);
+
+        // Determine how much space to leave for the test name tree.
+        for (const BasicTestInfo *test : data.failed_tests)
+        {
+            std::string_view test_name = test->Name();
+
+            std::size_t cur_prefix_width = prefix_width;
+
+            SplitNameToSegments(test_name, [&](std::string_view segment, bool is_last_segment)
+            {
+                std::size_t this_width = cur_prefix_width + (is_last_segment ? 0 : 1/*for the slash*/) + segment.size();
+                if (this_width > max_test_name_width)
+                    max_test_name_width = this_width;
+
+                cur_prefix_width += indentation_width;
+            });
+        }
+
+        std::vector<std::string_view> stack;
+        for (const BasicTestInfo *test : data.failed_tests)
+        {
+            ProduceTree(stack, test->Name(), [&](std::size_t segment_index, std::string_view segment, bool is_last_segment)
+            {
+                (void)segment_index;
+
+                // The indentation.
+                if (!stack.empty())
+                {
+                    // Switch to the indentation guide color.
+                    terminal.Print("%s", terminal.AnsiDeltaString(cur_style, style_indentation_guide).data());
+                    // Print the required number of guides.
+                    for (std::size_t repeat = 0; repeat < stack.size(); repeat++)
+                        terminal.Print("%s", chars_indentation.c_str());
+                }
+
+                std::size_t gap_to_separator = max_test_name_width - (stack.size() * indentation_width + prefix_width + (is_last_segment ? 0 : 1/*for the slash*/) + segment.size());
+
+                // Print the test name.
+                auto style_a = terminal.AnsiDeltaString(cur_style, is_last_segment ? style_summary_failed_name : style_summary_failed_group_name);
+                auto style_b = terminal.AnsiDeltaString(cur_style, style_summary_path_separator);
+                terminal.Print("%s%s%.*s%s%*s%s%s",
+                    style_a.data(),
+                    chars_test_prefix.c_str(),
+                    int(segment.size()), segment.data(),
+                    is_last_segment ? "" : "/",
+                    int(gap_to_separator), "",
+                    style_b.data(),
+                    chars_summary_path_separator.c_str()
+                );
+
+                // Print the file path for the last segment.
+                if (is_last_segment)
+                {
+                    terminal.Print("%s%s",
+                        terminal.AnsiDeltaString(cur_style, style_summary_path).data(),
+                        common_chars.LocationToString(test->Location()).data()
+                    );
+                }
+
+                terminal.Print("\n");
+            });
+        }
+
+        terminal.Print("%s", terminal.AnsiResetString().data());
+    }
+
+    state = {};
+}
+
+void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data)
+{
+    { // Print the 'continuing tests...' message when resuming after a failure.
+        if (!state.failed_test_stack.empty())
+        {
+            terminal.Print("%s\n%s%s%s\n",
+                terminal.AnsiResetString().data(),
+                terminal.AnsiDeltaString({}, style_continuing_tests).data(),
+                chars_continuing_tests.c_str(),
+                terminal.AnsiResetString().data()
+            );
+        }
+    }
+
     // How much characters in the total test count.
     const int num_tests_width = std::snprintf(nullptr, 0, "%zu", data.all_tests->num_tests);
 
-    std::string_view test_name = data.test->Name();
-
-    auto it = test_name.begin();
-    std::size_t segment_index = 0;
-    while (true)
-    {
-        auto new_it = std::find(it, test_name.end(), '/');
-
-        std::string_view segment(it, new_it);
-
-        // Pop the tail off the stack.
-        if (segment_index < state.stack.size() && state.stack[segment_index] != segment)
-            state.stack.resize(segment_index);
-
-        // Push the segment into the stack, and print a line.
-        if (segment_index >= state.stack.size())
-        {
-            TextStyle cur_style;
-
-            // Test index (if this is the last segment).
-            if (new_it == test_name.end())
-            {
-                auto style_a = terminal.AnsiDeltaString(cur_style, style_index);
-                auto style_b = terminal.AnsiDeltaString(cur_style, style_total_count);
-
-                terminal.Print("%s%*zu%s/%zu",
-                    style_a.data(),
-                    num_tests_width, state.test_counter + 1,
-                    style_b.data(),
-                    data.all_tests->num_tests
-                );
-
-                // Failed test count.
-                if (data.all_tests->num_failed_tests > 0)
-                {
-                    auto style_c = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
-                    auto style_d = terminal.AnsiDeltaString(cur_style, style_failed_count);
-                    auto style_e = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
-
-                    terminal.Print(" %s[%s%zu%s]",
-                        style_c.data(),
-                        style_d.data(),
-                        data.all_tests->num_failed_tests,
-                        style_e.data()
-                    );
-                }
-            }
-            else
-            {
-                // No test index, just a gap.
-
-                int gap_width = num_tests_width * 2 + 1;
-
-                if (data.all_tests->num_failed_tests > 0)
-                    gap_width += std::snprintf(nullptr, 0, "%zu", data.all_tests->num_failed_tests) + 3;
-
-                terminal.Print("%*s", gap_width, "");
-            }
-
-            // The gutter border.
-            terminal.Print("%s%s",
-                terminal.AnsiDeltaString(cur_style, style_gutter_border).data(),
-                chars_test_counter_separator.c_str()
-            );
-
-            // The indentation.
-            if (!state.stack.empty())
-            {
-                // Switch to the indentation guide color.
-                terminal.Print("%s", terminal.AnsiDeltaString(cur_style, style_indentation_guide).data());
-                // Print the required number of guides.
-                for (std::size_t repeat = 0; repeat < state.stack.size(); repeat++)
-                    terminal.Print("%s", chars_indentation_guide.c_str());
-            }
-
-            // Whether we're reentering this group after a failed test.
-            bool is_continued = segment_index < state.failed_test_stack.size() && state.failed_test_stack[segment_index] == segment;
-
-            // Print the test name.
-            terminal.Print("%s%s%.*s%s%s\n",
-                terminal.AnsiDeltaString(cur_style, is_continued ? style_continuing_group : new_it == test_name.end() ? style_name : style_group_name).data(),
-                is_continued ? chars_test_prefix_continuing_group.c_str() : chars_test_prefix.c_str(),
-                int(segment.size()), segment.data(),
-                new_it == test_name.end() ? "" : "/",
-                terminal.AnsiResetString().data()
-            );
-
-            // Push to the stack.
-            state.stack.push_back(segment);
-        }
-
-        if (new_it == test_name.end())
-            break;
-
-        segment_index++;
-        it = new_it + 1;
-    }
-
-    state.test_counter++;
-}
-
-void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const SingleTestResults &data)
-{
-    // Print the error message.
-    if (data.failed)
+    ProduceTree(state.stack, data.test->Name(), [&](std::size_t segment_index, std::string_view segment, bool is_last_segment)
     {
         TextStyle cur_style;
 
-        auto style_message = terminal.AnsiDeltaString(cur_style, common_styles.error);
-        auto style_group = terminal.AnsiDeltaString(cur_style, style_failed_group_name);
-        auto style_name = terminal.AnsiDeltaString(cur_style, style_failed_name);
-
-        std::string_view group;
-        std::string_view name = data.test->Name();
-        auto sep = name.find_last_of('/');
-        if (sep != std::string_view::npos)
+        // Test index (if this is the last segment).
+        if (is_last_segment)
         {
-            group = name.substr(0, sep + 1);
-            name = name.substr(sep + 1);
+            auto style_a = terminal.AnsiDeltaString(cur_style, style_index);
+            auto style_b = terminal.AnsiDeltaString(cur_style, style_total_count);
+
+            terminal.Print("%s%*zu%s/%zu",
+                style_a.data(),
+                num_tests_width, state.test_counter + 1,
+                style_b.data(),
+                data.all_tests->num_tests
+            );
+
+            // Failed test count.
+            if (data.all_tests->failed_tests.size() > 0)
+            {
+                auto style_c = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
+                auto style_d = terminal.AnsiDeltaString(cur_style, style_failed_count);
+                auto style_e = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
+
+                terminal.Print(" %s[%s%zu%s]",
+                    style_c.data(),
+                    style_d.data(),
+                    data.all_tests->failed_tests.size(),
+                    style_e.data()
+                );
+            }
+        }
+        else
+        {
+            // No test index, just a gap.
+
+            int gap_width = num_tests_width * 2 + 1;
+
+            if (data.all_tests->failed_tests.size() > 0)
+                gap_width += std::snprintf(nullptr, 0, "%zu", data.all_tests->failed_tests.size()) + 3;
+
+            terminal.Print("%*s", gap_width, "");
         }
 
-        terminal.Print("%s%s\n%s%s%s%.*s%s%.*s%s\n",
+        // The gutter border.
+        terminal.Print("%s%s",
+            terminal.AnsiDeltaString(cur_style, style_gutter_border).data(),
+            chars_test_counter_separator.c_str()
+        );
+
+        // The indentation.
+        if (!state.stack.empty())
+        {
+            // Switch to the indentation guide color.
+            terminal.Print("%s", terminal.AnsiDeltaString(cur_style, style_indentation_guide).data());
+            // Print the required number of guides.
+            for (std::size_t repeat = 0; repeat < state.stack.size(); repeat++)
+                terminal.Print("%s", chars_indentation.c_str());
+        }
+
+        // Whether we're reentering this group after a failed test.
+        bool is_continued = segment_index < state.failed_test_stack.size() && state.failed_test_stack[segment_index] == segment;
+
+        // Print the test name.
+        terminal.Print("%s%s%.*s%s%s\n",
+            terminal.AnsiDeltaString(cur_style, is_continued ? style_continuing_group : is_last_segment ? style_name : style_group_name).data(),
+            is_continued ? chars_test_prefix_continuing_group.c_str() : chars_test_prefix.c_str(),
+            int(segment.size()), segment.data(),
+            is_last_segment ? "" : "/",
+            terminal.AnsiResetString().data()
+        );
+    });
+}
+
+void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestResults &data)
+{
+    // Print the ending separator.
+    if (data.failed)
+    {
+        std::size_t separator_segment_width = text::uni::CountFirstBytes(chars_test_failed_ending_separator);
+        std::string separator;
+        for (std::size_t i = 0; i + separator_segment_width - 1 < separator_line_width; i += separator_segment_width)
+            separator += chars_test_failed_ending_separator;
+
+        // The test failure message, and a separator after that.
+        terminal.Print("%s%s%s%s\n",
             terminal.AnsiResetString().data(),
-            common_chars.LocationToString(data.test->Location()).c_str(),
-            style_message.data(),
-            chars_test_failed.c_str(),
-            style_group.data(),
-            int(group.size()), group.data(),
-            style_name.data(),
-            int(name.size()), name.data(),
+            terminal.AnsiDeltaString({}, style_test_failed_ending_separator).data(),
+            separator.c_str(),
             terminal.AnsiResetString().data()
         );
     }
@@ -1460,6 +1543,48 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const SingleTestResu
     {
         state.failed_test_stack.clear();
     }
+
+    state.test_counter++;
+}
+
+void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestResults &data)
+{
+    TextStyle cur_style;
+
+    auto style_message = terminal.AnsiDeltaString(cur_style, common_styles.error);
+    auto style_group = terminal.AnsiDeltaString(cur_style, style_failed_group_name);
+    auto style_name = terminal.AnsiDeltaString(cur_style, style_failed_name);
+    auto style_separator = terminal.AnsiDeltaString(cur_style, style_test_failed_separator);
+
+    std::string_view group;
+    std::string_view name = data.test->Name();
+    auto sep = name.find_last_of('/');
+    if (sep != std::string_view::npos)
+    {
+        group = name.substr(0, sep + 1);
+        name = name.substr(sep + 1);
+    }
+
+    std::size_t separator_segment_width = text::uni::CountFirstBytes(chars_test_failed_separator);
+    std::size_t separator_needed_width = separator_line_width - text::uni::CountFirstBytes(chars_test_failed) - data.test->Name().size() - 1/*space before separator*/;
+    std::string separator;
+    for (std::size_t i = 0; i + separator_segment_width - 1 < separator_needed_width; i += separator_segment_width)
+        separator += chars_test_failed_separator;
+
+    // The test failure message, and a separator after that.
+    terminal.Print("\n%s%s:\n%s%s%s%.*s%s%.*s %s%s%s\n\n",
+        terminal.AnsiResetString().data(),
+        common_chars.LocationToString(data.test->Location()).c_str(),
+        style_message.data(),
+        chars_test_failed.c_str(),
+        style_group.data(),
+        int(group.size()), group.data(),
+        style_name.data(),
+        int(name.size()), name.data(),
+        style_separator.data(),
+        separator.c_str(),
+        terminal.AnsiResetString().data()
+    );
 }
 
 // --- modules::ResultsPrinter ---
@@ -1469,7 +1594,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
     // Reset color.
     terminal.Print("%s\n", terminal.AnsiResetString().data());
 
-    std::size_t num_passed = data.num_tests - data.num_failed_tests;
+    std::size_t num_passed = data.num_tests - data.failed_tests.size();
     std::size_t num_skipped = data.num_tests_with_skipped - data.num_tests;
 
     // The number of skipped tests.
@@ -1491,7 +1616,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
             terminal.AnsiResetString().data()
         );
     }
-    else if (data.num_failed_tests == 0)
+    else if (data.failed_tests.size() == 0)
     {
         // All passed.
 
@@ -1521,9 +1646,9 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
         // Failed tests.
         terminal.Print("%s%s%zu TEST%s FAILED%s\n",
             terminal.AnsiDeltaString({}, style_num_failed).data(),
-            num_passed == 0 && data.num_failed_tests > 1 ? "ALL " : "",
-            data.num_failed_tests,
-            data.num_failed_tests == 1 ? "" : "S",
+            num_passed == 0 && data.failed_tests.size() > 1 ? "ALL " : "",
+            data.failed_tests.size(),
+            data.failed_tests.size() == 1 ? "" : "S",
             terminal.AnsiResetString().data()
         );
     }
@@ -1547,7 +1672,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFramesLow(const BasicAsse
     std::size_t line_counter = 0;
 
     // The file path.
-    canvas.DrawString(line_counter++, 0, common_chars.LocationToString(data.SourceLocation()), {.style = style_filename, .important = true});
+    canvas.DrawString(line_counter++, 0, common_chars.LocationToString(data.SourceLocation()) + ":", {.style = style_filename, .important = true});
 
     { // The main error message.
         std::size_t column = 0;
@@ -1714,7 +1839,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFramesLow(const BasicAsse
 
 // --- modules::ExceptionPrinter ---
 
-void ta_test::modules::ExceptionPrinter::OnUncaughtException(const SingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e)
+void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e)
 {
     { // Print the exception itself.
         TextStyle cur_style;
@@ -1826,7 +1951,7 @@ void ta_test::modules::DebuggerDetector::OnPreTryCatch(bool &should_catch)
         should_catch = false;
 }
 
-void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const SingleTestResults &data)
+void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const RunSingleTestResults &data)
 {
     if (data.failed && (break_on_failure ? *break_on_failure : IsDebuggerAttached()))
         data.should_break = true;

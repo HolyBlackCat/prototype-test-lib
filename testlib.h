@@ -421,19 +421,19 @@ namespace ta_test
         };
         struct RunTestsResults : RunTestsInfo
         {
-            std::size_t num_failed_tests = 0;
+            std::vector<const BasicTestInfo *> failed_tests;
         };
         // This is called first, before any tests run.
         virtual void OnPreRunTests(const RunTestsInfo &data) {(void)data;}
         // This is called after all tests run.
         virtual void OnPostRunTests(const RunTestsResults &data) {(void)data;}
 
-        struct SingleTestInfo
+        struct RunSingleTestInfo
         {
             const RunTestsResults *all_tests = nullptr;
             const BasicTestInfo *test = nullptr;
         };
-        struct SingleTestResults : SingleTestInfo
+        struct RunSingleTestResults : RunSingleTestInfo
         {
             bool failed = false;
 
@@ -441,11 +441,14 @@ namespace ta_test
             mutable bool should_break = false;
         };
         // This is called before every single test runs.
-        virtual void OnPreRunSingleTest(const SingleTestInfo &data) {(void)data;}
+        virtual void OnPreRunSingleTest(const RunSingleTestInfo &data) {(void)data;}
         // This is called after every single test runs.
-        virtual void OnPostRunSingleTest(const SingleTestResults &data) {(void)data;}
+        virtual void OnPostRunSingleTest(const RunSingleTestResults &data) {(void)data;}
 
         // --- FAILING TESTS ---
+
+        // This is called when a test fails for any reason, before any more specific callbacks are called.
+        virtual void OnPreFailTest(const RunSingleTestResults &data) {(void)data;}
 
         struct BasicAssertionInfo
         {
@@ -527,7 +530,7 @@ namespace ta_test
         virtual void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) {(void)data; (void)message;}
 
         // Called when an exception falls out of an assertion or out of the entire test (in the latter case `assertion` is null).
-        virtual void OnUncaughtException(const SingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) {(void)test; (void)assertion; (void)e;}
+        virtual void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) {(void)test; (void)assertion; (void)e;}
 
         // --- MISC ---
 
@@ -593,8 +596,12 @@ namespace ta_test
         // The global per-thread state.
         struct GlobalThreadState
         {
-            BasicModule::SingleTestResults *current_test = nullptr;
+            BasicModule::RunSingleTestResults *current_test = nullptr;
             BasicModule::BasicAssertionInfo *current_assertion = nullptr;
+
+            // Gracefully fails the current test, if not already failed.
+            // Call this first, before printing any messages.
+            CFG_TA_API void FailCurrentTest();
         };
         [[nodiscard]] CFG_TA_API GlobalThreadState &ThreadState();
 
@@ -830,12 +837,12 @@ namespace ta_test
             if (enable)
             {
                 filename_linenumber_separator = "(";
-                filename_linenumber_suffix = "):";
+                filename_linenumber_suffix = ")";
             }
             else
             {
                 filename_linenumber_separator = ":";
-                filename_linenumber_suffix = ":";
+                filename_linenumber_suffix = "";
             }
         }
 
@@ -919,6 +926,12 @@ namespace ta_test
             [[nodiscard]] constexpr bool IsFirstByte(char byte)
             {
                 return (byte & 0b11000000) != 0b10000000;
+            }
+
+            // Counts the number of codepoints (usually characters) in a valid UTF8 string, by counting the bytes matching `IsFirstByte()`.
+            [[nodiscard]] constexpr std::size_t CountFirstBytes(std::string_view string)
+            {
+                return std::size_t(std::count_if(string.begin(), string.end(), IsFirstByte));
             }
 
             // Given the first byte of a multibyte character (or a single-byte character), returns the amount of bytes occupied by the character.
@@ -2194,15 +2207,28 @@ namespace ta_test
         struct ProgressPrinter : BasicPrintingModule
         {
             // This goes right before each test/group name.
-            std::string chars_test_prefix = "\xE2\x97\x8F "; // BLACK CIRCLE, then a space.
+            std::string chars_test_prefix;
             // This is used when reentering a group after a failed test.
-            std::string chars_test_prefix_continuing_group = "\xE2\x97\x8B "; // WHITE CIRCLE, then a space.
+            std::string chars_test_prefix_continuing_group;
             // The is used for indenting test names/groups.
-            std::string chars_indentation_guide = "\xC2\xB7   "; // MIDDLE DOT, then a space.
+            std::string chars_indentation;
             // This is printed after the test counter and before the test names/groups (and before their indentation guides).
-            std::string chars_test_counter_separator = " \xE2\x94\x82  "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
+            std::string chars_test_counter_separator;
             // This is printed when a test fails, right before the test name.
             std::string chars_test_failed = "TEST FAILED: ";
+            // This is printed before the details of a failed test. It's repeated to fill the required width.
+            std::string chars_test_failed_separator;
+            // This is printed after the details of a failed test. It's repeated to fill the required width.
+            std::string chars_test_failed_ending_separator;
+            // This is printed when resuming tests after a test failure.
+            std::string chars_continuing_tests = "Continuing...";
+            // This is printed at the end, before the list of failed tests.
+            std::string chars_summary_tests_failed = "FOLLOWING TESTS FAILED:";
+            std::string chars_summary_path_separator;
+
+            // Width for `chars_test_failed_separator`.
+            // Intentionally not trying to figure out the true terminal width, a fixed value looks good enough.
+            std::size_t separator_line_width = 100;
 
             // Optional message at startup when some tests are skipped.
             TextStyle style_skipped_tests = {.color = TextColor::light_blue, .bold = true};
@@ -2213,7 +2239,7 @@ namespace ta_test
             // This is used to print a group name when reentering it after a failed test.
             TextStyle style_continuing_group = {.color = TextColor::light_black};
             // The indentation guides for nested test starts.
-            TextStyle style_indentation_guide = {.color = TextColorGrayscale24(8), .bold = true};
+            TextStyle style_indentation_guide = {.color = TextColorGrayscale24(8)};
             // The test index.
             TextStyle style_index = {.color = TextColor::light_green, .bold = true};
             // The total test count printed after each test index.
@@ -2223,12 +2249,27 @@ namespace ta_test
             // Some decorations around the failed test counter.
             TextStyle style_failed_count_decorations = {.color = TextColor::dark_red};
             // The line that separates the test counter from the test names/groups.
-            TextStyle style_gutter_border = {.color = TextColorGrayscale24(10), .bold = true};
+            TextStyle style_gutter_border = {.color = TextColorGrayscale24(10)};
 
             // The name of a failed test, printed when it fails.
             TextStyle style_failed_name = {.color = TextColor::light_red, .bold = true};
             // The name of a group of a failed test, printed when the test fails.
             TextStyle style_failed_group_name = {.color = TextColor::dark_red};
+            // The style for a horizontal line that's printed after a test failure message, before any details.
+            TextStyle style_test_failed_separator = {.color = TextColor::dark_red};
+            // This line is printed after all details on the test failure.
+            TextStyle style_test_failed_ending_separator = {.color = TextColorGrayscale24(10)};
+            // Style for `chars_continuing_tests`.
+            TextStyle style_continuing_tests = {.color = TextColor::dark_green, .bold = true};
+
+            // The name of a failed test, printed at the end.
+            TextStyle style_summary_failed_name = {.color = TextColor::light_red, .bold = true};
+            // The name of a group of a failed test, printed at the end.
+            TextStyle style_summary_failed_group_name = {.color = TextColor::dark_red};
+            // Separates failed test names from their source locations.
+            TextStyle style_summary_path_separator = {.color = TextColorGrayscale24(10)};
+            // The source locations of the failed tests.
+            TextStyle style_summary_path = {.color = TextColor::none};
 
           private:
             struct State
@@ -2241,11 +2282,61 @@ namespace ta_test
             };
             State state;
 
+            // Splits `name` at every `/`, and calls `func` for every segment.
+            // `func` is `(std::string_view segment, bool is_last_segment) -> void`.
+            static void SplitNameToSegments(std::string_view name, auto &&func)
+            {
+                auto it = name.begin();
+
+                while (true)
+                {
+                    auto new_it = std::find(it, name.end(), '/');
+
+                    func(std::string_view(it, new_it), new_it == name.end());
+
+                    if (new_it == name.end())
+                        break;
+                    it = new_it + 1;
+                }
+            }
+
+            // This is used to convert a sequence of test names to what looks like a tree.
+            // `stack` must start empty before calling this the first time, and is left in an unspecified state after the last call.
+            // `push_segment` is called every time we're entering a new tree node.
+            // `push_segment` is `(std::size_t segment_index, std::string_view segment, bool is_last_segment) -> void`.
+            // `segment` is one of the `/`-separated parts of the `name`. `segment_index` is the index of that part.
+            // `is_last_segment` is whether this is the last segment in `name`.
+            static void ProduceTree(std::vector<std::string_view> &stack, std::string_view name, auto &&push_segment)
+            {
+                std::size_t segment_index = 0;
+
+                SplitNameToSegments(name, [&](std::string_view segment, bool is_last_segment)
+                {
+                    // Pop the tail off the stack.
+                    if (segment_index < stack.size() && stack[segment_index] != segment)
+                        stack.resize(segment_index);
+
+                    if (segment_index >= stack.size())
+                    {
+                        push_segment(std::size_t(segment_index), std::string_view(segment), is_last_segment);
+
+                        // Push to the stack.
+                        stack.push_back(segment);
+                    }
+
+                    segment_index++;
+                });
+            }
+
           public:
+            CFG_TA_API ProgressPrinter();
+
             void EnableUnicode(bool enable) override;
             void OnPreRunTests(const RunTestsInfo &data) override;
-            void OnPreRunSingleTest(const SingleTestInfo &data) override;
-            void OnPostRunSingleTest(const SingleTestResults &data) override;
+            void OnPostRunTests(const RunTestsResults &data) override;
+            void OnPreRunSingleTest(const RunSingleTestInfo &data) override;
+            void OnPostRunSingleTest(const RunSingleTestResults &data) override;
+            void OnPreFailTest(const RunSingleTestResults &data) override;
         };
 
         // Prints the results of a run.
@@ -2388,7 +2479,7 @@ namespace ta_test
             std::string chars_indent_message = "    ";
             std::string chars_type_suffix = ": ";
 
-            void OnUncaughtException(const SingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) override;
+            void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) override;
         };
 
         // Detects whether the debugger is attached in a platform-specific way.
@@ -2410,7 +2501,7 @@ namespace ta_test
             CFG_TA_API bool IsDebuggerAttached() const;
             void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) override;
             void OnPreTryCatch(bool &should_catch) override;
-            void OnPostRunSingleTest(const SingleTestResults &data) override;
+            void OnPostRunSingleTest(const RunSingleTestResults &data) override;
         };
 
         // A little module that examines `DebuggerDetector` and notifies you when it detected a debugger.

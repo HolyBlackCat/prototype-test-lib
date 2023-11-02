@@ -37,10 +37,11 @@ TA_TEST( bar/alpha )
 }
 TA_TEST( omega )
 {
+    // throw std::runtime_error("123");
 }
 TA_TEST(test/lel/alpha)
 {
-
+    TA_CHECK(false);
 }
 TA_TEST( foo/alpha )
 {
@@ -59,11 +60,7 @@ int main(int argc, char **argv)
 
 // Some form of expect_throw.
 
-// Error summary in results, with file paths.
-
 // Generate module lists for faster calls.
-
-// Attach formatted error messages to assertions.
 
 // Scoped and unscoped logging macros.
 
@@ -173,5 +170,12 @@ Good test names:
 --- Control characters are replaced with their symbolic representations in:
     Stringified arguments
     User assertion messages
+
+--- Test name width for the results is calculated correctly.
+    In particular, group names can be longer than (test names + indentation), so try with a really long group name.
+        Also observe that `/` after the group name is included in the calculation.
+
+--- Unicode
+    A run with all features, and --no-unicode, automatically test that no unicode crap is printed.
 
 */
