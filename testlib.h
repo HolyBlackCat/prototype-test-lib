@@ -2148,6 +2148,15 @@ namespace ta_test
         }
     };
 
+    // A simple way to run the tests.
+    // Copypaste the body into your code if you need more customization.
+    inline int RunSimple(int argc, char **argv)
+    {
+        ta_test::Runner runner;
+        runner.SetDefaultModules();
+        runner.ProcessFlags(argc, argv);
+        return runner.Run();
+    }
 
     // --- BUILT-IN MODULES ---
 

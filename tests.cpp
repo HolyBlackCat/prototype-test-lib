@@ -52,10 +52,7 @@ TA_TEST( foo/alpha3 ) {}
 
 int main(int argc, char **argv)
 {
-    ta_test::Runner runner;
-    runner.SetDefaultModules();
-    runner.ProcessFlags(argc, argv);
-    return runner.Run();
+    return ta_test::RunSimple(argc, argv);
 }
 
 // Some form of expect_throw.
@@ -87,6 +84,7 @@ int main(int argc, char **argv)
 //     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
 //     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
 //     Deduplicate assertions in stacks? Both when an assertion fails and when an exception is triggered.
+//     Get terminal width, and limit separator length to that value (but still not make them longer than they currently are)
 
 // Unclear how:
 //     Print user messages from assertions that didn't execute to completion.
@@ -177,5 +175,7 @@ Good test names:
 
 --- Unicode
     A run with all features, and --no-unicode, automatically test that no unicode crap is printed.
+
+--- Try to start the tests again while they are already running. Should crash with an error.
 
 */
