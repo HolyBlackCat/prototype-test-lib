@@ -197,6 +197,7 @@ namespace ta_test
 {
     struct Runner;
     struct BasicModule;
+    class ModuleLists;
 
     // The exit codes we're using. This is mostly for reference.
     enum class ExitCodes
@@ -224,7 +225,7 @@ namespace ta_test
             // Given a string, try matching it against this flag. Return true if matched.
             // Call `request_arg` if you need an extra argument. You can call it any number of times to request extra arguments.
             // If `request_arg` runs out of arguments and returns null, you can immediately return false too, this will be reported as an error regardless.
-            virtual bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) = 0;
+            virtual bool ProcessFlag(const Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) = 0;
         };
 
         // A command line flag taking no arguments.
@@ -232,7 +233,7 @@ namespace ta_test
         {
             std::string flag;
 
-            using Callback = std::function<void(Runner &runner, BasicModule &this_module)>;
+            using Callback = std::function<void(const Runner &runner, BasicModule &this_module)>;
             Callback callback;
 
             SimpleFlag(std::string flag, std::string help_desc, Callback callback)
@@ -244,7 +245,7 @@ namespace ta_test
                 return "--" + flag;
             }
 
-            bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
+            bool ProcessFlag(const Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
             {
                 (void)request_arg;
 
@@ -265,7 +266,7 @@ namespace ta_test
         {
             std::string flag;
 
-            using Callback = std::function<void(Runner &runner, BasicModule &this_module, bool value)>;
+            using Callback = std::function<void(const Runner &runner, BasicModule &this_module, bool value)>;
             Callback callback;
 
             BoolFlag(std::string flag, std::string help_desc, Callback callback)
@@ -277,7 +278,7 @@ namespace ta_test
                 return "--[no-]" + flag;
             }
 
-            bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
+            bool ProcessFlag(const Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
             {
                 (void)request_arg;
 
@@ -306,7 +307,7 @@ namespace ta_test
             std::string flag;
             char short_flag = '\0'; // Zero if none.
 
-            using Callback = std::function<void(Runner &runner, BasicModule &this_module, std::string_view value)>;
+            using Callback = std::function<void(const Runner &runner, BasicModule &this_module, std::string_view value)>;
             Callback callback;
 
             // `short_flag` can be zero if none.
@@ -326,7 +327,7 @@ namespace ta_test
                 return ret + "--" + flag + " ...";
             }
 
-            bool ProcessFlag(Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
+            bool ProcessFlag(const Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
             {
                 (void)request_arg;
 
@@ -374,7 +375,6 @@ namespace ta_test
 
         // --- PARSING COMMAND LINE ARGUMENTS ---
 
-
         // Should return a list of the supported command line flags.
         // Store the flags permanently in your class, those pointers are obviously non-owning.
         [[nodiscard]] virtual std::vector<flags::BasicFlag *> GetFlags() {return {};}
@@ -412,7 +412,8 @@ namespace ta_test
 
         struct RunTestsInfo
         {
-            Runner *runner = nullptr;
+            // Mostly for internal use. Used to call certain functions on every module.
+            const ModuleLists *modules = nullptr;
 
             // The number of tests to run.
             std::size_t num_tests = 0;
@@ -555,36 +556,41 @@ namespace ta_test
         // This is called before entering try/catch blocks, so you can choose between that and just executing directly. (See `--catch`.)
         // `should_catch` defaults to true.
         virtual void OnPreTryCatch(bool &should_catch) {(void)should_catch;}
+
+
+        // All virtual functions of this interface must be listed here.
+        // See `class ModuleLists` for how this list is used.
+        #define DETAIL_TA_MODULE_FUNCS(x) \
+            x(GetFlags) \
+            x(OnUnknownFlag) \
+            x(OnMissingFlagArgument) \
+            x(OnFilterTest) \
+            x(OnPreRunTests) \
+            x(OnPostRunTests) \
+            x(OnPreRunSingleTest) \
+            x(OnPostRunSingleTest) \
+            x(OnPreFailTest) \
+            x(OnAssertionFailed) \
+            x(OnUncaughtException) \
+            x(OnExplainException) \
+            x(OnPreTryCatch) \
+
+        enum class InterfaceFunction
+        {
+            #define DETAIL_TA_X(func_) func_,
+            DETAIL_TA_MODULE_FUNCS(DETAIL_TA_X)
+            #undef DETAIL_TA_X
+            _count [[maybe_unused]],
+        };
+        // For internal use, don't use and don't override. Returns the mask of functions implemented by this class.
+        [[nodiscard]] virtual unsigned int Detail_ImplementedFunctionsMask() const = 0;
+        // For internal use. Returns true if the specified function is overriden in the derived class.
+        [[nodiscard]] bool ImplementsFunction(InterfaceFunction func) const
+        {
+            return Detail_ImplementedFunctionsMask() & (1 << int(func));
+        }
     };
 
-    // A pointer to a class derived from `BasicModule`.
-    class ModulePtr
-    {
-        std::unique_ptr<BasicModule> ptr;
-
-        template <std::derived_from<BasicModule> T, typename ...P>
-        requires std::constructible_from<T, P &&...>
-        friend ModulePtr MakeModule(P &&... params);
-
-      public:
-        constexpr ModulePtr() {}
-        constexpr ModulePtr(std::nullptr_t) {}
-
-        [[nodiscard]] explicit operator bool() const {return bool(ptr);}
-
-        [[nodiscard]] BasicModule *get() const {return ptr.get();}
-        [[nodiscard]] BasicModule &operator*() const {return *ptr;}
-        [[nodiscard]] BasicModule *operator->() const {return ptr.get();}
-    };
-    // Allocates a new module as a `ModulePtr`.
-    template <std::derived_from<BasicModule> T, typename ...P>
-    requires std::constructible_from<T, P &&...>
-    [[nodiscard]] ModulePtr MakeModule(P &&... params)
-    {
-        ModulePtr ret;
-        ret.ptr = std::make_unique<T>(std::forward<P>(params)...);
-        return ret;
-    }
 
     enum class HardErrorKind {internal, user};
     // Aborts the application with an error.
@@ -610,6 +616,52 @@ namespace ta_test
         {
             explicit ConstructInterruptTestException() = default;
         };
+
+        // Extracts the class type from a member pointer type.
+        template <typename T>
+        struct MemberPointerClass {};
+        template <typename T, typename C>
+        struct MemberPointerClass<T C::*> {using type = C;};
+
+        // Returns true if `P` is a member function pointer of a class other than `BasicModule`.
+        template <auto P>
+        struct IsOverriddenModuleFunction
+            : std::bool_constant<!std::is_same_v<typename MemberPointerClass<decltype(P)>::type, BasicModule>>
+        {};
+
+        // Inherits from a user module, and checks which virtual functions were overriden.
+        template <typename T>
+        struct ModuleWrapper final : T
+        {
+            using T::T;
+
+            unsigned int Detail_ImplementedFunctionsMask() const override final
+            {
+                constexpr unsigned int ret = []{
+                    unsigned int value = 0;
+                    #define DETAIL_TA_X(func_) \
+                        if constexpr (detail::IsOverriddenModuleFunction<&T::func_>::value) \
+                            value |= 1 << int(BasicModule::InterfaceFunction::func_);
+                    DETAIL_TA_MODULE_FUNCS(DETAIL_TA_X)
+                    #undef DETAIL_TA_X
+                    return value;
+                }();
+                return ret;
+            }
+        };
+
+        // Returns true if `X` and `Y` have the same type and are equal.
+        template <auto X, auto Y>
+        struct ValuesAreEqual : std::false_type {};
+        template <auto X>
+        struct ValuesAreEqual<X, X> : std::true_type {};
+
+        // Always returns `false`.
+        template <typename, typename...>
+        struct AlwaysFalse : std::false_type {};
+
+        template <auto>
+        struct ValueTag {};
     }
 
     // We throw this to abort a test. Don't throw this manually.
@@ -652,6 +704,108 @@ namespace ta_test
     struct Overload : P... {using P::operator()...;};
     template <typename ...P>
     Overload(P...) -> Overload<P...>;
+
+
+    // A pointer to a class derived from `BasicModule`.
+    class ModulePtr
+    {
+        std::unique_ptr<BasicModule> ptr;
+
+        template <std::derived_from<BasicModule> T, typename ...P>
+        requires std::constructible_from<detail::ModuleWrapper<T>, P &&...>
+        friend ModulePtr MakeModule(P &&... params);
+
+      public:
+        constexpr ModulePtr() {}
+        constexpr ModulePtr(std::nullptr_t) {}
+
+        [[nodiscard]] explicit operator bool() const {return bool(ptr);}
+
+        [[nodiscard]] BasicModule *get() const {return ptr.get();}
+        [[nodiscard]] BasicModule &operator*() const {return *ptr;}
+        [[nodiscard]] BasicModule *operator->() const {return ptr.get();}
+    };
+    // Allocates a new module as a `ModulePtr`.
+    template <std::derived_from<BasicModule> T, typename ...P>
+    requires std::constructible_from<detail::ModuleWrapper<T>, P &&...>
+    [[nodiscard]] ModulePtr MakeModule(P &&... params)
+    {
+        ModulePtr ret;
+        ret.ptr = std::make_unique<detail::ModuleWrapper<T>>(std::forward<P>(params)...);
+        return ret;
+    }
+
+    // A non-owning wrapper on top of a module list.
+    // Additionally stores lists of modules implemeting certain functions, to optimize the calls to them.
+    // It's constructed once we start running tests, since that's when the module becomes frozen,
+    // and then becomes the only thing modules can use to interact with the test runner, since there's no way for them to obtain a runner reference.
+    class ModuleLists
+    {
+        std::span<const ModulePtr> all_modules;
+        std::array<std::vector<BasicModule *>, std::size_t(BasicModule::InterfaceFunction::_count)> lists;
+
+      public:
+        ModuleLists() {}
+        ModuleLists(std::span<const ModulePtr> all_modules)
+            : all_modules(all_modules)
+        {
+            for (std::size_t i = 0; i < std::size_t(BasicModule::InterfaceFunction::_count); i++)
+            {
+                lists[i].reserve(all_modules.size());
+                for (const auto &m : all_modules)
+                {
+                    if (m->ImplementsFunction(BasicModule::InterfaceFunction(i)))
+                        lists[i].push_back(m.get());
+                }
+            }
+        }
+
+        // Returns all stored modules.
+        [[nodiscard]] std::span<const ModulePtr> AllModules() const {return all_modules;}
+
+        // Calls `func` for every module of type `T` or derived from `T`.
+        // `func` is `(T &module) -> bool`. If `func` returns true, the function stops immediately and also returns true.
+        template <typename T, typename F>
+        bool FindModule(F &&func) const
+        {
+            for (const auto &m : all_modules)
+            {
+                if (auto base = dynamic_cast<T *>(m.get()))
+                {
+                    if (func(*base))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        // Get a list of all modules implementing function `F`.
+        template <BasicModule::InterfaceFunction F>
+        requires(F >= BasicModule::InterfaceFunction{} && F < BasicModule::InterfaceFunction::_count)
+        [[nodiscard]] std::span<BasicModule *const> GetModulesImplementing() const
+        {
+            return lists[std::size_t(F)];
+        }
+
+        // Calls a specific function for every module.
+        // The return values are ignored. If you need them, call manually using `GetModulesImplementing()`.
+        template <auto F, typename ...P>
+        requires std::is_member_function_pointer_v<decltype(F)>
+        void Call(P &&... params) const
+        {
+            constexpr BasicModule::InterfaceFunction func_enum = []{
+                #define DETAIL_TA_X(func_) \
+                    if constexpr (detail::ValuesAreEqual<F, &BasicModule::func_>::value) \
+                        return BasicModule::InterfaceFunction::func_; \
+                    else
+                DETAIL_TA_MODULE_FUNCS(DETAIL_TA_X)
+                #undef DETAIL_TA_X
+                static_assert(detail::AlwaysFalse<detail::ValueTag<F>>::value, "Bad member function pointer.");
+            }();
+            for (auto *m : GetModulesImplementing<func_enum>())
+                (m->*F)(params...); // No forwarding because there's more than one call.
+        }
+    };
 
 
     // --- PLATFORM INFORMATION ---
@@ -2047,13 +2201,18 @@ namespace ta_test
     {
         std::vector<ModulePtr> modules;
 
+        // NOTE: Some functions here are marked `const` even though they can access the non-const modules.
+        // They can't modify the module list though, and can't start the run.
+        // This is necessary to be able to pass the reference to `Runner` around while looping over modules,
+        // without somebody yeeting a module from under us.
+
         // Fills `modules` arrays with all the default modules. Old contents are destroyed.
         CFG_TA_API void SetDefaultModules();
 
         // Handles the command line arguments in argc&argv style.
         // If `ok` is null and something goes wrong, aborts the application. If `ok` isn't null, sets it to true on success or to false on failure.
         // `argv[0]` is ignored.
-        void ProcessFlags(int argc, char **argv, bool *ok = nullptr)
+        void ProcessFlags(int argc, char **argv, bool *ok = nullptr) const
         {
             ProcessFlags([argc = argc-1, argv = argv+1]() mutable -> std::optional<std::string_view>
             {
@@ -2068,7 +2227,7 @@ namespace ta_test
         // The first element is not ignored (not considered to be the program name).
         template <std::ranges::input_range R = std::initializer_list<std::string_view>>
         requires std::convertible_to<std::ranges::range_value_t<R>, std::string_view>
-        void ProcessFlags(R &&range, bool *ok = nullptr)
+        void ProcessFlags(R &&range, bool *ok = nullptr) const
         {
             ProcessFlags([it = range.begin(), end = range.end()]() mutable -> std::optional<std::string_view>
             {
@@ -2080,7 +2239,7 @@ namespace ta_test
         // The most low-level function to process command line flags.
         // `next_flag()` should return the next flag, or null if none.
         // If `ok` is null and something goes wrong, aborts the application. If `ok` isn't null, sets it to true on success or to false on failure.
-        CFG_TA_API void ProcessFlags(std::function<std::optional<std::string_view>()> next_flag, bool *ok = nullptr);
+        CFG_TA_API void ProcessFlags(std::function<std::optional<std::string_view>()> next_flag, bool *ok = nullptr) const;
 
 
         // Runs all tests.
@@ -2094,9 +2253,9 @@ namespace ta_test
         }
 
         // Calls `func` for every module of type `T` or derived from `T`.
-        // If `func` returns true, then stops immediately and also returns true.
+        // `func` is `(T &module) -> bool`. If `func` returns true, the function stops immediately and also returns true.
         template <typename T, typename F>
-        bool FindModule(F &&func)
+        bool FindModule(F &&func) const
         {
             for (const auto &m : modules)
             {
@@ -2110,7 +2269,7 @@ namespace ta_test
         }
 
         // Configures every `BasicPrintingModule` to print to `stream`.
-        void SetOutputStream(FILE *stream)
+        void SetOutputStream(FILE *stream) const
         {
             SetTerminalSettings([&](Terminal &terminal)
             {
@@ -2119,7 +2278,7 @@ namespace ta_test
         }
 
         // Configures every `BasicPrintingModule` to print to `stream`.
-        void SetEnableColor(bool enable)
+        void SetEnableColor(bool enable) const
         {
             SetTerminalSettings([&](Terminal &terminal)
             {
@@ -2128,7 +2287,7 @@ namespace ta_test
         }
 
         // Sets the output stream for every module that prints stuff.
-        void SetEnableUnicode(bool enable)
+        void SetEnableUnicode(bool enable) const
         {
             for (const auto &m : modules)
             {
@@ -2138,7 +2297,7 @@ namespace ta_test
         }
 
         // Calls `func` on `Terminal` of every `BasicPrintingModule`.
-        void SetTerminalSettings(std::function<void(Terminal &terminal)> func)
+        void SetTerminalSettings(std::function<void(Terminal &terminal)> func) const
         {
             for (const auto &m : modules)
             {
@@ -2157,6 +2316,7 @@ namespace ta_test
         runner.ProcessFlags(argc, argv);
         return runner.Run();
     }
+
 
     // --- BUILT-IN MODULES ---
 

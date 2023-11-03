@@ -62,9 +62,7 @@ void ta_test::detail::GlobalThreadState::FailCurrentTest()
         return; // Already failed.
 
     current_test->failed = true;
-
-    for (const auto &m : current_test->all_tests->runner->modules)
-        m->OnPreFailTest(*current_test);
+    current_test->all_tests->modules->Call<&BasicModule::OnPreFailTest>(*current_test);
 }
 
 ta_test::detail::GlobalThreadState &ta_test::detail::ThreadState()
@@ -254,7 +252,7 @@ void ta_test::text::GetExceptionInfo(const std::exception_ptr &e, const std::fun
     if (!thread_state.current_test)
         HardError("The current thread currently isn't running any test, can't use `ExceptionToMessage()`.");
 
-    for (const auto &m : thread_state.current_test->all_tests->runner->modules)
+    for (auto *m : thread_state.current_test->all_tests->modules->GetModulesImplementing<BasicModule::InterfaceFunction::OnExplainException>())
     {
         std::optional<ta_test::BasicModule::ExceptionInfoWithNested> opt;
         try
@@ -783,8 +781,7 @@ bool ta_test::detail::BasicAssertWrapper::PreEvaluate()
         HardError("The assertion being evaluated is not on the top of the assertion stack.");
 
     bool should_catch = true;
-    for (const auto &m : thread_state.current_test->all_tests->runner->modules)
-        m->OnPreTryCatch(should_catch);
+    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreTryCatch>(should_catch);
     return should_catch;
 }
 
@@ -794,8 +791,7 @@ void ta_test::detail::BasicAssertWrapper::UncaughtException()
     thread_state.FailCurrentTest();
 
     auto e = std::current_exception();
-    for (const auto &m : thread_state.current_test->all_tests->runner->modules)
-        m->OnUncaughtException(*thread_state.current_test, this, e);
+    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnUncaughtException>(*thread_state.current_test, this, e);
 
     finished = true;
 }
@@ -811,8 +807,7 @@ void ta_test::detail::BasicAssertWrapper::PostEvaluate(bool value, const std::op
         if (fail_message)
             fail_message_view = *fail_message;
 
-        for (const auto &m : thread_state.current_test->all_tests->runner->modules)
-            m->OnAssertionFailed(*this, fail_message_view);
+        thread_state.current_test->all_tests->modules->Call<&BasicModule::OnAssertionFailed>(*this, fail_message_view);
     }
 
     finished = true;
@@ -914,7 +909,7 @@ void ta_test::Runner::SetDefaultModules()
     modules.push_back(MakeModule<modules::DebuggerStatePrinter>());
 }
 
-void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>()> next_flag, bool *ok)
+void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>()> next_flag, bool *ok) const
 {
     if (ok)
         *ok = true;
@@ -951,7 +946,7 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
         }
 
         bool unknown = true;
-        for (const auto &m : modules)
+        for (const auto &m : modules) // `ModuleLists` doesn't exist yet.
         {
             auto flags = m->GetFlags();
 
@@ -986,7 +981,7 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
                 // If we're missing an argument...
                 if (missing_arg)
                 {
-                    for (const auto &m2 : modules)
+                    for (const auto &m2 : modules) // `ModuleLists` doesn't exist yet.
                         m2->OnMissingFlagArgument(*flag, *f, missing_arg);
                     if (missing_arg)
                     {
@@ -1011,7 +1006,7 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
         // If the argument is unknown...
         if (unknown)
         {
-            for (const auto &m2 : modules)
+            for (const auto &m2 : modules) // `ModuleLists` doesn't exist yet.
                 m2->OnUnknownFlag(*flag, unknown);
             if (unknown)
             {
@@ -1027,6 +1022,8 @@ int ta_test::Runner::Run()
     if (detail::ThreadState().current_test)
         HardError("This thread is already running a test.", HardErrorKind::user);
 
+    ModuleLists module_lists(modules);
+
     const auto &state = detail::State();
 
     std::vector<std::size_t> ordered_tests;
@@ -1037,8 +1034,7 @@ int ta_test::Runner::Run()
         for (std::size_t i = 0; i < state.tests.size(); i++)
         {
             bool enable = true;
-            for (const auto &m : modules)
-                m->OnFilterTest(*state.tests[i], enable);
+            module_lists.Call<&BasicModule::OnFilterTest>(*state.tests[i], enable);
             if (enable)
                 ordered_tests.push_back(i);
         }
@@ -1046,11 +1042,10 @@ int ta_test::Runner::Run()
     }
 
     BasicModule::RunTestsResults results;
-    results.runner = this;
+    results.modules = &module_lists;
     results.num_tests = ordered_tests.size();
     results.num_tests_with_skipped = state.tests.size();
-    for (const auto &m : modules)
-        m->OnPreRunTests(results);
+    module_lists.Call<&BasicModule::OnPreRunTests>(results);
 
     for (std::size_t test_index : ordered_tests)
     {
@@ -1066,12 +1061,10 @@ int ta_test::Runner::Run()
         guard.state.all_tests = &results;
         guard.state.test = test;
 
-        for (const auto &m : modules)
-            m->OnPreRunSingleTest(guard.state);
+        module_lists.Call<&BasicModule::OnPreRunSingleTest>(guard.state);
 
         bool should_catch = true;
-        for (const auto &m : modules)
-            m->OnPreTryCatch(should_catch);
+        module_lists.Call<&BasicModule::OnPreTryCatch>(should_catch);
 
         auto lambda = [&]
         {
@@ -1089,8 +1082,7 @@ int ta_test::Runner::Run()
             {
                 detail::ThreadState().FailCurrentTest();
                 auto e = std::current_exception();
-                for (const auto &m : modules)
-                    m->OnUncaughtException(guard.state, nullptr, e);
+                module_lists.Call<&BasicModule::OnUncaughtException>(guard.state, nullptr, e);
             }
         }
         else
@@ -1098,8 +1090,7 @@ int ta_test::Runner::Run()
             lambda();
         }
 
-        for (const auto &m : modules)
-            m->OnPostRunSingleTest(guard.state);
+        module_lists.Call<&BasicModule::OnPostRunSingleTest>(guard.state);
 
         if (guard.state.failed)
             results.failed_tests.push_back(test);
@@ -1108,8 +1099,7 @@ int ta_test::Runner::Run()
             test->Breakpoint();
     }
 
-    for (const auto &m : modules)
-        m->OnPostRunTests(results);
+    module_lists.Call<&BasicModule::OnPostRunTests>(results);
 
     return results.failed_tests.size() > 0 ? int(ExitCodes::test_failed) : 0;
 }
@@ -1118,10 +1108,10 @@ int ta_test::Runner::Run()
 
 ta_test::modules::HelpPrinter::HelpPrinter()
     : expected_flag_width(16),
-    help_flag("help", "Show usage.", [](Runner &runner, BasicModule &this_module)
+    help_flag("help", "Show usage.", [](const Runner &runner, BasicModule &this_module)
     {
         std::vector<flags::BasicFlag *> flags;
-        for (const auto &m : runner.modules)
+        for (const auto &m : runner.modules) // Can't use `ModuleLists` here yet.
         {
             auto more_flags = m->GetFlags();
             flags.insert(flags.end(), more_flags.begin(), more_flags.end());
@@ -1232,7 +1222,7 @@ void ta_test::modules::TestSelector::OnFilterTest(const BasicTestInfo &test, boo
 
 ta_test::flags::StringFlag::Callback ta_test::modules::TestSelector::GetFlagCallback(bool exclude)
 {
-    return [exclude](Runner &runner, BasicModule &this_module, std::string_view pattern)
+    return [exclude](const Runner &runner, BasicModule &this_module, std::string_view pattern)
     {
         (void)runner;
         TestSelector &self = dynamic_cast<TestSelector &>(this_module); // This cast should never fail.
@@ -1268,13 +1258,13 @@ void ta_test::modules::TestSelector::OnPreRunTests(const RunTestsInfo &data)
 
 ta_test::modules::PrintingConfigurator::PrintingConfigurator()
     : flag_color("color", "Color output using ANSI escape sequences (by default enabled when printing to terminal).",
-        [](Runner &runner, BasicModule &this_module, bool enable)
+        [](const Runner &runner, BasicModule &this_module, bool enable)
         {
             (void)this_module;
             runner.SetEnableColor(enable);
         }
     ), flag_unicode("unicode", "Use Unicode characters for pseudographics (enabled by default).",
-        [](Runner &runner, BasicModule &this_module, bool enable)
+        [](const Runner &runner, BasicModule &this_module, bool enable)
         {
             (void)this_module;
             runner.SetEnableUnicode(enable);
@@ -1882,10 +1872,10 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
     // Print the assertion stack, if any.
     if (assertion)
     {
-        test.all_tests->runner->FindModule<AssertionStackPrinterInterface>([&](const AssertionStackPrinterInterface &printer)
+        test.all_tests->modules->FindModule<AssertionStackPrinterInterface>([&](const AssertionStackPrinterInterface &printer)
         {
             printer.PrintAssertionStack(*assertion);
-            return true;
+            return false;
         });
     }
 }
@@ -1894,7 +1884,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 
 ta_test::modules::DebuggerDetector::DebuggerDetector()
     : flag_common("debug", "Act as if a debugger was or wasn't attached, bypassing debugger detection. Enabling this is a shorthand for `--break --no-catch`, and vice versa.",
-        [](Runner &runner, BasicModule &this_module, bool enable)
+        [](const Runner &runner, BasicModule &this_module, bool enable)
         {
             (void)runner;
 
@@ -1905,7 +1895,7 @@ ta_test::modules::DebuggerDetector::DebuggerDetector()
         }
     ),
     flag_break("break", "Trigger a breakpoint on any failure, this will crash if no debugger is attached (by default enabled if a debugger is attached).",
-        [](Runner &runner, BasicModule &this_module, bool enable)
+        [](const Runner &runner, BasicModule &this_module, bool enable)
         {
             (void)runner;
 
@@ -1917,7 +1907,7 @@ ta_test::modules::DebuggerDetector::DebuggerDetector()
         "but this improves debugging experience by letting you configure your debugger to only break on uncaught exceptions, "
         "which means you don't need to manually skip the ones that are thrown and successfully caught. Enabling this while debugging "
         "will give you only approximate exception locations (the innermost enclosing assertion or test), rather than precise ones. (By default enabled if a debugger is not attached.)",
-        [](Runner &runner, BasicModule &this_module, bool enable)
+        [](const Runner &runner, BasicModule &this_module, bool enable)
         {
             (void)runner;
 
@@ -1961,7 +1951,7 @@ void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const RunSingleTest
 
 void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const RunTestsInfo &data)
 {
-    data.runner->FindModule<DebuggerDetector>([this](DebuggerDetector &detector)
+    data.modules->FindModule<DebuggerDetector>([this](DebuggerDetector &detector)
     {
         if (detector.break_on_failure && *detector.break_on_failure)
             PrintNote("Will break on failure.");

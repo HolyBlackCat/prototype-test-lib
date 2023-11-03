@@ -55,9 +55,9 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Some form of expect_throw.
+// Draw a fat bracket while explaining each test failure?
 
-// Generate module lists for faster calls.
+// Some form of expect_throw.
 
 // Scoped and unscoped logging macros.
 
