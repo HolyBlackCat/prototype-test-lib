@@ -27,6 +27,9 @@
 #include <vector>
 #include <version>
 
+
+// --- CONFIGURATION MACROS ---
+
 #ifndef CFG_TA_API
 #if defined(_WIN32) && CFG_TA_SHARED
 #define CFG_TA_API __declspec(dllimport)
@@ -154,31 +157,35 @@
 #define CFG_TA_DETECT_TERMINAL 1
 #endif
 
+
+// --- INTERFACE MACROS ---
+
+// Define a test. Must be followed by `{...}`.
+// `name` is the test name without quotes, it must be a valid identifier.
+// Use `/` as a separator to make test groups: `group/sub_group/test_foo`. There must be no spaces around the slashes.
+#define TA_TEST(name) DETAIL_TA_TEST(name)
+
 // Check condition, immediately fail the test if false.
+// The condition can be followed by a custom message, then possibly by format arguments.
+// Usage:
+//     TA_CHECK(x == 42);
+//     TA_CHECK($(x) == 42); // `$` will print the value of `x` on failure.
+//     TA_CHECK($(x) == 42, "Checking stuff!"); // Add a custom message.
+//     TA_CHECK($(x) == 42, "Checking {}!", "stuff"); // Custom message with formatting.
 #define TA_CHECK(...) DETAIL_TA_CHECK(false, throw ::ta_test::InterruptTestException(::ta_test::detail::ConstructInterruptTestException{});, #__VA_ARGS__, __VA_ARGS__)
-// Check condition, later fail the test if false.
+// Same, but don't immediately fail the test, and wait until it finishes executing.
 #define TA_SOFT_CHECK(...) DETAIL_TA_CHECK(true,, #__VA_ARGS__, __VA_ARGS__)
 
-#define DETAIL_TA_CHECK(is_soft_, on_fail_, str_, ...) \
-    /* Using `_ta_test_name_tag` to force this to be called only in tests. */\
-    /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (::ta_test::detail::AssertWrapper<is_soft_, str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion([&](auto &&_ta_func){_ta_func(__VA_ARGS__);})) {} else {\
-        if (_ta_assertion.should_break) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
-        on_fail_ \
-    }
-
+// Can only be used inside of `TA_CHECK(...)`. Wrap a subexpression in this to print its value if the assertion fails.
+// Those can be nested inside one another.
 // The expansion is enclosed in `(...)`, which lets you use it e.g. as a sole function argument: `func $(var)`.
 #define TA_ARG(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
 #if CFG_TA_USE_DOLLAR
 #define $(...) TA_ARG(__VA_ARGS__)
 #endif
-#define DETAIL_TA_ARG(counter, ...) \
-    /* Note the outer parentheses, they allow this to be transparently used e.g. as a single function parameter. */\
-    /* Passing `counter` the second time is redundant, but helps with our parsing. */\
-    /* Note `void(_ta_assertion)`, which prevents this from being used outside of an assertion. */\
-    (_ta_assertion.BeginArg(counter)._ta_handle_arg_(counter, __VA_ARGS__))
 
-#define TA_TEST(name) DETAIL_TA_TEST(name)
+
+// --- INTERNAL MACROS ---
 
 #define DETAIL_TA_TEST(name) \
     inline void _ta_test_func(::ta_test::ConstStringTag<#name>); \
@@ -192,6 +199,21 @@
         >\
     >{})) {} \
     inline void _ta_test_func(::ta_test::ConstStringTag<#name>)
+
+#define DETAIL_TA_CHECK(is_soft_, on_fail_, str_, ...) \
+    /* Using `_ta_test_name_tag` to force this to be called only in tests. */\
+    /* Using `? :` to force the contextual conversion to `bool`. */\
+    if (::ta_test::detail::AssertWrapper<is_soft_, str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion([&](auto &&_ta_func){_ta_func(__VA_ARGS__);})) {} else {\
+        if (_ta_assertion.should_break) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
+        on_fail_ \
+    }
+
+#define DETAIL_TA_ARG(counter, ...) \
+    /* Note the outer parentheses, they allow this to be transparently used e.g. as a single function parameter. */\
+    /* Passing `counter` the second time is redundant, but helps with our parsing. */\
+    /* Note `void(_ta_assertion)`, which prevents this from being used outside of an assertion. */\
+    (_ta_assertion.BeginArg(counter)._ta_handle_arg_(counter, __VA_ARGS__))
+
 
 namespace ta_test
 {

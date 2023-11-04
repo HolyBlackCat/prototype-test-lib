@@ -21,6 +21,7 @@ bool foo()
 
 TA_TEST(foo/bar)
 {
+
 }
 
 TA_TEST(test/lul/beta)
@@ -55,9 +56,10 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Draw a fat bracket while explaining each test failure?
-
 // Some form of expect_throw.
+//    MUST_THROW().CheckMessage(".*").CheckExactType<std::runtime_error>().CheckDerivedType<std::exception>();
+
+// Short macros that can be disabled in the config.
 
 // Scoped and unscoped logging macros.
 
@@ -87,6 +89,7 @@ int main(int argc, char **argv)
 //     Get terminal width, and limit separator length to that value (but still not make them longer than they currently are)
 
 // Unclear how:
+//     Draw a fat bracket while explaining each test failure?
 //     Print user messages from assertions that didn't execute to completion.
 //     Don't show the assertion user message the second time when printing the expression
 
