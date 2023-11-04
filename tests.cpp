@@ -83,6 +83,8 @@ int main(int argc, char **argv)
 
 // Some form of expect_throw.
 
+// Forced pass/fail macros?
+
 // Short macros that can be disabled in the config.
 
 // Scoped and unscoped logging macros.
@@ -116,6 +118,7 @@ int main(int argc, char **argv)
 //     Draw a fat bracket while explaining each test failure?
 //     Print user messages from assertions that didn't execute to completion.
 //     Don't show the assertion user message the second time when printing the expression
+//     Optimize the calls to the `BasicPrintingModule` with the module lists too.
 
 // Selling points:
 //     * Expression unwrapping

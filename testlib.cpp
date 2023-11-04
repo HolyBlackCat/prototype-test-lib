@@ -30,6 +30,25 @@
 #endif
 #endif
 
+ta_test::context::Context ta_test::context::CurrentContext()
+{
+    return detail::ThreadState().context_stack;
+}
+
+void ta_test::context::FrameGuard::PushFrame(std::unique_ptr<const BasicFrame> ptr)
+{
+    detail::ThreadState().context_stack.push_back(std::move(ptr));
+}
+
+ta_test::context::FrameGuard::~FrameGuard()
+{
+    auto &thread_state = detail::ThreadState();
+    if (thread_state.context_stack.empty() || thread_state.context_stack.back().get() != frame_ptr)
+        HardError("The context stack is corrupted.");
+
+    thread_state.context_stack.pop_back();
+}
+
 void ta_test::HardError(std::string_view message, HardErrorKind kind)
 {
     // A threadsafe once flag.
@@ -88,7 +107,7 @@ bool ta_test::platform::IsDebuggerAttached()
             continue;
         for (std::size_t i = prefix.size(); i < line.size(); i++)
         {
-            if (text::IsDigit(line[i]) && line[i] != '0')
+            if (text::chars::IsDigit(line[i]) && line[i] != '0')
                 return true;
         }
     }
@@ -535,7 +554,7 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
                 break;
             }
         }
-        else if (std::all_of(ident.begin(), ident.end(), [](char ch){return IsIdentifierChar(ch) && !IsAlphaLowercase(ch);}))
+        else if (std::all_of(ident.begin(), ident.end(), [](char ch){return chars::IsIdentifierChar(ch) && !chars::IsAlphaLowercase(ch);}))
         {
             ident_style = &style.all_caps;
         }
@@ -551,7 +570,7 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
     auto lambda = [&](const char &ch, CharKind kind)
     {
         TextCanvas::CellInfo &info = canvas.CellInfoAt(line, start + i);
-        bool is_punct = !IsIdentifierChar(ch);
+        bool is_punct = !chars::IsIdentifierChar(ch);
 
         const char *const prev_identifier_start = identifier_start;
 
@@ -573,17 +592,17 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
         switch (kind)
         {
           case CharKind::normal:
-            if (is_string_suffix && !IsIdentifierChar(ch))
+            if (is_string_suffix && !chars::IsIdentifierChar(ch))
                 is_string_suffix = false;
-            if ((prev_kind == CharKind::string || prev_kind == CharKind::character || prev_kind == CharKind::raw_string) && IsIdentifierChar(ch))
+            if ((prev_kind == CharKind::string || prev_kind == CharKind::character || prev_kind == CharKind::raw_string) && chars::IsIdentifierChar(ch))
                 is_string_suffix = true;
 
-            if (is_number_suffix && !IsIdentifierChar(ch))
+            if (is_number_suffix && !chars::IsIdentifierChar(ch))
                 is_number_suffix = false;
 
             if (!is_number && !identifier_start && !is_string_suffix && !is_number_suffix)
             {
-                if (IsDigit(ch))
+                if (chars::IsDigit(ch))
                 {
                     is_number = true;
 
@@ -591,14 +610,14 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
                     if (i > 0 && expr[i-1] == '.')
                         canvas.CellInfoAt(line, start + i - 1).style = style.number;
                 }
-                else if (IsIdentifierChar(ch))
+                else if (chars::IsIdentifierChar(ch))
                 {
                     identifier_start = &ch;
                 }
             }
             else if (is_number)
             {
-                if (!(IsDigit(ch) || IsAlpha(ch) || ch == '.' || ch == '-' || ch == '+' || ch == '\''))
+                if (!(chars::IsDigit(ch) || chars::IsAlpha(ch) || ch == '.' || ch == '-' || ch == '+' || ch == '\''))
                 {
                     is_number = false;
                     if (ch == '_')
@@ -607,7 +626,7 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
             }
             else if (identifier_start)
             {
-                if (!IsIdentifierChar(ch))
+                if (!chars::IsIdentifierChar(ch))
                     identifier_start = nullptr;
             }
 
@@ -651,7 +670,7 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
 
                 // Backtrack and color the prefix.
                 std::size_t j = i;
-                while (j-- > 0 && (IsAlpha(expr[j]) || IsDigit(expr[j])))
+                while (j-- > 0 && (chars::IsAlpha(expr[j]) || chars::IsDigit(expr[j])))
                 {
                     TextStyle &target_style = canvas.CellInfoAt(line, start + j).style;
                     switch (prev_string_kind)
@@ -722,6 +741,31 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
     return expr.size();
 }
 
+void ta_test::text::PrintContext(context::Context con)
+{
+    for (auto it = con.end(); it != con.begin();)
+    {
+        --it;
+        ta_test::text::PrintContextFrame(**it);
+    }
+}
+
+void ta_test::text::PrintContextFrame(const context::BasicFrame &frame)
+{
+    auto &thread_state = detail::ThreadState();
+    if (!thread_state.current_test)
+        HardError("No test is currently running, can't print context.", HardErrorKind::user);
+
+    for (const auto &m : thread_state.current_test->all_tests->modules->AllModules())
+    {
+        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+        {
+            if (base->PrintContextFrame(frame))
+                break;
+        }
+    }
+}
+
 void ta_test::BasicPrintingModule::PrintNote(std::string_view text) const
 {
     terminal.Print("%s%s%s%.*s%s\n",
@@ -748,6 +792,7 @@ void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
 }
 
 ta_test::detail::BasicAssertWrapper::BasicAssertWrapper()
+    : FrameGuard(context::AssertionFrame(this))
 {
     GlobalThreadState &thread_state = ThreadState();
     if (!thread_state.current_test)
@@ -791,7 +836,7 @@ void ta_test::detail::BasicAssertWrapper::UncaughtException()
     thread_state.FailCurrentTest();
 
     auto e = std::current_exception();
-    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnUncaughtException>(*thread_state.current_test, this, e);
+    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnUncaughtException>(*thread_state.current_test, e);
 
     finished = true;
 }
@@ -1082,7 +1127,7 @@ int ta_test::Runner::Run()
             {
                 detail::ThreadState().FailCurrentTest();
                 auto e = std::current_exception();
-                module_lists.Call<&BasicModule::OnUncaughtException>(guard.state, nullptr, e);
+                module_lists.Call<&BasicModule::OnUncaughtException>(guard.state, e);
             }
         }
         else
@@ -1648,15 +1693,30 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 
 void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message)
 {
-    PrintAssertionFramesLow(data, message, 0);
+    PrintAssertionFrameLow(data, message, true);
+    auto context = context::CurrentContext();
+    if (!context.empty())
+    {
+        // If the last frame is this very assertion, skip it, since we already printed it above.
+        // This condition should always be true.
+        if (auto assertion_frame = dynamic_cast<const context::AssertionFrame *>(context.back().get()); assertion_frame && assertion_frame->assertion == &data)
+            context = context.first(context.size() - 1);
+        text::PrintContext(context);
+    }
 }
 
-void ta_test::modules::AssertionPrinter::PrintAssertionStack(const BasicModule::BasicAssertionInfo &data) const
+bool ta_test::modules::AssertionPrinter::PrintContextFrame(const context::BasicFrame &frame)
 {
-    PrintAssertionFramesLow(data, {}, 1 /*sic*/);
+    if (auto assertion_frame = dynamic_cast<const context::AssertionFrame *>(&frame))
+    {
+        PrintAssertionFrameLow(*assertion_frame->assertion, {}, false);
+        return true;
+    }
+
+    return false;
 }
 
-void ta_test::modules::AssertionPrinter::PrintAssertionFramesLow(const BasicAssertionInfo &data, std::optional<std::string_view> message, int depth) const
+void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAssertionInfo &data, std::optional<std::string_view> message, bool is_most_nested) const
 {
     text::TextCanvas canvas(&common_chars);
     std::size_t line_counter = 0;
@@ -1666,7 +1726,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFramesLow(const BasicAsse
 
     { // The main error message.
         std::size_t column = 0;
-        if (depth == 0)
+        if (is_most_nested)
             column = canvas.DrawString(line_counter, 0, chars_assertion_failed, {.style = common_styles.error, .important = true});
         else
             column = canvas.DrawString(line_counter, 0, chars_in_assertion, {.style = style_in_assertion, .important = true});
@@ -1820,17 +1880,15 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFramesLow(const BasicAsse
     }
 
     canvas.InsertLineBefore(canvas.NumLines());
-
     canvas.Print(terminal);
-
-    if (print_assertion_stack && data.enclosing_assertion)
-        PrintAssertionFramesLow(*data.enclosing_assertion, {}, depth + 1);
 }
 
 // --- modules::ExceptionPrinter ---
 
-void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e)
+void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e)
 {
+    (void)test;
+
     { // Print the exception itself.
         TextStyle cur_style;
 
@@ -1870,14 +1928,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
     }
 
     // Print the assertion stack, if any.
-    if (assertion)
-    {
-        test.all_tests->modules->FindModule<AssertionStackPrinterInterface>([&](const AssertionStackPrinterInterface &printer)
-        {
-            printer.PrintAssertionStack(*assertion);
-            return false;
-        });
-    }
+    text::PrintContext();
 }
 
 // --- modules::DebuggerDetector ---

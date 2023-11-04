@@ -478,7 +478,9 @@ namespace ta_test
 
         // --- FAILING TESTS ---
 
-        // This is called when a test fails for any reason, before any more specific callbacks are called.
+        // This is called when a test fails for any reason, followed by a more specific callback (see below).
+        // Note that the test can continue to run after this, if this is a delayed (soft) failure.
+        // Note that this is called at most once per test, even if after a soft failure something else fails.
         virtual void OnPreFailTest(const RunSingleTestResults &data) {(void)data;}
 
         struct BasicAssertionInfo
@@ -561,7 +563,7 @@ namespace ta_test
         virtual void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) {(void)data; (void)message;}
 
         // Called when an exception falls out of an assertion or out of the entire test (in the latter case `assertion` is null).
-        virtual void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) {(void)test; (void)assertion; (void)e;}
+        virtual void OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e) {(void)test; (void)e;}
 
         // --- MISC ---
 
@@ -585,6 +587,7 @@ namespace ta_test
 
         // This is called before entering try/catch blocks, so you can choose between that and just executing directly. (See `--catch`.)
         // `should_catch` defaults to true.
+        // This is NOT called by `TA_MUST_THROW(...)`.
         virtual void OnPreTryCatch(bool &should_catch) {(void)should_catch;}
 
 
@@ -622,6 +625,61 @@ namespace ta_test
     };
 
 
+    // --- EXECUTION CONTEXT ---
+
+    // This lets you determine the stack of assertions (and other things) that are currently executing.
+    namespace context
+    {
+        // A single entry in the context stack.
+        // You can add your own classes derived from this, if you add custom modules that can process them.
+        struct BasicFrame
+        {
+          protected:
+            BasicFrame() = default;
+          public:
+            virtual ~BasicFrame() = default;
+        };
+        using Context = std::span<const std::unique_ptr<const BasicFrame>>;
+
+        [[nodiscard]] CFG_TA_API Context CurrentContext();
+
+        // A context for the currently running assertion.
+        struct AssertionFrame : BasicFrame
+        {
+            const BasicModule::BasicAssertionInfo *assertion = nullptr;
+
+            constexpr AssertionFrame() {}
+            explicit AssertionFrame(const BasicModule::BasicAssertionInfo *assertion) : assertion(assertion) {}
+        };
+
+        // While this object is alive, the thing passed to it will be included in the stack which is printed on some failures.
+        // This is a low-level feature, you probably shouldn't use it directly. We have more high-level mechanisms built on top of it.
+        class FrameGuard
+        {
+            BasicFrame *frame_ptr = nullptr;
+
+            CFG_TA_API static void PushFrame(std::unique_ptr<const BasicFrame> ptr);
+
+          public:
+            // Copies/moves `frame` into the context stack. Will pop it back when this object dies.
+            template <std::derived_from<BasicFrame> T>
+            FrameGuard(T &&frame)
+            {
+                auto new_frame_ptr = std::make_unique<std::decay_t<T>>(std::forward<T>(frame));
+                frame_ptr = new_frame_ptr.get();
+                PushFrame(std::move(new_frame_ptr));
+            }
+
+            FrameGuard(const FrameGuard &) = delete;
+            FrameGuard &operator=(const FrameGuard &) = delete;
+
+            CFG_TA_API ~FrameGuard();
+        };
+    }
+
+
+    // --- MISC ---
+
     enum class HardErrorKind {internal, user};
     // Aborts the application with an error.
     [[noreturn]] CFG_TA_API void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal);
@@ -634,6 +692,10 @@ namespace ta_test
         {
             BasicModule::RunSingleTestResults *current_test = nullptr;
             BasicModule::BasicAssertionInfo *current_assertion = nullptr;
+
+            // This is used to print (or just examine) the current context.
+            // All currently running assertions go there, and possibly other things.
+            std::vector<std::unique_ptr<const context::BasicFrame>> context_stack;
 
             // Gracefully fails the current test, if not already failed.
             // Call this first, before printing any messages.
@@ -1040,59 +1102,63 @@ namespace ta_test
     // Text processing functions.
     namespace text
     {
-        [[nodiscard]] constexpr bool IsWhitespace(char ch)
+        // Character classification functions.
+        namespace chars
         {
-            return ch == ' ' || ch == '\t';
-        }
-        [[nodiscard]] constexpr bool IsAlphaLowercase(char ch)
-        {
-            return ch >= 'a' && ch <= 'z';
-        }
-        [[nodiscard]] constexpr bool IsAlphaUppercase(char ch)
-        {
-            return ch >= 'A' && ch <= 'Z';
-        }
-        [[nodiscard]] constexpr bool IsAlpha(char ch)
-        {
-            return IsAlphaLowercase(ch) || IsAlphaUppercase(ch);
-        }
-        // Whether `ch` is a letter or an other non-digit identifier character.
-        [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
-        {
-            return ch == '_' || IsAlpha(ch);
-        }
-        [[nodiscard]] constexpr bool IsDigit(char ch)
-        {
-            return ch >= '0' && ch <= '9';
-        }
-        // Whether `ch` can be a part of an identifier.
-        [[nodiscard]] constexpr bool IsIdentifierCharStrict(char ch)
-        {
-            return IsNonDigitIdentifierChar(ch) || IsDigit(ch);
-        }
-        // Same, but also allows `$`, which we use in our macro.
-        [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
-        {
-            if (ch == '$')
-                return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
-            return IsIdentifierCharStrict(ch);
-        }
-        // Returns true if `name` is `"TA_ARG"` or one of its aliases.
-        [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
-        {
-            for (std::string_view alias : std::initializer_list<std::string_view>{
-                "TA_ARG",
-                #if CFG_TA_USE_DOLLAR
-                "$"
-                #endif
-                CFG_TA_EXTRA_ARG_MACROS
-            })
+            [[nodiscard]] constexpr bool IsWhitespace(char ch)
             {
-                if (alias == name)
-                    return true;
+                return ch == ' ' || ch == '\t';
             }
+            [[nodiscard]] constexpr bool IsAlphaLowercase(char ch)
+            {
+                return ch >= 'a' && ch <= 'z';
+            }
+            [[nodiscard]] constexpr bool IsAlphaUppercase(char ch)
+            {
+                return ch >= 'A' && ch <= 'Z';
+            }
+            [[nodiscard]] constexpr bool IsAlpha(char ch)
+            {
+                return IsAlphaLowercase(ch) || IsAlphaUppercase(ch);
+            }
+            // Whether `ch` is a letter or an other non-digit identifier character.
+            [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
+            {
+                return ch == '_' || IsAlpha(ch);
+            }
+            [[nodiscard]] constexpr bool IsDigit(char ch)
+            {
+                return ch >= '0' && ch <= '9';
+            }
+            // Whether `ch` can be a part of an identifier.
+            [[nodiscard]] constexpr bool IsIdentifierCharStrict(char ch)
+            {
+                return IsNonDigitIdentifierChar(ch) || IsDigit(ch);
+            }
+            // Same, but also allows `$`, which we use in our macro.
+            [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
+            {
+                if (ch == '$')
+                    return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
+                return IsIdentifierCharStrict(ch);
+            }
+            // Returns true if `name` is `"TA_ARG"` or one of its aliases.
+            [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
+            {
+                for (std::string_view alias : std::initializer_list<std::string_view>{
+                    "TA_ARG",
+                    #if CFG_TA_USE_DOLLAR
+                    "$"
+                    #endif
+                    CFG_TA_EXTRA_ARG_MACROS
+                })
+                {
+                    if (alias == name)
+                        return true;
+                }
 
-            return false;
+                return false;
+            }
         }
 
         // A mini unicode library.
@@ -1518,14 +1584,14 @@ namespace ta_test
                         else if (ch == '\'')
                         {
                             // This condition handles `'` digit separators.
-                            if (identifier.empty() || &identifier.back() + 1 != &ch || !IsDigit(identifier.front()))
+                            if (identifier.empty() || &identifier.back() + 1 != &ch || !chars::IsDigit(identifier.front()))
                                 state = CharKind::character;
                         }
-                        else if (IsIdentifierChar(ch))
+                        else if (chars::IsIdentifierChar(ch))
                         {
                             // We reset `identifier` lazily here, as opposed to immediately,
                             // to allow function calls with whitespace between the identifier and `(`.
-                            if (!IsIdentifierChar(prev_ch))
+                            if (!chars::IsIdentifierChar(prev_ch))
                                 identifier = {};
 
                             if (identifier.empty())
@@ -1792,6 +1858,11 @@ namespace ta_test
 
             *out_iter++ = "'\""[double_quotes];
         }
+
+        // Uses the current modules to print the context stack. See class `namespace context` above.
+        CFG_TA_API void PrintContext(context::Context con = context::CurrentContext());
+        // Same, but only prints a single context frame.
+        CFG_TA_API void PrintContextFrame(const context::BasicFrame &frame);
     }
 
     // The base for modules that print stuff.
@@ -1815,6 +1886,11 @@ namespace ta_test
         {
             common_chars.EnableUnicode(enable);
         }
+
+        // This is called whenever the context information needs to be printed.
+        // Return true if this type of context frame is known to you and you handled it, then the other modules won't receive this call.
+        // Do nothing and return false if you don't know this context frame type.
+        virtual bool PrintContextFrame(const context::BasicFrame &frame) {(void)frame; return false;}
 
       protected:
         CFG_TA_API void PrintNote(std::string_view text) const;
@@ -1883,7 +1959,7 @@ namespace ta_test
         };
 
         // An intermediate base class that `AssertWrapper<T>` inherits from.
-        class BasicAssertWrapper : public BasicModule::BasicAssertionInfo
+        class BasicAssertWrapper : public BasicModule::BasicAssertionInfo, public context::FrameGuard
         {
             bool finished = false;
             std::string user_message;
@@ -1967,7 +2043,7 @@ namespace ta_test
                 {
                     (void)args;
                     (void)depth;
-                    if (text::IsArgMacroName(name))
+                    if (text::chars::IsArgMacroName(name))
                         ret++;
                 });
                 return ret;
@@ -2015,7 +2091,7 @@ namespace ta_test
 
                         for (const char &ch : args)
                         {
-                            if (text::IsDigit(ch))
+                            if (text::chars::IsDigit(ch))
                                 new_info.counter = new_info.counter * 10 + (ch - '0');
                             else if (ch == ',')
                                 break;
@@ -2038,7 +2114,7 @@ namespace ta_test
                     {
                         (void)depth;
 
-                        if (!text::IsArgMacroName(name))
+                        if (!text::chars::IsArgMacroName(name))
                             return;
 
                         if (pos >= num_args)
@@ -2054,16 +2130,16 @@ namespace ta_test
 
                         // Trim side whitespace from `args`.
                         std::string_view trimmed_args = args;
-                        while (!trimmed_args.empty() && text::IsWhitespace(trimmed_args.front()))
+                        while (!trimmed_args.empty() && text::chars::IsWhitespace(trimmed_args.front()))
                             trimmed_args.remove_prefix(1);
-                        while (!trimmed_args.empty() && text::IsWhitespace(trimmed_args.back()))
+                        while (!trimmed_args.empty() && text::chars::IsWhitespace(trimmed_args.back()))
                             trimmed_args.remove_suffix(1);
 
                         // Decide if we should draw a bracket for this argument.
                         for (char ch : trimmed_args)
                         {
                             // Whatever the condition is, it should trigger for all arguments with nested arguments.
-                            if (!text::IsIdentifierChar(ch))
+                            if (!text::chars::IsIdentifierChar(ch))
                             {
                                 this_info.need_bracket = true;
                                 break;
@@ -2191,7 +2267,7 @@ namespace ta_test
             static constexpr bool test_name_is_valid = []{
                 if (TestName.view().empty())
                     return false;
-                if (!std::all_of(TestName.view().begin(), TestName.view().end(), [](char ch){return text::IsIdentifierCharStrict(ch) || ch == '/';}))
+                if (!std::all_of(TestName.view().begin(), TestName.view().end(), [](char ch){return text::chars::IsIdentifierCharStrict(ch) || ch == '/';}))
                     return false;
                 if (std::adjacent_find(TestName.view().begin(), TestName.view().end(), [](char a, char b){return a == '/' && b == '/';}) != TestName.view().end())
                     return false;
@@ -2555,18 +2631,8 @@ namespace ta_test
             void OnPostRunTests(const RunTestsResults &data) override;
         };
 
-        // An interface to print assertion stacks.
-        struct AssertionStackPrinterInterface
-        {
-          protected:
-            ~AssertionStackPrinterInterface() = default;
-
-          public:
-            virtual void PrintAssertionStack(const BasicModule::BasicAssertionInfo &data) const = 0;
-        };
-
         // Prints failed assertions.
-        struct AssertionPrinter : BasicPrintingModule, AssertionStackPrinterInterface
+        struct AssertionPrinter : BasicPrintingModule
         {
             // Whether we should print the values of `$(...)` in the expression.
             bool decompose_expression = true;
@@ -2624,9 +2690,9 @@ namespace ta_test
             std::size_t printed_code_indentation = 4;
 
             void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) override;
-            void PrintAssertionStack(const BasicModule::BasicAssertionInfo &data) const override;
+            bool PrintContextFrame(const context::BasicFrame &frame) override;
 
-            CFG_TA_API void PrintAssertionFramesLow(const BasicAssertionInfo &data, std::optional<std::string_view> message, int depth) const;
+            CFG_TA_API void PrintAssertionFrameLow(const BasicAssertionInfo &data, std::optional<std::string_view> message, bool is_most_nested) const;
         };
 
         // A generic module to analyze exceptions.
@@ -2678,7 +2744,7 @@ namespace ta_test
             std::string chars_indent_message = "    ";
             std::string chars_type_suffix = ": ";
 
-            void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) override;
+            void OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e) override;
         };
 
         // Detects whether the debugger is attached in a platform-specific way.
