@@ -30,6 +30,12 @@
 
 // --- CONFIGURATION MACROS ---
 
+// Whether we're building as a shared library.
+#ifndef CFG_TA_SHARED
+#define CFG_TA_SHARED 0
+#endif
+// The import/export macro we use on all non-inline functions.
+// Probably shouldn't define this directly, prefer setting `CFG_TA_SHARED`.
 #ifndef CFG_TA_API
 #if defined(_WIN32) && CFG_TA_SHARED
 #define CFG_TA_API __declspec(dllimport)
@@ -121,7 +127,18 @@
 #elif __has_include(<fmt/format.h>)
 #define CFG_TA_USE_LIBFMT 1
 #else
-#error ta_test needs a compiler supporting `#include <format>`, or installed libfmt, or a custom formatting function to be configured.
+#error ta_test needs a compiler supporting `#include <format>`, or installed libfmt, or a custom formatting library to be specified.
+#endif
+#endif
+
+// Whether `{:?}` is a valid format for strings and characters.
+#ifndef CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
+// NOTE: Must check this before defining `CFG_TA_FMT_NAMESPACE`.
+// We're optimistically assuming that a custom `CFG_TA_FMT_NAMESPACE` means this is supported, but you can opt out.
+#if CFG_TA_CXX_STANDARD >= 23 || CFG_TA_USE_LIBFMT || defined(CFG_TA_FMT_NAMESPACE)
+#define CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS 1
+#else
+#define CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS 0
 #endif
 #endif
 
@@ -133,15 +150,6 @@
 #else
 #include <format>
 #define CFG_TA_FMT_NAMESPACE ::std
-#endif
-#endif
-
-// Whether `{:?}` is a valid format for strings and characters.
-#ifndef CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
-#if CFG_TA_CXX_STANDARD >= 23 || CFG_TA_USE_LIBFMT
-#define CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS 1
-#else
-#define CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS 0
 #endif
 #endif
 

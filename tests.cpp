@@ -13,6 +13,31 @@ bool foo()
 {
     // throw std::runtime_error("Blah!");
 
+    // auto e = MUST_THROW(...);
+
+    // struct SingleExceptionInfo
+    // {
+
+    // };
+
+    // using ExceptionInfo = std::vector<SingleExceptionInfo>;
+
+    // enum class SubExceptionKind
+    // {
+    //     outermost,
+    //     innermost,
+    //     all,
+    // };
+
+    // e.CheckMessage(".*");
+    // e.CheckMessage(i, ".*");
+
+    // e.CheckExactType<std::runtime_error>(i = first);
+    // e.CheckDerivedType<std::exception>(i = first);
+
+    // e.CheckMessage(".*");
+
+
     std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oof", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     // TA_SOFT_CHECK( false, "Hello {}!", first);
     TA_CHECK( $($(first) + $(second)).ends_with($($(suffix.c_str()) + $(extra) + $("123") + $("456"))) );
@@ -57,7 +82,6 @@ int main(int argc, char **argv)
 }
 
 // Some form of expect_throw.
-//    MUST_THROW().CheckMessage(".*").CheckExactType<std::runtime_error>().CheckDerivedType<std::exception>();
 
 // Short macros that can be disabled in the config.
 
