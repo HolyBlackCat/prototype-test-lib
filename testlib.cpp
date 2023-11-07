@@ -36,6 +36,7 @@ ta_test::context::Context ta_test::context::CurrentContext()
 }
 
 ta_test::context::FrameGuard::FrameGuard(const BasicFrame *frame)
+    : frame_ptr(frame)
 {
     detail::ThreadState().context_stack.push_back(frame);
 }
