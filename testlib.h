@@ -23,7 +23,10 @@
 #include <string_view>
 #include <string>
 #include <type_traits>
+#include <typeindex>
+#include <typeinfo>
 #include <utility>
+#include <variant>
 #include <vector>
 #include <version>
 
@@ -165,6 +168,14 @@
 #define CFG_TA_DETECT_TERMINAL 1
 #endif
 
+// Warning pragmas to ignore warnings about unused values.
+#ifndef CFG_IGNORE_UNUSED_VALUE
+#ifdef __GNUC__
+#define CFG_IGNORE_UNUSED_VALUE(...) _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wunused-value\"") __VA_ARGS__ _Pragma("GCC diagnostic pop")
+#else
+#define CFG_IGNORE_UNUSED_VALUE(...)
+#endif
+#endif
 
 // --- INTERFACE MACROS ---
 
@@ -180,9 +191,9 @@
 //     TA_CHECK($(x) == 42); // `$` will print the value of `x` on failure.
 //     TA_CHECK($(x) == 42, "Checking stuff!"); // Add a custom message.
 //     TA_CHECK($(x) == 42, "Checking {}!", "stuff"); // Custom message with formatting.
-#define TA_CHECK(...) DETAIL_TA_CHECK(false, throw ::ta_test::InterruptTestException(::ta_test::detail::ConstructInterruptTestException{});, #__VA_ARGS__, __VA_ARGS__)
+#define TA_CHECK(...) DETAIL_TA_CHECK_HARD("TA_CHECK", #__VA_ARGS__, __VA_ARGS__)
 // Same, but don't immediately fail the test, and wait until it finishes executing.
-#define TA_SOFT_CHECK(...) DETAIL_TA_CHECK(true,, #__VA_ARGS__, __VA_ARGS__)
+#define TA_SOFT_CHECK(...) DETAIL_TA_CHECK_HARD("TA_SOFT_CHECK", #__VA_ARGS__, __VA_ARGS__)
 
 // Can only be used inside of `TA_CHECK(...)`. Wrap a subexpression in this to print its value if the assertion fails.
 // Those can be nested inside one another.
@@ -191,6 +202,11 @@
 #if CFG_TA_USE_DOLLAR
 #define $(...) TA_ARG(__VA_ARGS__)
 #endif
+
+// Checks that `...` throws an exception (it can even contain more than one statement), otherwise fails the test immediately.
+// Returns the information about the exception, which you can additionally validate.
+#define TA_MUST_THROW(...) \
+    DETAIL_TA_MUST_THROW("TA_MUST_THROW", #__VA_ARGS__, __VA_ARGS__)
 
 
 // --- INTERNAL MACROS ---
@@ -208,10 +224,12 @@
     >{})) {} \
     inline void _ta_test_func(::ta_test::ConstStringTag<#name>)
 
-#define DETAIL_TA_CHECK(is_soft_, on_fail_, str_, ...) \
+#define DETAIL_TA_CHECK_HARD(macro_name_, str_, ...) DETAIL_TA_CHECK_LOW(macro_name_, throw ::ta_test::InterruptTestException{};, str_, __VA_ARGS__)
+#define DETAIL_TA_CHECK_SOFT(macro_name_, str_, ...) DETAIL_TA_CHECK_LOW(macro_name_,, str_, __VA_ARGS__)
+#define DETAIL_TA_CHECK_LOW(macro_name_, on_fail_, str_, ...) \
     /* Using `_ta_test_name_tag` to force this to be called only in tests. */\
     /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (::ta_test::detail::AssertWrapper<is_soft_, str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion([&](auto &&_ta_func){_ta_func(__VA_ARGS__);})) {} else {\
+    if (::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion([&](auto &&_ta_func){_ta_func(__VA_ARGS__);})) {} else {\
         if (_ta_assertion.should_break) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
         on_fail_ \
     }
@@ -221,6 +239,9 @@
     /* Passing `counter` the second time is redundant, but helps with our parsing. */\
     /* Note `void(_ta_assertion)`, which prevents this from being used outside of an assertion. */\
     (_ta_assertion.BeginArg(counter)._ta_handle_arg_(counter, __VA_ARGS__))
+
+#define DETAIL_TA_MUST_THROW(macro_name_, str_, ...) \
+    ::ta_test::detail::MustThrowWrapper::Make<__FILE__, __LINE__, macro_name_, str_>()([&]{CFG_IGNORE_UNUSED_VALUE(__VA_ARGS__;)})
 
 
 namespace ta_test
@@ -392,6 +413,58 @@ namespace ta_test
         };
     }
 
+
+    // --- EXECUTION CONTEXT ---
+
+    // This lets you determine the stack of assertions (and other things) that are currently executing.
+    namespace context
+    {
+        // A single entry in the context stack.
+        // You can add your own classes derived from this, if you add custom modules that can process them.
+        struct BasicFrame
+        {
+          protected:
+            BasicFrame() = default;
+          public:
+            BasicFrame(const BasicFrame &) = default;
+            BasicFrame &operator=(const BasicFrame &) = default;
+            virtual ~BasicFrame() = default;
+        };
+        using Context = std::span<const BasicFrame *const>;
+
+        [[nodiscard]] CFG_TA_API Context CurrentContext();
+
+        // While this object is alive, the thing passed to it will be included in the context stack which is printed on some failures.
+        // This is a low-level feature, you probably shouldn't use it directly. We have higher level mechanisms built on top of it.
+        class FrameGuard
+        {
+            const BasicFrame *frame_ptr = nullptr;
+
+          public:
+            FrameGuard() {}
+
+            // Stores a frame pointer in the stack. Make sure it doesn't dangle.
+            // Note, can't pass a reference here, because it would be ambiguous with the copy constructor
+            //   when we inherit from both the `BasicFrame` and the `FrameGuard`.
+            // If we could use a reference, we'd need a second deleted constructor to reject rvalues.
+            CFG_TA_API FrameGuard(const BasicFrame *frame);
+
+            FrameGuard(FrameGuard &&other) noexcept
+                : frame_ptr(std::exchange(other.frame_ptr, nullptr))
+            {}
+            FrameGuard &operator=(FrameGuard other) noexcept
+            {
+                std::swap(frame_ptr, other.frame_ptr);
+                return *this;
+            }
+
+            CFG_TA_API ~FrameGuard();
+        };
+    }
+
+
+    // --- MODULE BASE ---
+
     // The common base of all modules.
     struct BasicModule
     {
@@ -483,33 +556,12 @@ namespace ta_test
         // Note that this is called at most once per test, even if after a soft failure something else fails.
         virtual void OnPreFailTest(const RunSingleTestResults &data) {(void)data;}
 
-        struct BasicAssertionInfo
+        struct BasicAssertionExpr
         {
           protected:
-            ~BasicAssertionInfo() = default;
+            ~BasicAssertionExpr() = default;
 
           public:
-            // You can set this to true to trigger a breakpoint.
-            mutable bool should_break = false;
-
-            // The enclosing assertion, if any.
-            const BasicAssertionInfo *enclosing_assertion = nullptr;
-
-            // Where the assertion is located in the source.
-            [[nodiscard]] virtual const SourceLoc &SourceLocation() const = 0;
-
-            // Whether this is a 'soft' assertion, i.e. doesn't immediately fail the test when false.
-            [[nodiscard]] virtual bool IsSoft() const = 0;
-
-            // How many assertions are currently running.
-            [[nodiscard]] int AssertionStackDepth() const
-            {
-                int ret = 0;
-                for (auto cur = this; cur; cur = cur->enclosing_assertion)
-                    ret++;
-                return ret;
-            }
-
             // The exact code passed to the assertion macro, as a string. Before macro expansion.
             [[nodiscard]] virtual std::string_view Expr() const = 0;
 
@@ -558,6 +610,31 @@ namespace ta_test
             // The current values of the arguments.
             [[nodiscard]] virtual std::span<const StoredArg> StoredArgs() const = 0;
         };
+        struct BasicAssertionInfo : context::BasicFrame
+        {
+            // You can set this to true to trigger a breakpoint.
+            mutable bool should_break = false;
+
+            // The enclosing assertion, if any.
+            const BasicAssertionInfo *enclosing_assertion = nullptr;
+
+            // Where the assertion is located in the source.
+            [[nodiscard]] virtual const SourceLoc &SourceLocation() const = 0;
+
+
+            // The assertion is printed as a sequence of the elements below:
+
+            // A fixed string, such as the assertion macro name itself, or its call parentheses.
+            struct DecoFixedString {std::string_view string;};
+            // An expression that should be printed with syntax highlighting.
+            struct DecoExpr {std::string_view string;};
+            // An expression with syntax highlighting and argument values. More than one per assertion weren't tested.
+            struct DecoExprWithArgs {const BasicAssertionExpr *expr = nullptr;};
+            // `std::monostate` indicates that there should be no more
+            using DecoVar = std::variant<std::monostate, DecoFixedString, DecoExpr, DecoExprWithArgs>;
+            // Returns one of the elements to be printed.
+            [[nodiscard]] virtual DecoVar GetElement(int index) const = 0;
+        };
         // Called when an assertion fails.
         // `message` is the associated user message, if any.
         virtual void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) {(void)data; (void)message;}
@@ -565,25 +642,34 @@ namespace ta_test
         // Called when an exception falls out of an assertion or out of the entire test (in the latter case `assertion` is null).
         virtual void OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e) {(void)test; (void)e;}
 
+        struct MustThrowInfo : context::BasicFrame
+        {
+            // The source location of `TA_MUST_THROW(...)`.
+            BasicModule::SourceLoc loc;
+            // The macro name used, e.g. `TA_MUST_THROW`.
+            std::string_view macro_name;
+            // The spelling of the macro argument.
+            std::string_view expr;
+        };
+
+        // This is called when `TA_MUST_THROW` doesn't throw an exception.
+        virtual void OnMissingException(const MustThrowInfo &data) {(void)data;}
+
         // --- MISC ---
 
-        struct ExceptionInfo
+        struct ExplainedException
         {
-            // This is usually obtained by calling `text::Demangler{}(typeid(e).name())`.
-            std::string type_name;
-
-            // This is usually obtained from `e.what()`.
+            // The exception type. You must set this, since `typeid(void)` is reserved for unknown exceptions.
+            std::type_index type = typeid(void);
+            // The exception message, normally from `e.what()`.
             std::string message;
-        };
-        struct ExceptionInfoWithNested : ExceptionInfo
-        {
             // The nested exception, if any.
             std::exception_ptr nested_exception;
         };
         // This is called when an exception needs to be converted to a string.
         // Return the information on your custom exception type, if they don't inherit from `std::exception`.
         // Do nothing (or throw) to let some other module handle this.
-        [[nodiscard]] virtual std::optional<ExceptionInfoWithNested> OnExplainException(const std::exception_ptr &e) const {(void)e; return {};}
+        [[nodiscard]] virtual std::optional<ExplainedException> OnExplainException(const std::exception_ptr &e) const {(void)e; return {};}
 
         // This is called before entering try/catch blocks, so you can choose between that and just executing directly. (See `--catch`.)
         // `should_catch` defaults to true.
@@ -605,6 +691,7 @@ namespace ta_test
             x(OnPreFailTest) \
             x(OnAssertionFailed) \
             x(OnUncaughtException) \
+            x(OnMissingException) \
             x(OnExplainException) \
             x(OnPreTryCatch) \
 
@@ -625,57 +712,70 @@ namespace ta_test
     };
 
 
-    // --- EXECUTION CONTEXT ---
+    // --- EXCEPTIONS ---
 
-    // This lets you determine the stack of assertions (and other things) that are currently executing.
-    namespace context
+    // Information about a single exception, without nesting.
+    struct SingleException
     {
-        // A single entry in the context stack.
-        // You can add your own classes derived from this, if you add custom modules that can process them.
-        struct BasicFrame
+        // The exception we're analyzing.
+        std::exception_ptr exception;
+        // The exception type. This is set to `typeid(void)` if the type is unknown.
+        std::type_index type = typeid(void);
+        // This is usually obtained from `e.what()`.
+        std::string message;
+
+        [[nodiscard]] bool IsTypeKnown() const {return type != typeid(void);}
+
+        // Obtains the type name from `type`, using `text::Demangler`.
+        // If `IsTypeKnown() == false`, returns an empty string instead.
+        [[nodiscard]] CFG_TA_API std::string GetTypeName() const;
+    };
+
+    // Given an exception, tries to get an error message from it, using the current modules. Shouldn't throw.
+    // Returns a vector with at least one element. The last element may or may not have `IsTypeKnown() == false`, and other elements will always be known.
+    CFG_TA_API void AnalyzeException(const std::exception_ptr &e, const std::function<void(SingleException elem)> &func);
+
+    // This is what `TA_MUST_THROW(...)` returns.
+    // Stores a list of nested `SingleException`s, plus the information about the macro call that produced it.
+    class CaughtException
+    {
+      public:
+        class ContextGuard : context::FrameGuard
         {
-          protected:
-            BasicFrame() = default;
-          public:
-            virtual ~BasicFrame() = default;
-        };
-        using Context = std::span<const std::unique_ptr<const BasicFrame>>;
-
-        [[nodiscard]] CFG_TA_API Context CurrentContext();
-
-        // A context for the currently running assertion.
-        struct AssertionFrame : BasicFrame
-        {
-            const BasicModule::BasicAssertionInfo *assertion = nullptr;
-
-            constexpr AssertionFrame() {}
-            explicit AssertionFrame(const BasicModule::BasicAssertionInfo *assertion) : assertion(assertion) {}
-        };
-
-        // While this object is alive, the thing passed to it will be included in the stack which is printed on some failures.
-        // This is a low-level feature, you probably shouldn't use it directly. We have more high-level mechanisms built on top of it.
-        class FrameGuard
-        {
-            BasicFrame *frame_ptr = nullptr;
-
-            CFG_TA_API static void PushFrame(std::unique_ptr<const BasicFrame> ptr);
+            friend class CaughtException;
 
           public:
-            // Copies/moves `frame` into the context stack. Will pop it back when this object dies.
-            template <std::derived_from<BasicFrame> T>
-            FrameGuard(T &&frame)
+            ContextGuard(const BasicModule::MustThrowInfo *info) : FrameGuard(info) {}
+        };
+
+      private:
+        std::vector<SingleException> elems;
+        const BasicModule::MustThrowInfo *info = nullptr;
+
+      public:
+        CaughtException() {}
+
+        // This is primarily for internal use.
+        // `func` is `(auto &&add_elem) -> void`, where `add_elem` is `(SingleException e) -> void`.
+        // Call `add_elem` repeatedly for every `SingleException`.
+        explicit CaughtException(const BasicModule::MustThrowInfo *info, const std::exception_ptr &e)
+            : info(info)
+        {
+            AnalyzeException(e, [&](SingleException elem)
             {
-                auto new_frame_ptr = std::make_unique<std::decay_t<T>>(std::forward<T>(frame));
-                frame_ptr = new_frame_ptr.get();
-                PushFrame(std::move(new_frame_ptr));
-            }
+                elems.push_back(std::move(elem));
+            });
+        }
 
-            FrameGuard(const FrameGuard &) = delete;
-            FrameGuard &operator=(const FrameGuard &) = delete;
+        // Returns all stored nested exceptions, in case you want to examine them manually.
+        // Prefer the high-level functions below.
+        [[nodiscard]] const std::vector<SingleException> &GetElems() const {return elems;}
 
-            CFG_TA_API ~FrameGuard();
-        };
-    }
+        // When you're manually examining this exception with `TA_CHECK(...)`, create this object beforehand.
+        // While it exists, all failed assertions will mention that they happened while examnining this exception.
+        // All high-level functions below do this automatically, and redundant contexts are silently ignored.
+        [[nodiscard]] ContextGuard MakeContextGuard() const {return ContextGuard(info);}
+    };
 
 
     // --- MISC ---
@@ -695,19 +795,13 @@ namespace ta_test
 
             // This is used to print (or just examine) the current context.
             // All currently running assertions go there, and possibly other things.
-            std::vector<std::unique_ptr<const context::BasicFrame>> context_stack;
+            std::vector<const context::BasicFrame *> context_stack;
 
             // Gracefully fails the current test, if not already failed.
             // Call this first, before printing any messages.
             CFG_TA_API void FailCurrentTest();
         };
         [[nodiscard]] CFG_TA_API GlobalThreadState &ThreadState();
-
-        // A tag to stop users from constructing our exception types.
-        struct ConstructInterruptTestException
-        {
-            explicit ConstructInterruptTestException() = default;
-        };
 
         // Extracts the class type from a member pointer type.
         template <typename T>
@@ -756,13 +850,10 @@ namespace ta_test
         struct ValueTag {};
     }
 
-    // We throw this to abort a test. Don't throw this manually.
+    // We throw this to abort a test (not necessarily fail it).
     // You can catch and rethrow this before a `catch (...)` to still be able to abort tests inside one.
-    struct InterruptTestException
-    {
-        // For internal use.
-        constexpr InterruptTestException(detail::ConstructInterruptTestException) {}
-    };
+    // You could throw this manually, but I don't see why you'd want to.
+    struct InterruptTestException {};
 
     // A compile-time string.
     template <std::size_t N>
@@ -780,11 +871,30 @@ namespace ta_test
             std::copy_n(new_str, size, str);
         }
 
-        [[nodiscard]] constexpr std::string_view view() const
+        [[nodiscard]] consteval std::string_view view() const &
         {
             return {str, str + size};
         }
+        [[nodiscard]] consteval std::string_view view() const && = delete;
     };
+    template <std::size_t A, std::size_t B>
+    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const ConstString<B> &b)
+    {
+        ConstString<A + B - 1> ret;
+        std::copy_n(a.str, a.size, ret.str);
+        std::copy_n(b.str, b.size, ret.str + a.size);
+        return ret;
+    }
+    template <std::size_t A, std::size_t B>
+    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const char (&b)[B])
+    {
+        return a + ConstString<B>(b);
+    }
+    template <std::size_t A, std::size_t B>
+    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const char (&a)[A], const ConstString<B> &b)
+    {
+        return ConstString<A>(a) + b;
+    }
     template <ConstString X>
     struct ConstStringTag
     {
@@ -1012,93 +1122,6 @@ namespace ta_test
         }
     };
 
-    struct CommonStyles
-    {
-        TextStyle error = {.color = TextColor::light_red, .bold = true};
-        TextStyle note = {.color = TextColor::light_blue, .bold = true};
-    };
-
-    // Common characters we use to print stuff.
-    struct CommonChars
-    {
-        std::string note_prefix = "NOTE: ";
-
-        // When printing a path, separates it from the line number.
-        std::string filename_linenumber_separator;
-        // When printing a path with a line number, this comes after the line number.
-        std::string filename_linenumber_suffix;
-
-        // Vertical bars, either standalone or in brackets.
-        char32_t bar{};
-        // Bottom brackets.
-        char32_t bracket_bottom{};
-        char32_t bracket_corner_bottom_left{};
-        char32_t bracket_corner_bottom_right{};
-        char32_t bracket_bottom_tail{};
-        // Top brackets.
-        char32_t bracket_top{};
-        char32_t bracket_corner_top_left{};
-        char32_t bracket_corner_top_right{};
-
-        CommonChars()
-        {
-            EnableUnicode(true);
-            EnableMsvcStylePaths(
-                #if CFG_TA_MSVC_STYLE_ERRORS
-                true
-                #else
-                false
-                #endif
-            );
-        }
-
-        void EnableUnicode(bool enable)
-        {
-            if (enable)
-            {
-                bar = 0x2502; // BOX DRAWINGS LIGHT VERTICAL
-                bracket_bottom = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
-                bracket_corner_bottom_left = 0x2570; // BOX DRAWINGS LIGHT ARC UP AND RIGHT
-                bracket_corner_bottom_right = 0x256f; // BOX DRAWINGS LIGHT ARC UP AND LEFT
-                bracket_bottom_tail = 0x252c; // BOX DRAWINGS LIGHT DOWN AND HORIZONTAL
-                bracket_top = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
-                bracket_corner_top_left = 0x256d; // BOX DRAWINGS LIGHT ARC DOWN AND RIGHT
-                bracket_corner_top_right = 0x256e; // BOX DRAWINGS LIGHT ARC DOWN AND LEFT
-            }
-            else
-            {
-                bar = '|';
-                bracket_bottom = '_';
-                bracket_corner_bottom_left = '|';
-                bracket_corner_bottom_right = '|';
-                bracket_bottom_tail = '_';
-                bracket_top = '-';
-                bracket_corner_top_left = '|';
-                bracket_corner_top_right = '|';
-            }
-        }
-
-        void EnableMsvcStylePaths(bool enable)
-        {
-            if (enable)
-            {
-                filename_linenumber_separator = "(";
-                filename_linenumber_suffix = ")";
-            }
-            else
-            {
-                filename_linenumber_separator = ":";
-                filename_linenumber_suffix = "";
-            }
-        }
-
-        // Converts a source location to a string in the current preferred format.
-        [[nodiscard]] std::string LocationToString(const BasicModule::SourceLoc &loc) const
-        {
-            return CFG_TA_FMT_NAMESPACE::format("{}{}{}{}", loc.file, filename_linenumber_separator, loc.line, filename_linenumber_suffix);
-        }
-    };
-
     // Text processing functions.
     namespace text
     {
@@ -1160,362 +1183,6 @@ namespace ta_test
                 return false;
             }
         }
-
-        // A mini unicode library.
-        namespace uni
-        {
-            // A placeholder value for invalid characters.
-            constexpr char32_t default_char = 0xfffd;
-
-            // Max bytes per character.
-            constexpr std::size_t max_char_len = 4;
-
-            // Given a byte, checks if it's the first byte of a multibyte character, or is a single-byte character.
-            // Even if this function returns true, `byte` can be an invalid first byte.
-            // To check for the byte validity, use `FirstByteToCharacterLength`.
-            [[nodiscard]] constexpr bool IsFirstByte(char byte)
-            {
-                return (byte & 0b11000000) != 0b10000000;
-            }
-
-            // Counts the number of codepoints (usually characters) in a valid UTF8 string, by counting the bytes matching `IsFirstByte()`.
-            [[nodiscard]] constexpr std::size_t CountFirstBytes(std::string_view string)
-            {
-                return std::size_t(std::count_if(string.begin(), string.end(), IsFirstByte));
-            }
-
-            // Given the first byte of a multibyte character (or a single-byte character), returns the amount of bytes occupied by the character.
-            // Returns 0 if this is not a valid first byte, or not a first byte at all.
-            [[nodiscard]] constexpr std::size_t FirstByteToCharacterLength(char first_byte)
-            {
-                if ((first_byte & 0b10000000) == 0b00000000) return 1; // Note the different bit pattern in this one.
-                if ((first_byte & 0b11100000) == 0b11000000) return 2;
-                if ((first_byte & 0b11110000) == 0b11100000) return 3;
-                if ((first_byte & 0b11111000) == 0b11110000) return 4;
-                return 0;
-            }
-
-            // Returns true if `ch` is a valid unicode ch (aka 'codepoint').
-            [[nodiscard]] constexpr bool IsValidCharacterCode(char32_t ch)
-            {
-                return ch <= 0x10ffff;
-            }
-
-            // Returns the amount of bytes needed to represent a character.
-            // If the character is invalid (use `IsValidCharacterCode` to check for validity) returns 4, which is the maximum possible length
-            [[nodiscard]] constexpr std::size_t CharacterCodeToLength(char32_t ch)
-            {
-                if (ch <= 0x7f) return 1;
-                if (ch <= 0x7ff) return 2;
-                if (ch <= 0xffff) return 3;
-                // Here `ch <= 0x10ffff`, or the character is invalid.
-                // Mathematically the cap should be `0x1fffff`, but Unicode defines the max value to be lower.
-                return 4;
-            }
-
-            // Encodes a character into UTF8.
-            // The minimal buffer length can be determined with `CharacterCodeToLength`.
-            // If the character is invalid, writes `default_char` instead.
-            // No null-terminator is added.
-            // Returns the amount of bytes written, equal to what `CharacterCodeToLength` would return.
-            [[nodiscard]] constexpr std::size_t EncodeCharToBuffer(char32_t ch, char *buffer)
-            {
-                if (!IsValidCharacterCode(ch))
-                    return EncodeCharToBuffer(default_char, buffer);
-
-                std::size_t len = CharacterCodeToLength(ch);
-                switch (len)
-                {
-                  case 1:
-                    *buffer = char(ch);
-                    break;
-                  case 2:
-                    *buffer++ = char(0b11000000 | (ch >> 6));
-                    *buffer   = char(0b10000000 | (ch & 0b00111111));
-                    break;
-                  case 3:
-                    *buffer++ = char(0b11100000 |  (ch >> 12));
-                    *buffer++ = char(0b10000000 | ((ch >>  6) & 0b00111111));
-                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
-                    break;
-                  case 4:
-                    *buffer++ = char(0b11110000 |  (ch >> 18));
-                    *buffer++ = char(0b10000000 | ((ch >> 12) & 0b00111111));
-                    *buffer++ = char(0b10000000 | ((ch >> 6 ) & 0b00111111));
-                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
-                    break;
-                }
-
-                return len;
-            }
-
-            // Encodes one string into another.
-            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
-            constexpr void Encode(std::u32string_view view, std::string &str)
-            {
-                str.clear();
-                str.reserve(view.size() * max_char_len);
-                for (char32_t ch : view)
-                {
-                    char buf[max_char_len];
-                    std::size_t len = EncodeCharToBuffer(ch, buf);
-                    str.append(buf, len);
-                }
-            }
-
-            // Decodes a UTF8 character.
-            // Returns a pointer to the first byte of the next character.
-            // If `end` is not null, it'll stop reading at `end`. In this case `end` will be returned.
-            [[nodiscard]] constexpr const char *FindNextCharacter(const char *data, const char *end = nullptr)
-            {
-                do
-                    data++;
-                while (data != end && !IsFirstByte(*data));
-
-                return data;
-            }
-
-            // Returns a decoded character or `default_char` on failure.
-            // If `end` is not null, it won't attempt to read past it.
-            // If `next_char` is not null, it will be set to point to the next byte after the current character.
-            // If `data == end`, returns '\0'. (If `end != 0` and `data > end`, also returns '\0'.)
-            // If `data == 0`, returns '\0'.
-            constexpr char32_t DecodeCharFromBuffer(const char *data, const char *end = nullptr, const char **next_char = nullptr)
-            {
-                // Stop if `data` is a null pointer.
-                if (!data)
-                {
-                    if (next_char)
-                        *next_char = nullptr;
-                    return 0;
-                }
-
-                // Stop if we have an empty string.
-                if (end && data >= end) // For `data >= end` to be well-defined, `end` has to be not null if `data` is not null.
-                {
-                    if (next_char)
-                        *next_char = data;
-                    return 0;
-                }
-
-                // Get character length.
-                std::size_t len = FirstByteToCharacterLength(*data);
-
-                // Stop if this is not a valid first byte.
-                if (len == 0)
-                {
-                    if (next_char)
-                        *next_char = FindNextCharacter(data, end);
-                    return default_char;
-                }
-
-                // Handle single byte characters.
-                if (len == 1)
-                {
-                    if (next_char)
-                        *next_char = data+1;
-                    return (unsigned char)*data;
-                }
-
-                // Stop if there is not enough characters left in `data`.
-                if (end && end - data < std::ptrdiff_t(len))
-                {
-                    if (next_char)
-                        *next_char = end;
-                    return default_char;
-                }
-
-                // Extract bits from the first byte.
-                char32_t ret = (unsigned char)*data & (0xff >> len); // `len + 1` would have the same effect as `len`, but it's longer to type.
-
-                // For each remaining byte...
-                for (std::size_t i = 1; i < len; i++)
-                {
-                    // Stop if it's a first byte of some character.
-                    if (IsFirstByte(data[i]))
-                    {
-                        if (next_char)
-                            *next_char = data + i;
-                        return default_char;
-                    }
-
-                    // Extract bits and append them to the code.
-                    ret = ret << 6 | ((unsigned char)data[i] & 0b00111111);
-                }
-
-                // Get next character position.
-                if (next_char)
-                    *next_char = data + len;
-
-                return ret;
-            }
-
-            // Decodes one string into another.
-            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
-            inline void Decode(std::string_view view, std::u32string &str)
-            {
-                str.clear();
-                str.reserve(view.size());
-                for (const char *cur = view.data(); cur - view.data() < std::ptrdiff_t(view.size());)
-                    str += uni::DecodeCharFromBuffer(cur, view.data() + view.size(), &cur);
-            }
-        }
-
-        // Demangles output from `typeid(...).name()`.
-        class Demangler
-        {
-            #if CFG_TA_CXXABI_DEMANGLE
-            char *buf_ptr = nullptr;
-            std::size_t buf_size = 0;
-            #endif
-
-          public:
-            CFG_TA_API Demangler();
-            Demangler(const Demangler &) = delete;
-            Demangler &operator=(const Demangler &) = delete;
-            CFG_TA_API ~Demangler();
-
-            // Demangles a name.
-            // On GCC ang Clang invokes `__cxa_demangle()`, on MSVC returns the string unchanged.
-            // The returned pointer remains as long as both the passed string and the class instance are alive.
-            // Preserve the class instance between calls to potentially reuse the buffer.
-            [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
-        };
-
-        // Given an exception, tries to get an error message from it, using the current modules. Shouldn't throw.
-        // Calls `func` at least once. The last call in the chain may or may not receive null `info` if this is an unknown exception.
-        // Hence, for completely unknown exceptions, calls `func(nullptr)`.
-        // Calls `func` multiple times for nested exceptions.
-        CFG_TA_API void GetExceptionInfo(const std::exception_ptr &e, const std::function<void(const BasicModule::ExceptionInfo *info)> &func);
-
-        // A class for composing 2D ASCII graphics.
-        class TextCanvas
-        {
-          public:
-            // Describes a cell, except for the character it stores.
-            struct CellInfo
-            {
-                TextStyle style;
-                bool important = false; // If this is true, will avoid overwriting this cell.
-            };
-
-          private:
-            struct Line
-            {
-                std::u32string text;
-                std::vector<CellInfo> info;
-            };
-            std::vector<Line> lines;
-
-            const CommonChars *chars = nullptr;
-
-          public:
-            TextCanvas(const CommonChars *chars) : chars(chars) {}
-
-            // Prints the canvas to a callback `func`, which is `(std::string_view string) -> void`.
-            template <typename F>
-            void PrintToCallback(const Terminal &terminal, F &&func) const
-            {
-                TextStyle cur_style;
-
-                std::string buffer;
-
-                for (const Line &line : lines)
-                {
-                    std::size_t segment_start = 0;
-
-                    auto FlushSegment = [&](std::size_t end_pos)
-                    {
-                        if (segment_start == end_pos)
-                            return;
-
-                        uni::Encode(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
-                        func(std::string_view(buffer));
-                        segment_start = end_pos;
-                    };
-
-                    if (terminal.enable_color)
-                    {
-                        for (std::size_t i = 0; i < line.text.size(); i++)
-                        {
-                            if (line.text[i] == ' ')
-                                continue;
-
-                            FlushSegment(i);
-                            func(std::string_view(terminal.AnsiDeltaString(cur_style, line.info[i].style).data()));
-                        }
-                    }
-
-                    FlushSegment(line.text.size());
-
-                    // Reset the style after the last line.
-                    // Must do it before the line feed, otherwise the "core dumped" message also gets colored.
-                    if (terminal.enable_color && &line == &lines.back() && cur_style != TextStyle{})
-                        func(terminal.AnsiResetString());
-
-                    func(std::string_view("\n"));
-                }
-            }
-
-            // Prints to a `terminal` stream.
-            CFG_TA_API void Print(const Terminal &terminal) const;
-
-            // The number of lines.
-            [[nodiscard]] CFG_TA_API std::size_t NumLines() const;
-
-            // Resize the canvas to have at least the specified number of lines.
-            CFG_TA_API void EnsureNumLines(std::size_t size);
-
-            // Resize the line to have at least the specified number of characters.
-            CFG_TA_API void EnsureLineSize(std::size_t line_number, std::size_t size);
-
-            // Inserts the line before the specified line index (or at the bottom of the canvas if given the number of lines).
-            CFG_TA_API void InsertLineBefore(std::size_t line_number);
-
-            // Whether a cell is free, aka has `.important == false`.
-            [[nodiscard]] CFG_TA_API bool IsCellFree(std::size_t line, std::size_t column) const;
-
-            // Checks if the space is free in the canvas.
-            // Examines a single line (at number `line`), starting at `column - gap`, checking `width + gap*2` characters.
-            // Returns false if at least one character has `.important == true`.
-            [[nodiscard]] CFG_TA_API bool IsLineFree(std::size_t line, std::size_t column, std::size_t width, std::size_t gap) const;
-
-            // Looks for a free space in the canvas.
-            // Searches for `width + gap*2` consecutive cells with `.important == false`.
-            // Starts looking at `(column - gap, starting_line)`, and proceeds downwards until it finds the free space,
-            // which could be below the canvas.
-            // Moves down in increments of `vertical_step`.
-            [[nodiscard]] CFG_TA_API std::size_t FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap, std::size_t vertical_step) const;
-
-            // Accesses the character for the specified cell. The cell must exist.
-            [[nodiscard]] CFG_TA_API char32_t &CharAt(std::size_t line, std::size_t pos);
-
-            // Accesses the cell info for the specified cell. The cell must exist.
-            [[nodiscard]] CFG_TA_API CellInfo &CellInfoAt(std::size_t line, std::size_t pos);
-
-            // Draws a string.
-            // Wanted to call this `DrawText`, but that conflicts with a WinAPI macro! >:o
-            // Returns `text.size()`.
-            CFG_TA_API std::size_t DrawString(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info = {.style = {}, .important = true});
-            // Draws a UTF8 text. Returns the text size after converting to UTF32.
-            CFG_TA_API std::size_t DrawString(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true});
-
-            // Draws a horizontal row of `ch`, starting at `(column, line_start)`, of width `width`.
-            // If `skip_important == true`, don't overwrite important cells.
-            // Returns `width`.
-            CFG_TA_API std::size_t DrawRow(char32_t ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info = {.style = {}, .important = true});
-
-            // Draws a vertical column of `ch`, starting at `(column, line_start)`, of height `height`.
-            // If `skip_important == true`, don't overwrite important cells.
-            CFG_TA_API void DrawColumn(char32_t ch, std::size_t line_start, std::size_t column, std::size_t height, bool skip_important, const CellInfo &info = {.style = {}, .important = true});
-
-            // Draws a horziontal bracket: `|___|`. Vertical columns skip important cells, but the bottom bar doesn't.
-            // The left column is on `column_start`, and the right one is on `column_start + width - 1`.
-            CFG_TA_API void DrawHorBracket(std::size_t line_start, std::size_t column_start, std::size_t height, std::size_t width, const CellInfo &info = {.style = {}, .important = true});
-
-            // Draws a little 1-high top bracket.
-            CFG_TA_API void DrawOverline(std::size_t line, std::size_t column_start, std::size_t width, const CellInfo &info = {.style = {}, .important = true});
-        };
 
         // Parsing C++ expressions.
         namespace expr
@@ -1807,10 +1474,469 @@ namespace ta_test
                     {"xor", KeywordKind::op},
                 };
             };
+        }
 
-            // Pretty-prints an expression to a canvas.
-            // Returns `expr.size()`.
-            CFG_TA_API std::size_t DrawExprToCanvas(TextCanvas &canvas, const Style &style, std::size_t line, std::size_t start, std::string_view expr);
+        // Common strings and text styles.
+        struct CommonData
+        {
+            // Styles:
+
+            TextStyle style_error = {.color = TextColor::light_red, .bold = true};
+            TextStyle style_note = {.color = TextColor::light_blue, .bold = true};
+            // File paths.
+            TextStyle style_path = {.color = TextColor::none};
+            // The offending macro call.
+            TextStyle style_failed_macro = {.color = TextColor::light_red, .bold = true};
+            // Highlighted expressions.
+            expr::Style style_expr;
+
+            // Characters:
+
+            std::string note_prefix = "NOTE: ";
+
+            // When printing a path, separates it from the line number.
+            std::string filename_linenumber_separator;
+            // When printing a path with a line number, this comes after the line number.
+            std::string filename_linenumber_suffix;
+
+            // Vertical bars, either standalone or in brackets.
+            char32_t bar{};
+            // Bottom brackets.
+            char32_t bracket_bottom{};
+            char32_t bracket_corner_bottom_left{};
+            char32_t bracket_corner_bottom_right{};
+            char32_t bracket_bottom_tail{};
+            // Top brackets.
+            char32_t bracket_top{};
+            char32_t bracket_corner_top_left{};
+            char32_t bracket_corner_top_right{};
+
+            // Other:
+
+            // When we print a macro call, it's indented by this many spaces.
+            std::size_t code_indentation = 4;
+
+            // Whether to pad the argument of `TA_CHECK()` with a space on each side.
+            // We can't check if the user actually had spaces, so we add them ourselves.
+            // They look nice anyway.
+            bool spaces_in_call_parentheses = true;
+
+            CommonData()
+            {
+                EnableUnicode(true);
+                EnableMsvcStylePaths(
+                #if CFG_TA_MSVC_STYLE_ERRORS
+                    true
+                #else
+                    false
+                #endif
+                );
+            }
+
+            void EnableUnicode(bool enable)
+            {
+                if (enable)
+                {
+                    bar = 0x2502; // BOX DRAWINGS LIGHT VERTICAL
+                    bracket_bottom = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
+                    bracket_corner_bottom_left = 0x2570; // BOX DRAWINGS LIGHT ARC UP AND RIGHT
+                    bracket_corner_bottom_right = 0x256f; // BOX DRAWINGS LIGHT ARC UP AND LEFT
+                    bracket_bottom_tail = 0x252c; // BOX DRAWINGS LIGHT DOWN AND HORIZONTAL
+                    bracket_top = 0x2500; // BOX DRAWINGS LIGHT HORIZONTAL
+                    bracket_corner_top_left = 0x256d; // BOX DRAWINGS LIGHT ARC DOWN AND RIGHT
+                    bracket_corner_top_right = 0x256e; // BOX DRAWINGS LIGHT ARC DOWN AND LEFT
+                }
+                else
+                {
+                    bar = '|';
+                    bracket_bottom = '_';
+                    bracket_corner_bottom_left = '|';
+                    bracket_corner_bottom_right = '|';
+                    bracket_bottom_tail = '_';
+                    bracket_top = '-';
+                    bracket_corner_top_left = '|';
+                    bracket_corner_top_right = '|';
+                }
+            }
+
+            void EnableMsvcStylePaths(bool enable)
+            {
+                if (enable)
+                {
+                    filename_linenumber_separator = "(";
+                    filename_linenumber_suffix = ")";
+                }
+                else
+                {
+                    filename_linenumber_separator = ":";
+                    filename_linenumber_suffix = "";
+                }
+            }
+
+            // Converts a source location to a string in the current preferred format.
+            [[nodiscard]] std::string LocationToString(const BasicModule::SourceLoc &loc) const
+            {
+                return CFG_TA_FMT_NAMESPACE::format("{}{}{}{}", loc.file, filename_linenumber_separator, loc.line, filename_linenumber_suffix);
+            }
+        };
+
+        // A mini unicode library.
+        namespace uni
+        {
+            // A placeholder value for invalid characters.
+            constexpr char32_t default_char = 0xfffd;
+
+            // Max bytes per character.
+            constexpr std::size_t max_char_len = 4;
+
+            // Given a byte, checks if it's the first byte of a multibyte character, or is a single-byte character.
+            // Even if this function returns true, `byte` can be an invalid first byte.
+            // To check for the byte validity, use `FirstByteToCharacterLength`.
+            [[nodiscard]] constexpr bool IsFirstByte(char byte)
+            {
+                return (byte & 0b11000000) != 0b10000000;
+            }
+
+            // Counts the number of codepoints (usually characters) in a valid UTF8 string, by counting the bytes matching `IsFirstByte()`.
+            [[nodiscard]] constexpr std::size_t CountFirstBytes(std::string_view string)
+            {
+                return std::size_t(std::count_if(string.begin(), string.end(), IsFirstByte));
+            }
+
+            // Given the first byte of a multibyte character (or a single-byte character), returns the amount of bytes occupied by the character.
+            // Returns 0 if this is not a valid first byte, or not a first byte at all.
+            [[nodiscard]] constexpr std::size_t FirstByteToCharacterLength(char first_byte)
+            {
+                if ((first_byte & 0b10000000) == 0b00000000) return 1; // Note the different bit pattern in this one.
+                if ((first_byte & 0b11100000) == 0b11000000) return 2;
+                if ((first_byte & 0b11110000) == 0b11100000) return 3;
+                if ((first_byte & 0b11111000) == 0b11110000) return 4;
+                return 0;
+            }
+
+            // Returns true if `ch` is a valid unicode ch (aka 'codepoint').
+            [[nodiscard]] constexpr bool IsValidCharacterCode(char32_t ch)
+            {
+                return ch <= 0x10ffff;
+            }
+
+            // Returns the amount of bytes needed to represent a character.
+            // If the character is invalid (use `IsValidCharacterCode` to check for validity) returns 4, which is the maximum possible length
+            [[nodiscard]] constexpr std::size_t CharacterCodeToLength(char32_t ch)
+            {
+                if (ch <= 0x7f) return 1;
+                if (ch <= 0x7ff) return 2;
+                if (ch <= 0xffff) return 3;
+                // Here `ch <= 0x10ffff`, or the character is invalid.
+                // Mathematically the cap should be `0x1fffff`, but Unicode defines the max value to be lower.
+                return 4;
+            }
+
+            // Encodes a character into UTF8.
+            // The minimal buffer length can be determined with `CharacterCodeToLength`.
+            // If the character is invalid, writes `default_char` instead.
+            // No null-terminator is added.
+            // Returns the amount of bytes written, equal to what `CharacterCodeToLength` would return.
+            [[nodiscard]] constexpr std::size_t EncodeCharToBuffer(char32_t ch, char *buffer)
+            {
+                if (!IsValidCharacterCode(ch))
+                    return EncodeCharToBuffer(default_char, buffer);
+
+                std::size_t len = CharacterCodeToLength(ch);
+                switch (len)
+                {
+                  case 1:
+                    *buffer = char(ch);
+                    break;
+                  case 2:
+                    *buffer++ = char(0b11000000 | (ch >> 6));
+                    *buffer   = char(0b10000000 | (ch & 0b00111111));
+                    break;
+                  case 3:
+                    *buffer++ = char(0b11100000 |  (ch >> 12));
+                    *buffer++ = char(0b10000000 | ((ch >>  6) & 0b00111111));
+                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
+                    break;
+                  case 4:
+                    *buffer++ = char(0b11110000 |  (ch >> 18));
+                    *buffer++ = char(0b10000000 | ((ch >> 12) & 0b00111111));
+                    *buffer++ = char(0b10000000 | ((ch >> 6 ) & 0b00111111));
+                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
+                    break;
+                }
+
+                return len;
+            }
+
+            // Encodes one string into another.
+            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
+            constexpr void Encode(std::u32string_view view, std::string &str)
+            {
+                str.clear();
+                str.reserve(view.size() * max_char_len);
+                for (char32_t ch : view)
+                {
+                    char buf[max_char_len];
+                    std::size_t len = EncodeCharToBuffer(ch, buf);
+                    str.append(buf, len);
+                }
+            }
+
+            // Decodes a UTF8 character.
+            // Returns a pointer to the first byte of the next character.
+            // If `end` is not null, it'll stop reading at `end`. In this case `end` will be returned.
+            [[nodiscard]] constexpr const char *FindNextCharacter(const char *data, const char *end = nullptr)
+            {
+                do
+                    data++;
+                while (data != end && !IsFirstByte(*data));
+
+                return data;
+            }
+
+            // Returns a decoded character or `default_char` on failure.
+            // If `end` is not null, it won't attempt to read past it.
+            // If `next_char` is not null, it will be set to point to the next byte after the current character.
+            // If `data == end`, returns '\0'. (If `end != 0` and `data > end`, also returns '\0'.)
+            // If `data == 0`, returns '\0'.
+            constexpr char32_t DecodeCharFromBuffer(const char *data, const char *end = nullptr, const char **next_char = nullptr)
+            {
+                // Stop if `data` is a null pointer.
+                if (!data)
+                {
+                    if (next_char)
+                        *next_char = nullptr;
+                    return 0;
+                }
+
+                // Stop if we have an empty string.
+                if (end && data >= end) // For `data >= end` to be well-defined, `end` has to be not null if `data` is not null.
+                {
+                    if (next_char)
+                        *next_char = data;
+                    return 0;
+                }
+
+                // Get character length.
+                std::size_t len = FirstByteToCharacterLength(*data);
+
+                // Stop if this is not a valid first byte.
+                if (len == 0)
+                {
+                    if (next_char)
+                        *next_char = FindNextCharacter(data, end);
+                    return default_char;
+                }
+
+                // Handle single byte characters.
+                if (len == 1)
+                {
+                    if (next_char)
+                        *next_char = data+1;
+                    return (unsigned char)*data;
+                }
+
+                // Stop if there is not enough characters left in `data`.
+                if (end && end - data < std::ptrdiff_t(len))
+                {
+                    if (next_char)
+                        *next_char = end;
+                    return default_char;
+                }
+
+                // Extract bits from the first byte.
+                char32_t ret = (unsigned char)*data & (0xff >> len); // `len + 1` would have the same effect as `len`, but it's longer to type.
+
+                // For each remaining byte...
+                for (std::size_t i = 1; i < len; i++)
+                {
+                    // Stop if it's a first byte of some character.
+                    if (IsFirstByte(data[i]))
+                    {
+                        if (next_char)
+                            *next_char = data + i;
+                        return default_char;
+                    }
+
+                    // Extract bits and append them to the code.
+                    ret = ret << 6 | ((unsigned char)data[i] & 0b00111111);
+                }
+
+                // Get next character position.
+                if (next_char)
+                    *next_char = data + len;
+
+                return ret;
+            }
+
+            // Decodes one string into another.
+            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
+            inline void Decode(std::string_view view, std::u32string &str)
+            {
+                str.clear();
+                str.reserve(view.size());
+                for (const char *cur = view.data(); cur - view.data() < std::ptrdiff_t(view.size());)
+                    str += uni::DecodeCharFromBuffer(cur, view.data() + view.size(), &cur);
+            }
+        }
+
+        // Demangles output from `typeid(...).name()`.
+        class Demangler
+        {
+            #if CFG_TA_CXXABI_DEMANGLE
+            char *buf_ptr = nullptr;
+            std::size_t buf_size = 0;
+            #endif
+
+          public:
+            CFG_TA_API Demangler();
+            Demangler(const Demangler &) = delete;
+            Demangler &operator=(const Demangler &) = delete;
+            CFG_TA_API ~Demangler();
+
+            // Demangles a name.
+            // On GCC ang Clang invokes `__cxa_demangle()`, on MSVC returns the string unchanged.
+            // The returned pointer remains as long as both the passed string and the class instance are alive.
+            // Preserve the class instance between calls to potentially reuse the buffer.
+            [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
+        };
+
+        // A class for composing 2D ASCII graphics.
+        class TextCanvas
+        {
+          public:
+            // Describes a cell, except for the character it stores.
+            struct CellInfo
+            {
+                TextStyle style;
+                bool important = false; // If this is true, will avoid overwriting this cell.
+            };
+
+          private:
+            struct Line
+            {
+                std::u32string text;
+                std::vector<CellInfo> info;
+            };
+            std::vector<Line> lines;
+
+            const CommonData *data = nullptr;
+
+          public:
+            TextCanvas(const CommonData *data) : data(data) {}
+
+            [[nodiscard]] const CommonData *GetCommonData() const {return data;}
+
+            // Prints the canvas to a callback `func`, which is `(std::string_view string) -> void`.
+            template <typename F>
+            void PrintToCallback(const Terminal &terminal, F &&func) const
+            {
+                TextStyle cur_style;
+
+                std::string buffer;
+
+                for (const Line &line : lines)
+                {
+                    std::size_t segment_start = 0;
+
+                    auto FlushSegment = [&](std::size_t end_pos)
+                    {
+                        if (segment_start == end_pos)
+                            return;
+
+                        uni::Encode(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
+                        func(std::string_view(buffer));
+                        segment_start = end_pos;
+                    };
+
+                    if (terminal.enable_color)
+                    {
+                        for (std::size_t i = 0; i < line.text.size(); i++)
+                        {
+                            if (line.text[i] == ' ')
+                                continue;
+
+                            FlushSegment(i);
+                            func(std::string_view(terminal.AnsiDeltaString(cur_style, line.info[i].style).data()));
+                        }
+                    }
+
+                    FlushSegment(line.text.size());
+
+                    // Reset the style after the last line.
+                    // Must do it before the line feed, otherwise the "core dumped" message also gets colored.
+                    if (terminal.enable_color && &line == &lines.back() && cur_style != TextStyle{})
+                        func(terminal.AnsiResetString());
+
+                    func(std::string_view("\n"));
+                }
+            }
+
+            // Prints to a `terminal` stream.
+            CFG_TA_API void Print(const Terminal &terminal) const;
+
+            // The number of lines.
+            [[nodiscard]] CFG_TA_API std::size_t NumLines() const;
+
+            // Resize the canvas to have at least the specified number of lines.
+            CFG_TA_API void EnsureNumLines(std::size_t size);
+
+            // Resize the line to have at least the specified number of characters.
+            CFG_TA_API void EnsureLineSize(std::size_t line_number, std::size_t size);
+
+            // Inserts the line before the specified line index (or at the bottom of the canvas if given the number of lines).
+            CFG_TA_API void InsertLineBefore(std::size_t line_number);
+
+            // Whether a cell is free, aka has `.important == false`.
+            [[nodiscard]] CFG_TA_API bool IsCellFree(std::size_t line, std::size_t column) const;
+
+            // Checks if the space is free in the canvas.
+            // Examines a single line (at number `line`), starting at `column - gap`, checking `width + gap*2` characters.
+            // Returns false if at least one character has `.important == true`.
+            [[nodiscard]] CFG_TA_API bool IsLineFree(std::size_t line, std::size_t column, std::size_t width, std::size_t gap) const;
+
+            // Looks for a free space in the canvas.
+            // Searches for `width + gap*2` consecutive cells with `.important == false`.
+            // Starts looking at `(column - gap, starting_line)`, and proceeds downwards until it finds the free space,
+            // which could be below the canvas.
+            // Moves down in increments of `vertical_step`.
+            [[nodiscard]] CFG_TA_API std::size_t FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap, std::size_t vertical_step) const;
+
+            // Accesses the character for the specified cell. The cell must exist.
+            [[nodiscard]] CFG_TA_API char32_t &CharAt(std::size_t line, std::size_t pos);
+
+            // Accesses the cell info for the specified cell. The cell must exist.
+            [[nodiscard]] CFG_TA_API CellInfo &CellInfoAt(std::size_t line, std::size_t pos);
+
+            // Draws a string.
+            // Wanted to call this `DrawText`, but that conflicts with a WinAPI macro! >:o
+            // Returns `text.size()`.
+            CFG_TA_API std::size_t DrawString(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info = {.style = {}, .important = true});
+            // Draws a UTF8 text. Returns the text size after converting to UTF32.
+            CFG_TA_API std::size_t DrawString(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info = {.style = {}, .important = true});
+
+            // Draws a horizontal row of `ch`, starting at `(column, line_start)`, of width `width`.
+            // If `skip_important == true`, don't overwrite important cells.
+            // Returns `width`.
+            CFG_TA_API std::size_t DrawRow(char32_t ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info = {.style = {}, .important = true});
+
+            // Draws a vertical column of `ch`, starting at `(column, line_start)`, of height `height`.
+            // If `skip_important == true`, don't overwrite important cells.
+            CFG_TA_API void DrawColumn(char32_t ch, std::size_t line_start, std::size_t column, std::size_t height, bool skip_important, const CellInfo &info = {.style = {}, .important = true});
+
+            // Draws a horziontal bracket: `|___|`. Vertical columns skip important cells, but the bottom bar doesn't.
+            // The left column is on `column_start`, and the right one is on `column_start + width - 1`.
+            CFG_TA_API void DrawHorBracket(std::size_t line_start, std::size_t column_start, std::size_t height, std::size_t width, const CellInfo &info = {.style = {}, .important = true});
+
+            // Draws a little 1-high top bracket.
+            CFG_TA_API void DrawOverline(std::size_t line, std::size_t column_start, std::size_t width, const CellInfo &info = {.style = {}, .important = true});
+        };
+
+        namespace expr
+        {
+            // Pretty-prints an expression with syntax highlighting. Returns `expr.size()`.
+            // If `style` is not specified, uses the one from the canvas.
+            CFG_TA_API std::size_t DrawToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr, const Style *style = nullptr);
         }
 
         // Escapes a string, writes the result to `out_iter`. Includes quotes automatically.
@@ -1879,12 +2005,11 @@ namespace ta_test
         BasicPrintingModule &operator=(BasicPrintingModule &&) = default;
 
         Terminal terminal;
-        CommonStyles common_styles;
-        CommonChars common_chars;
+        text::CommonData common_data;
 
         virtual void EnableUnicode(bool enable)
         {
-            common_chars.EnableUnicode(enable);
+            common_data.EnableUnicode(enable);
         }
 
         // This is called whenever the context information needs to be printed.
@@ -1932,16 +2057,16 @@ namespace ta_test
         struct ArgWrapper
         {
             BasicModule::BasicAssertionInfo *assertion = nullptr;
-            BasicModule::BasicAssertionInfo::StoredArg *target = nullptr;
+            BasicModule::BasicAssertionExpr::StoredArg *target = nullptr;
 
             // Raises a hard error if the assertion owning this argument isn't currently running in this thread.
             CFG_TA_API void EnsureAssertionIsRunning();
 
-            ArgWrapper(BasicModule::BasicAssertionInfo &assertion, BasicModule::BasicAssertionInfo::StoredArg &target)
+            ArgWrapper(BasicModule::BasicAssertionInfo &assertion, BasicModule::BasicAssertionExpr::StoredArg &target)
                 : assertion(&assertion), target(&target)
             {
                 EnsureAssertionIsRunning();
-                target.state = BasicModule::BasicAssertionInfo::StoredArg::State::in_progress;
+                target.state = BasicModule::BasicAssertionExpr::StoredArg::State::in_progress;
             }
             ArgWrapper(const ArgWrapper &) = default;
             ArgWrapper &operator=(const ArgWrapper &) = default;
@@ -1953,12 +2078,13 @@ namespace ta_test
                 (void)counter; // Unused, but passing it helps with parsing.
                 EnsureAssertionIsRunning();
                 target->value = ToString<std::remove_cvref_t<T>>{}(arg);
-                target->state = BasicModule::BasicAssertionInfo::StoredArg::State::done;
+                target->state = BasicModule::BasicAssertionExpr::StoredArg::State::done;
                 return std::forward<T>(arg);
             }
         };
 
         // An intermediate base class that `AssertWrapper<T>` inherits from.
+        // You can also inherit custom assertion classes from this, if they don't need the expression decomposition provided by `AssertWrapper<T>`.
         class BasicAssertWrapper : public BasicModule::BasicAssertionInfo, public context::FrameGuard
         {
             bool finished = false;
@@ -2033,8 +2159,8 @@ namespace ta_test
             CFG_TA_API void PostEvaluate(bool value, const std::optional<std::string> &fail_message);
         };
 
-        template <bool IsSoftAssertion, ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
-        struct AssertWrapper : BasicAssertWrapper
+        template <ConstString MacroName, ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
+        struct AssertWrapper : BasicAssertWrapper, BasicModule::BasicAssertionExpr
         {
             // The number of arguments.
             static constexpr std::size_t num_args = []{
@@ -2174,13 +2300,25 @@ namespace ta_test
             }();
 
             static constexpr BasicModule::SourceLoc location{.file = FileName.view(), .line = LineNumber};
-            const BasicModule::SourceLoc &SourceLocation() const override {return location;}
 
-            bool IsSoft() const override {return IsSoftAssertion;}
             std::string_view Expr() const override {return RawString.view();}
             std::span<const ArgInfo> ArgsInfo() const override {return arg_data.info;}
             std::span<const std::size_t> ArgsInDrawOrder() const override {return arg_data.args_in_draw_order;}
             std::span<const StoredArg> StoredArgs() const override {return stored_args;}
+
+            const BasicModule::SourceLoc &SourceLocation() const override {return location;}
+            DecoVar GetElement(int index) const override
+            {
+                static constexpr ConstString name_with_paren = MacroName + "(";
+                if (index == 0)
+                    return DecoFixedString{.string = name_with_paren.view()};
+                else if (index == 1)
+                    return DecoExprWithArgs{.expr = this};
+                else if (index == 2)
+                    return DecoFixedString{.string = ")"};
+                else
+                    return std::monostate{};
+            }
 
             [[nodiscard]] ArgWrapper BeginArg(int counter)
             {
@@ -2300,6 +2438,56 @@ namespace ta_test
         // Touch to register a test. `T` is `SpecificTest<??>`.
         template <typename T>
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
+
+
+        class MustThrowWrapper
+        {
+            const BasicModule::MustThrowInfo *info = nullptr;
+
+            // Fails the test because there was no exception.
+            [[noreturn]] CFG_TA_API void MissingException();
+
+            MustThrowWrapper(const BasicModule::MustThrowInfo *info) : info(info) {}
+
+          public:
+            MustThrowWrapper() {}
+
+            // Makes an instance of this class.
+            template <ConstString File, int Line, ConstString MacroName, ConstString Expr>
+            [[nodiscard]] static MustThrowWrapper Make()
+            {
+                static const BasicModule::MustThrowInfo info_storage = []{
+                    BasicModule::MustThrowInfo ret;
+                    ret.loc = {.file = File.view(), .line = Line};
+                    ret.macro_name = MacroName.view();
+                    ret.expr = Expr.view();
+                    return ret;
+                }();
+
+                return &info_storage;
+            }
+
+            MustThrowWrapper(const MustThrowWrapper &) = delete;
+            MustThrowWrapper &operator=(const MustThrowWrapper &) = delete;
+
+            template <typename F>
+            CaughtException operator()(F &&func) &&
+            {
+                if (!ThreadState().current_test)
+                    HardError("Attempted to use `TA_MUST_THROW(...)`, but no test is currently running.", HardErrorKind::user);
+
+                try
+                {
+                    std::forward<F>(func)();
+                }
+                catch (...)
+                {
+                    return CaughtException(info, std::current_exception());
+                }
+
+                MissingException();
+            }
+        };
     }
 
     // Use this to run tests.
@@ -2641,25 +2829,16 @@ namespace ta_test
 
             // The primary error message.
             // Uses `common_styles.error` as a style.
-            std::u32string chars_assertion_failed = U"ASSERTION FAILED:";
+            std::u32string chars_assertion_failed = U"Assertion failed:";
             // The enclosing assertions.
             TextStyle style_in_assertion = {.color = TextColor::light_magenta, .bold = true};
-            std::u32string chars_in_assertion = U"WHILE CHECKING ASSERTION:";
+            std::u32string chars_in_assertion = U"While checking assertion:";
 
             // How to print the filename.
             TextStyle style_filename = {.color = TextColor::none};
 
             // How to print the custom error message coming from the user (passed to the assertion macro).
             TextStyle style_user_message = {.color = TextColor::none, .bold = true};
-
-            // How to print the assertion macro itself.
-            TextStyle style_assertion_macro = {.color = TextColor::light_red, .bold = true};
-            std::u32string chars_assertion_macro_prefix = U"TA_CHECK( ";
-            std::u32string chars_assertion_macro_prefix_soft = U"TA_SOFT_CHECK( ";
-            std::u32string chars_assertion_macro_suffix = U" )";
-
-            // Styles for the expression tokens.
-            text::expr::Style style_expr;
 
             // The argument colors. They are cycled in this order.
             std::vector<TextStyle> style_arguments = {
@@ -2685,10 +2864,6 @@ namespace ta_test
             // Same, but when there's more than one subexpression. This should never happen.
             std::u32string chars_in_this_subexpr_inexact = U"in here?";
 
-            // Indent the printed code by this many spaces.
-            // The indentation is only applied once, since we don't print multiline code.
-            std::size_t printed_code_indentation = 4;
-
             void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) override;
             bool PrintContextFrame(const context::BasicFrame &frame) override;
 
@@ -2701,7 +2876,7 @@ namespace ta_test
         template <typename E, typename F = void>
         struct GenericExceptionAnalyzer : BasicModule
         {
-            std::optional<ExceptionInfoWithNested> OnExplainException(const std::exception_ptr &e) const override
+            std::optional<ExplainedException> OnExplainException(const std::exception_ptr &e) const override
             {
                 try
                 {
@@ -2709,8 +2884,8 @@ namespace ta_test
                 }
                 catch (E &e)
                 {
-                    ExceptionInfoWithNested ret;
-                    ret.type_name = text::Demangler{}(typeid(e).name());
+                    ExplainedException ret;
+                    ret.type = typeid(e);
                     if constexpr (std::is_void_v<F>)
                         ret.message = e.what();
                     else
@@ -2745,6 +2920,14 @@ namespace ta_test
             std::string chars_type_suffix = ": ";
 
             void OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e) override;
+        };
+
+        // Prints things related to `TA_MUST_THROW()`.
+        struct MustThrowPrinter : BasicPrintingModule
+        {
+            std::string chars_expected_exception = "Expected exception:";
+
+            void OnMissingException(const MustThrowInfo &data) override;
         };
 
         // Detects whether the debugger is attached in a platform-specific way.

@@ -35,18 +35,29 @@ ta_test::context::Context ta_test::context::CurrentContext()
     return detail::ThreadState().context_stack;
 }
 
-void ta_test::context::FrameGuard::PushFrame(std::unique_ptr<const BasicFrame> ptr)
+ta_test::context::FrameGuard::FrameGuard(const BasicFrame *frame)
 {
-    detail::ThreadState().context_stack.push_back(std::move(ptr));
+    detail::ThreadState().context_stack.push_back(frame);
 }
 
 ta_test::context::FrameGuard::~FrameGuard()
 {
+    if (!frame_ptr)
+        return;
+
     auto &thread_state = detail::ThreadState();
-    if (thread_state.context_stack.empty() || thread_state.context_stack.back().get() != frame_ptr)
+    if (thread_state.context_stack.empty() || thread_state.context_stack.back() != frame_ptr)
         HardError("The context stack is corrupted.");
 
     thread_state.context_stack.pop_back();
+}
+
+std::string ta_test::SingleException::GetTypeName() const
+{
+    if (IsTypeKnown())
+        return text::Demangler{}(type.name());
+    else
+        return "";
 }
 
 void ta_test::HardError(std::string_view message, HardErrorKind kind)
@@ -265,38 +276,6 @@ const char *ta_test::text::Demangler::operator()(const char *name)
     #endif
 }
 
-void ta_test::text::GetExceptionInfo(const std::exception_ptr &e, const std::function<void(const BasicModule::ExceptionInfo *info)> &func)
-{
-    detail::GlobalThreadState &thread_state = detail::ThreadState();
-    if (!thread_state.current_test)
-        HardError("The current thread currently isn't running any test, can't use `ExceptionToMessage()`.");
-
-    for (auto *m : thread_state.current_test->all_tests->modules->GetModulesImplementing<BasicModule::InterfaceFunction::OnExplainException>())
-    {
-        std::optional<ta_test::BasicModule::ExceptionInfoWithNested> opt;
-        try
-        {
-            opt = m->OnExplainException(e);
-        }
-        catch (...)
-        {
-            // This means the user doesn't have to write `catch (...)` in every handler.
-            // They'd likely forget that.
-            continue;
-        }
-
-        if (opt)
-        {
-            func(&*opt);
-            if (opt->nested_exception)
-                GetExceptionInfo(opt->nested_exception, func);
-            return;
-        }
-    }
-
-    func(nullptr);
-}
-
 void ta_test::text::TextCanvas::Print(const Terminal &terminal) const
 {
     PrintToCallback(terminal, [&](std::string_view string){terminal.Print("%.*s", int(string.size()), string.data());});
@@ -493,17 +472,17 @@ void ta_test::text::TextCanvas::DrawHorBracket(std::size_t line_start, std::size
     // Sides.
     if (height > 1)
     {
-        DrawColumn(chars->bar, line_start, column_start, height - 1, true, info);
-        DrawColumn(chars->bar, line_start, column_start + width - 1, height - 1, true, info);
+        DrawColumn(data->bar, line_start, column_start, height - 1, true, info);
+        DrawColumn(data->bar, line_start, column_start + width - 1, height - 1, true, info);
     }
 
     // Bottom.
     if (width > 2)
-        DrawRow(chars->bracket_bottom, line_start + height - 1, column_start + 1, width - 2, false, info);
+        DrawRow(data->bracket_bottom, line_start + height - 1, column_start + 1, width - 2, false, info);
 
     // Corners.
-    DrawRow(chars->bracket_corner_bottom_left, line_start + height - 1, column_start, 1, false, info);
-    DrawRow(chars->bracket_corner_bottom_right, line_start + height - 1, column_start + width - 1, 1, false, info);
+    DrawRow(data->bracket_corner_bottom_left, line_start + height - 1, column_start, 1, false, info);
+    DrawRow(data->bracket_corner_bottom_right, line_start + height - 1, column_start + width - 1, 1, false, info);
 }
 
 void ta_test::text::TextCanvas::DrawOverline(std::size_t line, std::size_t column_start, std::size_t width, const CellInfo &info)
@@ -513,15 +492,18 @@ void ta_test::text::TextCanvas::DrawOverline(std::size_t line, std::size_t colum
 
     // Middle part.
     if (width > 2)
-        DrawRow(chars->bracket_top, line, column_start + 1, width - 2, false, info);
+        DrawRow(data->bracket_top, line, column_start + 1, width - 2, false, info);
 
     // Corners.
-    DrawRow(chars->bracket_corner_top_left, line, column_start, 1, false, info);
-    DrawRow(chars->bracket_corner_top_right, line, column_start + width - 1, 1, false, info);
+    DrawRow(data->bracket_corner_top_left, line, column_start, 1, false, info);
+    DrawRow(data->bracket_corner_top_right, line, column_start + width - 1, 1, false, info);
 }
 
-std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Style &style, std::size_t line, std::size_t start, std::string_view expr)
+std::size_t ta_test::text::expr::DrawToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr, const Style *style)
 {
+    if (!style)
+        style = &canvas.GetCommonData()->style_expr;
+
     canvas.DrawString(line, start, expr);
     std::size_t i = 0;
     CharKind prev_kind = CharKind::normal;
@@ -538,25 +520,25 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
         const TextStyle *ident_style = nullptr;
 
         // Check if this is a keyword.
-        auto it = style.highlighted_keywords.find(ident);
-        if (it != style.highlighted_keywords.end())
+        auto it = style->highlighted_keywords.find(ident);
+        if (it != style->highlighted_keywords.end())
         {
             switch (it->second)
             {
               case KeywordKind::generic:
-                ident_style = &style.keyword_generic;
+                ident_style = &style->keyword_generic;
                 break;
               case KeywordKind::value:
-                ident_style = &style.keyword_value;
+                ident_style = &style->keyword_value;
                 break;
               case KeywordKind::op:
-                ident_style = &style.keyword_op;
+                ident_style = &style->keyword_op;
                 break;
             }
         }
         else if (std::all_of(ident.begin(), ident.end(), [](char ch){return chars::IsIdentifierChar(ch) && !chars::IsAlphaLowercase(ch);}))
         {
-            ident_style = &style.all_caps;
+            ident_style = &style->all_caps;
         }
 
         // If this identifier needs a custom style...
@@ -586,7 +568,7 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
         if (prev_kind == CharKind::raw_string && kind != CharKind::raw_string)
         {
             for (std::size_t j = 0; j < raw_string_separator_len; j++)
-                canvas.CellInfoAt(line, start + i - j - 1).style = style.raw_string_delimiters;
+                canvas.CellInfoAt(line, start + i - j - 1).style = style->raw_string_delimiters;
         }
 
         switch (kind)
@@ -608,7 +590,7 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
 
                     // Backtrack and make the leading `.` a number too, if it's there.
                     if (i > 0 && expr[i-1] == '.')
-                        canvas.CellInfoAt(line, start + i - 1).style = style.number;
+                        canvas.CellInfoAt(line, start + i - 1).style = style->number;
                 }
                 else if (chars::IsIdentifierChar(ch))
                 {
@@ -635,13 +617,13 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
                 switch (prev_string_kind)
                 {
                   case CharKind::string:
-                    info.style = style.string_suffix;
+                    info.style = style->string_suffix;
                     break;
                   case CharKind::character:
-                    info.style = style.character_suffix;
+                    info.style = style->character_suffix;
                     break;
                   case CharKind::raw_string:
-                    info.style = style.raw_string_suffix;
+                    info.style = style->raw_string_suffix;
                     break;
                   default:
                     HardError("Lexer error during pretty-printing.");
@@ -649,13 +631,13 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
                 }
             }
             else if (is_number_suffix)
-                info.style = style.number_suffix;
+                info.style = style->number_suffix;
             else if (is_number)
-                info.style = style.number;
+                info.style = style->number;
             else if (is_punct)
-                info.style = style.punct;
+                info.style = style->punct;
             else
-                info.style = style.normal;
+                info.style = style->normal;
             break;
           case CharKind::string:
           case CharKind::character:
@@ -676,13 +658,13 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
                     switch (prev_string_kind)
                     {
                       case CharKind::string:
-                        target_style = style.string_prefix;
+                        target_style = style->string_prefix;
                         break;
                       case CharKind::character:
-                        target_style = style.character_prefix;
+                        target_style = style->character_prefix;
                         break;
                       case CharKind::raw_string:
-                        target_style = style.raw_string_prefix;
+                        target_style = style->raw_string_prefix;
                         break;
                       default:
                         HardError("Lexer error during pretty-printing.");
@@ -701,17 +683,17 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
             switch (kind)
             {
               case CharKind::string:
-                info.style = style.string;
+                info.style = style->string;
                 break;
               case CharKind::character:
-                info.style = style.character;
+                info.style = style->character;
                 break;
               case CharKind::raw_string:
               case CharKind::raw_string_initial_sep:
                 if (kind == CharKind::raw_string_initial_sep || prev_kind == CharKind::raw_string_initial_sep)
-                    info.style = style.raw_string_delimiters;
+                    info.style = style->raw_string_delimiters;
                 else
-                    info.style = style.raw_string;
+                    info.style = style->raw_string;
                 break;
               default:
                 HardError("Lexer error during pretty-printing.");
@@ -719,10 +701,10 @@ std::size_t ta_test::text::expr::DrawExprToCanvas(TextCanvas &canvas, const Styl
             }
             break;
           case CharKind::string_escape_slash:
-            info.style = style.string;
+            info.style = style->string;
             break;
           case CharKind::character_escape_slash:
-            info.style = style.character;
+            info.style = style->character;
             break;
         }
 
@@ -770,11 +752,46 @@ void ta_test::BasicPrintingModule::PrintNote(std::string_view text) const
 {
     terminal.Print("%s%s%s%.*s%s\n",
         terminal.AnsiResetString().data(),
-        terminal.AnsiDeltaString({}, common_styles.note).data(),
-        common_chars.note_prefix.c_str(),
+        terminal.AnsiDeltaString({}, common_data.style_note).data(),
+        common_data.note_prefix.c_str(),
         int(text.size()), text.data(),
         terminal.AnsiResetString().data()
     );
+}
+
+void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<void(SingleException elem)> &func)
+{
+    detail::GlobalThreadState &thread_state = detail::ThreadState();
+    if (!thread_state.current_test)
+        HardError("The current thread currently isn't running any test, can't use `AnalyzeException()`.", HardErrorKind::user);
+
+    for (auto *m : thread_state.current_test->all_tests->modules->GetModulesImplementing<BasicModule::InterfaceFunction::OnExplainException>())
+    {
+        std::optional<BasicModule::ExplainedException> opt;
+        try
+        {
+            opt = m->OnExplainException(e);
+        }
+        catch (...)
+        {
+            // This means the user doesn't have to write `catch (...)` in every handler.
+            // They'd likely forget that.
+            continue;
+        }
+
+        if (opt)
+        {
+            if (opt->type == typeid(void))
+                HardError("`OnExplainException()` must not return `.type == typeid(void)`, that's reserved for unknown exceptions.", HardErrorKind::user);
+            func({.exception = e, .type = opt->type, .message = std::move(opt->message)});
+            if (opt->nested_exception)
+                AnalyzeException(opt->nested_exception, func);
+            return;
+        }
+    }
+
+    // Unknown exception type.
+    func({});
 }
 
 void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
@@ -792,7 +809,7 @@ void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
 }
 
 ta_test::detail::BasicAssertWrapper::BasicAssertWrapper()
-    : FrameGuard(context::AssertionFrame(this))
+    : FrameGuard(this)
 {
     GlobalThreadState &thread_state = ThreadState();
     if (!thread_state.current_test)
@@ -937,6 +954,21 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
     state.name_prefixes_to_order.try_emplace(name, state.name_prefixes_to_order.size());
 }
 
+void ta_test::detail::MustThrowWrapper::MissingException()
+{
+    auto &thread_state = ThreadState();
+
+    // This check should be redundant, since `operator()` already checks the same thing.
+    // But it's better to have it, in case something changes in the future.
+    if (!thread_state.current_test)
+        HardError("Attempted to use `TA_MUST_THROW(...)`, but no test is currently running.", HardErrorKind::user);
+
+    thread_state.FailCurrentTest();
+    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(*info);
+
+    throw InterruptTestException{};
+}
+
 void ta_test::Runner::SetDefaultModules()
 {
     modules.clear();
@@ -950,6 +982,7 @@ void ta_test::Runner::SetDefaultModules()
     modules.push_back(MakeModule<modules::AssertionPrinter>());
     modules.push_back(MakeModule<modules::DefaultExceptionAnalyzer>());
     modules.push_back(MakeModule<modules::ExceptionPrinter>());
+    modules.push_back(MakeModule<modules::MustThrowPrinter>());
     modules.push_back(MakeModule<modules::DebuggerDetector>());
     modules.push_back(MakeModule<modules::DebuggerStatePrinter>());
 }
@@ -1382,7 +1415,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
         TextStyle cur_style;
         terminal.Print("%s\n%s%s\n\n",
             terminal.AnsiResetString().data(),
-            terminal.AnsiDeltaString(cur_style, common_styles.error).data(),
+            terminal.AnsiDeltaString(cur_style, common_data.style_error).data(),
             chars_summary_tests_failed.c_str()
         );
 
@@ -1427,15 +1460,15 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
                 std::size_t gap_to_separator = max_test_name_width - (stack.size() * indentation_width + prefix_width + (is_last_segment ? 0 : 1/*for the slash*/) + segment.size());
 
                 // Print the test name.
-                auto style_a = terminal.AnsiDeltaString(cur_style, is_last_segment ? style_summary_failed_name : style_summary_failed_group_name);
-                auto style_b = terminal.AnsiDeltaString(cur_style, style_summary_path_separator);
+                auto st_name = terminal.AnsiDeltaString(cur_style, is_last_segment ? style_summary_failed_name : style_summary_failed_group_name);
+                auto st_separator = terminal.AnsiDeltaString(cur_style, style_summary_path_separator);
                 terminal.Print("%s%s%.*s%s%*s%s%s",
-                    style_a.data(),
+                    st_name.data(),
                     chars_test_prefix.c_str(),
                     int(segment.size()), segment.data(),
                     is_last_segment ? "" : "/",
                     int(gap_to_separator), "",
-                    style_b.data(),
+                    st_separator.data(),
                     chars_summary_path_separator.c_str()
                 );
 
@@ -1444,7 +1477,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
                 {
                     terminal.Print("%s%s",
                         terminal.AnsiDeltaString(cur_style, style_summary_path).data(),
-                        common_chars.LocationToString(test->Location()).data()
+                        common_data.LocationToString(test->Location()).data()
                     );
                 }
 
@@ -1482,28 +1515,28 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestIn
         // Test index (if this is the last segment).
         if (is_last_segment)
         {
-            auto style_a = terminal.AnsiDeltaString(cur_style, style_index);
-            auto style_b = terminal.AnsiDeltaString(cur_style, style_total_count);
+            auto st_index = terminal.AnsiDeltaString(cur_style, style_index);
+            auto st_total_count = terminal.AnsiDeltaString(cur_style, style_total_count);
 
             terminal.Print("%s%*zu%s/%zu",
-                style_a.data(),
+                st_index.data(),
                 num_tests_width, state.test_counter + 1,
-                style_b.data(),
+                st_total_count.data(),
                 data.all_tests->num_tests
             );
 
             // Failed test count.
             if (data.all_tests->failed_tests.size() > 0)
             {
-                auto style_c = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
-                auto style_d = terminal.AnsiDeltaString(cur_style, style_failed_count);
-                auto style_e = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
+                auto st_deco_l = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
+                auto st_num_failed = terminal.AnsiDeltaString(cur_style, style_failed_count);
+                auto st_deco_r = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
 
                 terminal.Print(" %s[%s%zu%s]",
-                    style_c.data(),
-                    style_d.data(),
+                    st_deco_l.data(),
+                    st_num_failed.data(),
                     data.all_tests->failed_tests.size(),
-                    style_e.data()
+                    st_deco_r.data()
                 );
             }
         }
@@ -1586,10 +1619,11 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestResults
 {
     TextStyle cur_style;
 
-    auto style_message = terminal.AnsiDeltaString(cur_style, common_styles.error);
-    auto style_group = terminal.AnsiDeltaString(cur_style, style_failed_group_name);
-    auto style_name = terminal.AnsiDeltaString(cur_style, style_failed_name);
-    auto style_separator = terminal.AnsiDeltaString(cur_style, style_test_failed_separator);
+    auto st_path = terminal.AnsiDeltaString(cur_style, common_data.style_path);
+    auto st_message = terminal.AnsiDeltaString(cur_style, common_data.style_error);
+    auto st_group = terminal.AnsiDeltaString(cur_style, style_failed_group_name);
+    auto st_name = terminal.AnsiDeltaString(cur_style, style_failed_name);
+    auto st_separator = terminal.AnsiDeltaString(cur_style, style_test_failed_separator);
 
     std::string_view group;
     std::string_view name = data.test->Name();
@@ -1607,16 +1641,17 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestResults
         separator += chars_test_failed_separator;
 
     // The test failure message, and a separator after that.
-    terminal.Print("\n%s%s:\n%s%s%s%.*s%s%.*s %s%s%s\n\n",
+    terminal.Print("\n%s%s%s:\n%s%s%s%.*s%s%.*s %s%s%s\n\n",
         terminal.AnsiResetString().data(),
-        common_chars.LocationToString(data.test->Location()).c_str(),
-        style_message.data(),
+        st_path.data(),
+        common_data.LocationToString(data.test->Location()).c_str(),
+        st_message.data(),
         chars_test_failed.c_str(),
-        style_group.data(),
+        st_group.data(),
         int(group.size()), group.data(),
-        style_name.data(),
+        st_name.data(),
         int(name.size()), name.data(),
-        style_separator.data(),
+        st_separator.data(),
         separator.c_str(),
         terminal.AnsiResetString().data()
     );
@@ -1699,7 +1734,7 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
     {
         // If the last frame is this very assertion, skip it, since we already printed it above.
         // This condition should always be true.
-        if (auto assertion_frame = dynamic_cast<const context::AssertionFrame *>(context.back().get()); assertion_frame && assertion_frame->assertion == &data)
+        if (auto assertion_frame = dynamic_cast<const BasicAssertionInfo *>(context.back()); assertion_frame && assertion_frame == &data)
             context = context.first(context.size() - 1);
         text::PrintContext(context);
     }
@@ -1707,9 +1742,9 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
 
 bool ta_test::modules::AssertionPrinter::PrintContextFrame(const context::BasicFrame &frame)
 {
-    if (auto assertion_frame = dynamic_cast<const context::AssertionFrame *>(&frame))
+    if (auto assertion_frame = dynamic_cast<const BasicAssertionInfo *>(&frame))
     {
-        PrintAssertionFrameLow(*assertion_frame->assertion, {}, false);
+        PrintAssertionFrameLow(*assertion_frame, {}, false);
         return true;
     }
 
@@ -1718,16 +1753,16 @@ bool ta_test::modules::AssertionPrinter::PrintContextFrame(const context::BasicF
 
 void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAssertionInfo &data, std::optional<std::string_view> message, bool is_most_nested) const
 {
-    text::TextCanvas canvas(&common_chars);
+    text::TextCanvas canvas(&common_data);
     std::size_t line_counter = 0;
 
     // The file path.
-    canvas.DrawString(line_counter++, 0, common_chars.LocationToString(data.SourceLocation()) + ":", {.style = style_filename, .important = true});
+    canvas.DrawString(line_counter++, 0, common_data.LocationToString(data.SourceLocation()) + ":", {.style = style_filename, .important = true});
 
     { // The main error message.
         std::size_t column = 0;
         if (is_most_nested)
-            column = canvas.DrawString(line_counter, 0, chars_assertion_failed, {.style = common_styles.error, .important = true});
+            column = canvas.DrawString(line_counter, 0, chars_assertion_failed, {.style = common_data.style_error, .important = true});
         else
             column = canvas.DrawString(line_counter, 0, chars_in_assertion, {.style = style_in_assertion, .important = true});
 
@@ -1739,23 +1774,49 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
 
     line_counter++;
 
+    // This is set later if we actually have an expression to print.
+    const BasicModule::BasicAssertionExpr *expr = nullptr;
     std::size_t expr_line = line_counter;
+    std::size_t expr_column = 0; // This is also set later.
 
     { // The assertion call.
-        std::size_t column = printed_code_indentation;
+        std::size_t column = common_data.code_indentation;
 
-        const text::TextCanvas::CellInfo assertion_macro_cell_info = {.style = style_assertion_macro, .important = true};
-        column += canvas.DrawString(line_counter, column, data.IsSoft() ? chars_assertion_macro_prefix_soft : chars_assertion_macro_prefix, assertion_macro_cell_info);
-        column += text::expr::DrawExprToCanvas(canvas, style_expr, line_counter, column, data.Expr());
-        column += canvas.DrawString(line_counter, column, chars_assertion_macro_suffix, assertion_macro_cell_info);
+        const text::TextCanvas::CellInfo assertion_macro_cell_info = {.style = common_data.style_failed_macro, .important = true};
+
+        for (int i = 0;; i++)
+        {
+            auto var = data.GetElement(i);
+            if (std::holds_alternative<std::monostate>(var))
+                break;
+
+            std::visit(Overload{
+                [&](std::monostate) {},
+                [&](const BasicAssertionInfo::DecoFixedString &deco)
+                {
+                    column += canvas.DrawString(line_counter, column, deco.string, assertion_macro_cell_info);
+                },
+                [&](const BasicAssertionInfo::DecoExpr &deco)
+                {
+                    column += text::expr::DrawToCanvas(canvas, line_counter, column, deco.string);
+                },
+                [&](const BasicAssertionInfo::DecoExprWithArgs &deco)
+                {
+                    column += common_data.spaces_in_call_parentheses;
+                    expr = deco.expr;
+                    expr_column = column;
+                    column += text::expr::DrawToCanvas(canvas, line_counter, column, deco.expr->Expr());
+                    column += common_data.spaces_in_call_parentheses;
+                },
+            }, var);
+        }
+
         line_counter++;
     }
 
     // The expression.
-    if (decompose_expression)
+    if (expr && decompose_expression)
     {
-        std::size_t expr_column = printed_code_indentation + chars_assertion_macro_prefix.size();
-
         std::u32string this_value;
 
         // The bracket above the expression.
@@ -1768,15 +1829,15 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
         // Incremented when we print an argument.
         std::size_t color_index = 0;
 
-        for (std::size_t i = 0; i < data.NumArgs(); i++)
+        for (std::size_t i = 0; i < expr->NumArgs(); i++)
         {
-            const std::size_t arg_index = data.ArgsInDrawOrder()[i];
-            const BasicAssertionInfo::StoredArg &this_arg = data.StoredArgs()[arg_index];
-            const BasicAssertionInfo::ArgInfo &this_info = data.ArgsInfo()[arg_index];
+            const std::size_t arg_index = expr->ArgsInDrawOrder()[i];
+            const BasicAssertionExpr::StoredArg &this_arg = expr->StoredArgs()[arg_index];
+            const BasicAssertionExpr::ArgInfo &this_info = expr->ArgsInfo()[arg_index];
 
             bool dim_parentheses = true;
 
-            if (this_arg.state == BasicAssertionInfo::StoredArg::State::in_progress)
+            if (this_arg.state == BasicAssertionExpr::StoredArg::State::in_progress)
             {
                 if (num_overline_parts == 0)
                 {
@@ -1791,7 +1852,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
                 num_overline_parts++;
             }
 
-            if (this_arg.state == BasicAssertionInfo::StoredArg::State::done)
+            if (this_arg.state == BasicAssertionExpr::StoredArg::State::done)
             {
                 text::uni::Decode(this_arg.value, this_value);
 
@@ -1807,7 +1868,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
                 {
                     std::size_t value_y = canvas.FindFreeSpace(line_counter, value_x, 2, this_value.size(), 1, 2) + 1;
                     canvas.DrawString(value_y, value_x, this_value, this_cell_info);
-                    canvas.DrawColumn(common_chars.bar, line_counter, center_x, value_y - line_counter, true, this_cell_info);
+                    canvas.DrawColumn(common_data.bar, line_counter, center_x, value_y - line_counter, true, this_cell_info);
 
                     // Color the contents.
                     for (std::size_t i = 0; i < this_info.expr_size; i++)
@@ -1832,10 +1893,10 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
 
                     // Add the tail to the bracket.
                     if (center_x > bracket_left_x && center_x + 1 < bracket_right_x)
-                        canvas.CharAt(bracket_y, center_x) = common_chars.bracket_bottom_tail;
+                        canvas.CharAt(bracket_y, center_x) = common_data.bracket_bottom_tail;
 
                     // Draw the column connecting us to the text, if it's not directly below.
-                    canvas.DrawColumn(common_chars.bar, bracket_y + 1, center_x, value_y - bracket_y - 1, true, this_cell_info);
+                    canvas.DrawColumn(common_data.bar, bracket_y + 1, center_x, value_y - bracket_y - 1, true, this_cell_info);
 
                     // Color the parentheses with the argument color.
                     dim_parentheses = false;
@@ -1894,24 +1955,24 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 
         terminal.Print("%s%s%s\n",
             terminal.AnsiResetString().data(),
-            terminal.AnsiDeltaString(cur_style, common_styles.error).data(),
+            terminal.AnsiDeltaString(cur_style, common_data.style_error).data(),
             chars_error.c_str()
         );
 
-        text::GetExceptionInfo(e, [&](const ExceptionInfo* info)
+        AnalyzeException(e, [&](const SingleException &elem)
         {
-            if (info)
+            if (elem.IsTypeKnown())
             {
-                auto style_a = terminal.AnsiDeltaString(cur_style, style_exception_type);
-                auto style_b = terminal.AnsiDeltaString(cur_style, style_exception_message);
+                auto st_type = terminal.AnsiDeltaString(cur_style, style_exception_type);
+                auto st_message = terminal.AnsiDeltaString(cur_style, style_exception_message);
                 terminal.Print("%s%s%s%s\n%s%s%s\n",
-                    style_a.data(),
+                    st_type.data(),
                     chars_indent_type.c_str(),
-                    info->type_name.c_str(),
+                    elem.GetTypeName().c_str(),
                     chars_type_suffix.c_str(),
-                    style_b.data(),
+                    st_message.data(),
                     chars_indent_message.c_str(),
-                    info->message.c_str()
+                    elem.message.c_str()
                 );
             }
             else
@@ -1928,6 +1989,38 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
     }
 
     // Print the assertion stack, if any.
+    text::PrintContext();
+}
+
+// --- modules::MustThrowPrinter ---
+
+void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data)
+{
+    TextStyle cur_style;
+
+    auto st_path = terminal.AnsiDeltaString(cur_style, common_data.style_path);
+    auto st_error = terminal.AnsiDeltaString(cur_style, common_data.style_error);
+
+    terminal.Print("%s%s%s:\n%s%s%s\n\n",
+        terminal.AnsiResetString().data(),
+        st_path.data(),
+        common_data.LocationToString(data.loc).c_str(),
+        st_error.data(),
+        chars_expected_exception.c_str(),
+        terminal.AnsiResetString().data()
+    );
+
+    text::TextCanvas canvas(&common_data);
+    std::size_t column = common_data.code_indentation;
+    column += canvas.DrawString(0, column, data.macro_name, {.style = common_data.style_failed_macro, .important = true});
+    column += canvas.DrawString(0, column, "(", {.style = common_data.style_failed_macro, .important = true});
+    column += common_data.spaces_in_call_parentheses;
+    column += text::expr::DrawToCanvas(canvas, 0, column, data.expr);
+    column += common_data.spaces_in_call_parentheses;
+    column += canvas.DrawString(0, column, ")", {.style = common_data.style_failed_macro, .important = true});
+    canvas.InsertLineBefore(canvas.NumLines());
+    canvas.Print(terminal);
+
     text::PrintContext();
 }
 

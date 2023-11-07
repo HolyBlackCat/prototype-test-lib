@@ -11,7 +11,15 @@ bool sum(const auto &...){return false;}
 
 bool foo()
 {
-    // throw std::runtime_error("Blah!");
+
+    // try
+    // {
+        // throw std::runtime_error("Blah!");
+    // }
+    // catch (...)
+    // {
+    //     std::throw_with_nested(std::runtime_error("Wrap!"));
+    // }
 
     // auto e = MUST_THROW(...);
 
@@ -44,14 +52,22 @@ bool foo()
     return false;
 }
 
+bool fof()
+{
+    TA_MUST_THROW(1 + 1);
+    return true;
+}
+
 TA_TEST(foo/bar)
 {
-
+    TA_CHECK($(fof()));
+    // TA_MUST_THROW(throw std::runtime_error("Expected!"));
 }
 
 TA_TEST(test/lul/beta)
 {
-    TA_CHECK($(true) && $(foo()) == $(true), "huh");
+    std::vector<int> v = {1,2,3};
+    TA_CHECK($(true) && $(foo()) && $(true), "huh");
 }
 
 TA_TEST( foo/baz )
@@ -81,6 +97,8 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
+// Silently reject duplicate context frames.
+
 // Some form of expect_throw.
 
 // Forced pass/fail macros?
@@ -102,12 +120,15 @@ int main(int argc, char **argv)
 
 // Subsections, for_types, and for_values (for_values optional?)
 
+// Move `mutable bool should_break` to a saner location, don't keep it in the context?
+
 // Later:
 //     Multithreading? Thread inheritance system.
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
 //     What's the deal with SEH? Do we need to do anything?
 
 // Maybe not?
+//     Soft TA_MUST_THROW?
 //     Allow more characters in bracket-less form: `:`, `.`, `->`?
 //     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
 //     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
@@ -119,6 +140,7 @@ int main(int argc, char **argv)
 //     Print user messages from assertions that didn't execute to completion.
 //     Don't show the assertion user message the second time when printing the expression
 //     Optimize the calls to the `BasicPrintingModule` with the module lists too.
+//     `$(...)` could be useful to provide context, but what if the function returns void or non-printable type?
 
 // Selling points:
 //     * Expression unwrapping
@@ -187,6 +209,7 @@ Good test names:
     Try duplicating $(...) with a macro, what then?
 
 --- Formatting errors shouldn't compile.
+    formatting containers might not be supported in the standard library yet, check it in libfmt for strings and numbers.
 
 --- Various flag styles:
     --include foo
