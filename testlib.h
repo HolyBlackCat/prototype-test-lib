@@ -19,6 +19,7 @@
 #include <optional>
 #include <ranges>
 #include <regex>
+#include <set>
 #include <span>
 #include <string_view>
 #include <string>
@@ -447,7 +448,7 @@ namespace ta_test
             // Note, can't pass a reference here, because it would be ambiguous with the copy constructor
             //   when we inherit from both the `BasicFrame` and the `FrameGuard`.
             // If we could use a reference, we'd need a second deleted constructor to reject rvalues.
-            CFG_TA_API FrameGuard(const BasicFrame *frame);
+            CFG_TA_API FrameGuard(const BasicFrame *frame) noexcept;
 
             FrameGuard(FrameGuard &&other) noexcept
                 : frame_ptr(std::exchange(other.frame_ptr, nullptr))
@@ -642,6 +643,7 @@ namespace ta_test
         // Called when an exception falls out of an assertion or out of the entire test (in the latter case `assertion` is null).
         virtual void OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e) {(void)test; (void)e;}
 
+        // This in the context stack means that we're currently inside of a `TA_MUST_THROW()`.
         struct MustThrowInfo : context::BasicFrame
         {
             // The source location of `TA_MUST_THROW(...)`.
@@ -650,6 +652,11 @@ namespace ta_test
             std::string_view macro_name;
             // The spelling of the macro argument.
             std::string_view expr;
+        };
+        // This in the context stack means that we're currently checking `CaughtException` returned from `TA_MUST_THROW()`.
+        struct CaughtExceptionInfo : context::BasicFrame
+        {
+            const MustThrowInfo *must_throw_call = nullptr;
         };
 
         // This is called when `TA_MUST_THROW` doesn't throw an exception.
@@ -745,12 +752,12 @@ namespace ta_test
             friend class CaughtException;
 
           public:
-            ContextGuard(const BasicModule::MustThrowInfo *info) : FrameGuard(info) {}
+            ContextGuard(const BasicModule::CaughtExceptionInfo *info) : FrameGuard(info) {}
         };
 
       private:
         std::vector<SingleException> elems;
-        const BasicModule::MustThrowInfo *info = nullptr;
+        const BasicModule::CaughtExceptionInfo *info = nullptr;
 
       public:
         CaughtException() {}
@@ -758,7 +765,7 @@ namespace ta_test
         // This is primarily for internal use.
         // `func` is `(auto &&add_elem) -> void`, where `add_elem` is `(SingleException e) -> void`.
         // Call `add_elem` repeatedly for every `SingleException`.
-        explicit CaughtException(const BasicModule::MustThrowInfo *info, const std::exception_ptr &e)
+        explicit CaughtException(const BasicModule::CaughtExceptionInfo *info, const std::exception_ptr &e)
             : info(info)
         {
             AnalyzeException(e, [&](SingleException elem)
@@ -796,6 +803,8 @@ namespace ta_test
             // This is used to print (or just examine) the current context.
             // All currently running assertions go there, and possibly other things.
             std::vector<const context::BasicFrame *> context_stack;
+            // This is used to deduplicate the `context_stack` elements.
+            std::set<const context::BasicFrame *> context_stack_set;
 
             // Gracefully fails the current test, if not already failed.
             // Call this first, before printing any messages.
@@ -1481,12 +1490,16 @@ namespace ta_test
         {
             // Styles:
 
+            // Error messages.
             TextStyle style_error = {.color = TextColor::light_red, .bold = true};
+            // "While doing X" messages
+            TextStyle style_stack_frame = {.color = TextColor::light_magenta, .bold = true};
+            // "Note" messages.
             TextStyle style_note = {.color = TextColor::light_blue, .bold = true};
             // File paths.
             TextStyle style_path = {.color = TextColor::none};
             // The offending macro call.
-            TextStyle style_failed_macro = {.color = TextColor::light_red, .bold = true};
+            TextStyle style_failed_macro = {.color = TextColor::none, .bold = true};
             // Highlighted expressions.
             expr::Style style_expr;
 
@@ -1985,8 +1998,9 @@ namespace ta_test
             *out_iter++ = "'\""[double_quotes];
         }
 
-        // Uses the current modules to print the context stack. See class `namespace context` above.
-        CFG_TA_API void PrintContext(context::Context con = context::CurrentContext());
+        // Uses the current modules to print the context stack. See `namespace context` above.
+        // If `skip_last_frame` is specified and is the last frame, that frame is not printed.
+        CFG_TA_API void PrintContext(const context::BasicFrame *skip_last_frame = nullptr, context::Context con = context::CurrentContext());
         // Same, but only prints a single context frame.
         CFG_TA_API void PrintContextFrame(const context::BasicFrame &frame);
     }
@@ -2440,14 +2454,15 @@ namespace ta_test
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
 
 
-        class MustThrowWrapper
+        // `TA_MUST_THROW(...)` expands to this.
+        class MustThrowWrapper : public context::FrameGuard
         {
-            const BasicModule::MustThrowInfo *info = nullptr;
+            const BasicModule::CaughtExceptionInfo *info = nullptr;
 
             // Fails the test because there was no exception.
             [[noreturn]] CFG_TA_API void MissingException();
 
-            MustThrowWrapper(const BasicModule::MustThrowInfo *info) : info(info) {}
+            CFG_TA_API MustThrowWrapper(const BasicModule::CaughtExceptionInfo *info);
 
           public:
             MustThrowWrapper() {}
@@ -2456,15 +2471,20 @@ namespace ta_test
             template <ConstString File, int Line, ConstString MacroName, ConstString Expr>
             [[nodiscard]] static MustThrowWrapper Make()
             {
-                static const BasicModule::MustThrowInfo info_storage = []{
+                static const BasicModule::MustThrowInfo must_throw_info = []{
                     BasicModule::MustThrowInfo ret;
                     ret.loc = {.file = File.view(), .line = Line};
                     ret.macro_name = MacroName.view();
                     ret.expr = Expr.view();
                     return ret;
                 }();
+                static const BasicModule::CaughtExceptionInfo caught_exception_info = []{
+                    BasicModule::CaughtExceptionInfo ret;
+                    ret.must_throw_call = &must_throw_info;
+                    return ret;
+                }();
 
-                return &info_storage;
+                return &caught_exception_info;
             }
 
             MustThrowWrapper(const MustThrowWrapper &) = delete;
@@ -2696,17 +2716,17 @@ namespace ta_test
             // Optional message at startup when some tests are skipped.
             TextStyle style_skipped_tests = {.color = TextColor::light_blue, .bold = true};
             // The message when a test starts.
-            TextStyle style_name = {.color = TextColor::light_green, .bold = true};
+            TextStyle style_name = {.color = TextColor::light_white};
             // The message when a test group starts.
-            TextStyle style_group_name = {.color = TextColor::dark_green};
+            TextStyle style_group_name = {.color = TextColor::dark_white};
             // This is used to print a group name when reentering it after a failed test.
             TextStyle style_continuing_group = {.color = TextColor::light_black};
             // The indentation guides for nested test starts.
             TextStyle style_indentation_guide = {.color = TextColorGrayscale24(8)};
             // The test index.
-            TextStyle style_index = {.color = TextColor::light_green, .bold = true};
+            TextStyle style_index = {.color = TextColor::light_white};
             // The total test count printed after each test index.
-            TextStyle style_total_count = {.color = TextColor::dark_green};
+            TextStyle style_total_count = {.color = TextColor::light_black};
             // The failed test counter.
             TextStyle style_failed_count = {.color = TextColor::light_red};
             // Some decorations around the failed test counter.
@@ -2723,7 +2743,7 @@ namespace ta_test
             // This line is printed after all details on the test failure.
             TextStyle style_test_failed_ending_separator = {.color = TextColorGrayscale24(10)};
             // Style for `chars_continuing_tests`.
-            TextStyle style_continuing_tests = {.color = TextColor::dark_green, .bold = true};
+            TextStyle style_continuing_tests = {.color = TextColor::light_black, .bold = true};
 
             // The name of a failed test, printed at the end.
             TextStyle style_summary_failed_name = {.color = TextColor::light_red, .bold = true};
@@ -2831,7 +2851,6 @@ namespace ta_test
             // Uses `common_styles.error` as a style.
             std::u32string chars_assertion_failed = U"Assertion failed:";
             // The enclosing assertions.
-            TextStyle style_in_assertion = {.color = TextColor::light_magenta, .bold = true};
             std::u32string chars_in_assertion = U"While checking assertion:";
 
             // How to print the filename.
@@ -2926,8 +2945,19 @@ namespace ta_test
         struct MustThrowPrinter : BasicPrintingModule
         {
             std::string chars_expected_exception = "Expected exception:";
+            std::string chars_while_expecting_exception = "While expecting exception here:";
+            std::string chars_while_checking_exception = "While checking exception thrown here:";
 
             void OnMissingException(const MustThrowInfo &data) override;
+            bool PrintContextFrame(const context::BasicFrame &frame) override;
+
+            enum class FrameKind
+            {
+                expected_exception,
+                while_expecting,
+                while_checking,
+            };
+            CFG_TA_API void PrintFrame(const BasicModule::MustThrowInfo &data, FrameKind kind);
         };
 
         // Detects whether the debugger is attached in a platform-specific way.

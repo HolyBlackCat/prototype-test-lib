@@ -54,7 +54,12 @@ bool foo()
 
 bool fof()
 {
-    TA_MUST_THROW(1 + 1);
+    // TA_MUST_THROW(1+1);
+    // TA_MUST_THROW(TA_CHECK(false));
+    auto e = TA_MUST_THROW(throw std::runtime_error("Must!"));
+    auto guard = e.MakeContextGuard();
+    auto guard2 = e.MakeContextGuard();
+    TA_CHECK(false);
     return true;
 }
 
@@ -154,6 +159,7 @@ int main(int argc, char **argv)
 ta_test::detail::TextCanvas canv;
 ta_test::detail::DrawExprToCanvas(canv, 1, 3, "foo(42, .5f,.5f, 5.f, 5.4f, 42_lit, 42lit, 42_foo42_bar, +42,-42, 123'456'789, 0x123'456, 0123'456)");
 ta_test::detail::DrawExprToCanvas(canv, 2, 3, "foo(12e5,12e+5,12e-5,12.3e5,12.3e+5,12.3e-5,0x1p2,0x1p+2,0x1p-2,0x12.34p2)");
+ta_test::detail::DrawExprToCanvas(canv, 5, 3, "1+1"); // `+` must not be highlighted as a number
 ta_test::detail::DrawExprToCanvas(canv, 3, 3, "foo(\"meow\",foo42foo\"meow\"bar42bar,\"meow\"_bar42bar,\"foo\\\"bar\")");
 ta_test::detail::DrawExprToCanvas(canv, 4, 3, "foo(\'meow\',foo42foo\'meow\'bar42bar,\'meow\'_bar42bar,\'foo\\\'bar\')");
 ta_test::detail::DrawExprToCanvas(canv, 5, 3, "foo(R\"(meow)\",foo42fooR\"(meow)\"bar42bar,u8R\"(meow)\"_bar42bar,R\"(foo\"bar)\",R\"ab(foo\"f)\"g)a\"bar)ab\")");
@@ -167,6 +173,14 @@ canv.Print(true, stdout);
 --- Colors
 
 TA_CHECK($("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && false);
+
+--- Werror on everything?
+
+--- TA_MUST_THROW:
+    Doesn't warn on unused value.
+    Doesn't warn on nodiscard violation.
+    Doesn't warn on `;` at the end.
+    Opening two same context frames deduplicates them.
 
 --- Exception printer
 Known and unknown exception types.

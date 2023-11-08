@@ -35,10 +35,17 @@ ta_test::context::Context ta_test::context::CurrentContext()
     return detail::ThreadState().context_stack;
 }
 
-ta_test::context::FrameGuard::FrameGuard(const BasicFrame *frame)
-    : frame_ptr(frame)
+ta_test::context::FrameGuard::FrameGuard(const BasicFrame *frame) noexcept
 {
-    detail::ThreadState().context_stack.push_back(frame);
+    auto &thread_state = detail::ThreadState();
+    if (thread_state.context_stack_set.insert(frame).second)
+    {
+        thread_state.context_stack.push_back(frame);
+        frame_ptr = frame;
+    }
+
+    if (thread_state.context_stack_set.size() > thread_state.context_stack.size())
+        HardError("The context stack is corrupted: The set is larger than the stack.");
 }
 
 ta_test::context::FrameGuard::~FrameGuard()
@@ -47,10 +54,16 @@ ta_test::context::FrameGuard::~FrameGuard()
         return;
 
     auto &thread_state = detail::ThreadState();
-    if (thread_state.context_stack.empty() || thread_state.context_stack.back() != frame_ptr)
-        HardError("The context stack is corrupted.");
 
+    if (thread_state.context_stack.empty() || thread_state.context_stack.back() != frame_ptr)
+        HardError("The context stack is corrupted: The element we're removing is not at the end of the stack.");
     thread_state.context_stack.pop_back();
+
+    if (thread_state.context_stack_set.erase(frame_ptr) != 1)
+        HardError("The context stack is corrupted: The element we're removing is in the stack, but not in the set.");
+
+    if (thread_state.context_stack_set.size() > thread_state.context_stack.size())
+        HardError("The context stack is corrupted: The set is larger than the stack.");
 }
 
 std::string ta_test::SingleException::GetTypeName() const
@@ -506,7 +519,9 @@ std::size_t ta_test::text::expr::DrawToCanvas(TextCanvas &canvas, std::size_t li
         style = &canvas.GetCommonData()->style_expr;
 
     canvas.DrawString(line, start, expr);
+
     std::size_t i = 0;
+    char prev_ch = '\0';
     CharKind prev_kind = CharKind::normal;
     bool is_number = false;
     const char *identifier_start = nullptr;
@@ -600,7 +615,9 @@ std::size_t ta_test::text::expr::DrawToCanvas(TextCanvas &canvas, std::size_t li
             }
             else if (is_number)
             {
-                if (!(chars::IsDigit(ch) || chars::IsAlpha(ch) || ch == '.' || ch == '-' || ch == '+' || ch == '\''))
+                if (!(chars::IsDigit(ch) || chars::IsAlpha(ch) || ch == '.' || ch == '\'' ||
+                    ((prev_ch == 'e' || prev_ch == 'E' || prev_ch == 'p' || prev_ch == 'P') && ( ch == '-' || ch == '+'))
+                ))
                 {
                     is_number = false;
                     if (ch == '_')
@@ -713,6 +730,7 @@ std::size_t ta_test::text::expr::DrawToCanvas(TextCanvas &canvas, std::size_t li
         if (prev_identifier_start && !identifier_start)
             FinalizeIdentifier({prev_identifier_start, &ch});
 
+        prev_ch = ch;
         prev_kind = kind;
 
         i++;
@@ -724,11 +742,16 @@ std::size_t ta_test::text::expr::DrawToCanvas(TextCanvas &canvas, std::size_t li
     return expr.size();
 }
 
-void ta_test::text::PrintContext(context::Context con)
+void ta_test::text::PrintContext(const context::BasicFrame *skip_last_frame, context::Context con)
 {
+    bool first = true;
     for (auto it = con.end(); it != con.begin();)
     {
         --it;
+        if (first && skip_last_frame && skip_last_frame == *it)
+            continue;
+
+        first = false;
         ta_test::text::PrintContextFrame(**it);
     }
 }
@@ -965,10 +988,14 @@ void ta_test::detail::MustThrowWrapper::MissingException()
         HardError("Attempted to use `TA_MUST_THROW(...)`, but no test is currently running.", HardErrorKind::user);
 
     thread_state.FailCurrentTest();
-    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(*info);
+    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(*info->must_throw_call);
 
     throw InterruptTestException{};
 }
+
+ta_test::detail::MustThrowWrapper::MustThrowWrapper(const BasicModule::CaughtExceptionInfo *info)
+    : FrameGuard(info->must_throw_call), info(info)
+{}
 
 void ta_test::Runner::SetDefaultModules()
 {
@@ -1730,15 +1757,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message)
 {
     PrintAssertionFrameLow(data, message, true);
-    auto context = context::CurrentContext();
-    if (!context.empty())
-    {
-        // If the last frame is this very assertion, skip it, since we already printed it above.
-        // This condition should always be true.
-        if (auto assertion_frame = dynamic_cast<const BasicAssertionInfo *>(context.back()); assertion_frame && assertion_frame == &data)
-            context = context.first(context.size() - 1);
-        text::PrintContext(context);
-    }
+    text::PrintContext(&data);
 }
 
 bool ta_test::modules::AssertionPrinter::PrintContextFrame(const context::BasicFrame &frame)
@@ -1765,7 +1784,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
         if (is_most_nested)
             column = canvas.DrawString(line_counter, 0, chars_assertion_failed, {.style = common_data.style_error, .important = true});
         else
-            column = canvas.DrawString(line_counter, 0, chars_in_assertion, {.style = style_in_assertion, .important = true});
+            column = canvas.DrawString(line_counter, 0, chars_in_assertion, {.style = common_data.style_stack_frame, .important = true});
 
         if (message)
             canvas.DrawString(line_counter, column + 1, *message, {.style = style_user_message, .important = true});
@@ -1997,17 +2016,53 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 
 void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data)
 {
+    PrintFrame(data, FrameKind::expected_exception);
+    text::PrintContext(&data);
+}
+
+bool ta_test::modules::MustThrowPrinter::PrintContextFrame(const context::BasicFrame &frame)
+{
+    if (auto ptr = dynamic_cast<const BasicModule::MustThrowInfo *>(&frame))
+    {
+        PrintFrame(*ptr, FrameKind::while_expecting);
+        return true;
+    }
+    if (auto ptr = dynamic_cast<const BasicModule::CaughtExceptionInfo *>(&frame))
+    {
+        PrintFrame(*ptr->must_throw_call, FrameKind::while_checking);
+        return true;
+    }
+
+    return false;
+}
+
+void ta_test::modules::MustThrowPrinter::PrintFrame(const BasicModule::MustThrowInfo &data, FrameKind kind)
+{
     TextStyle cur_style;
 
     auto st_path = terminal.AnsiDeltaString(cur_style, common_data.style_path);
-    auto st_error = terminal.AnsiDeltaString(cur_style, common_data.style_error);
+    auto st_message = terminal.AnsiDeltaString(cur_style, kind == FrameKind::expected_exception ? common_data.style_error : common_data.style_stack_frame);
+
+    const std::string *message = nullptr;
+    switch (kind)
+    {
+      case FrameKind::expected_exception:
+        message = &chars_expected_exception;
+        break;
+      case FrameKind::while_expecting:
+        message = &chars_while_expecting_exception;
+        break;
+      case FrameKind::while_checking:
+        message = &chars_while_checking_exception;
+        break;
+    }
 
     terminal.Print("%s%s%s:\n%s%s%s\n\n",
         terminal.AnsiResetString().data(),
         st_path.data(),
         common_data.LocationToString(data.loc).c_str(),
-        st_error.data(),
-        chars_expected_exception.c_str(),
+        st_message.data(),
+        message->c_str(),
         terminal.AnsiResetString().data()
     );
 
@@ -2021,8 +2076,6 @@ void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo 
     column += canvas.DrawString(0, column, ")", {.style = common_data.style_failed_macro, .important = true});
     canvas.InsertLineBefore(canvas.NumLines());
     canvas.Print(terminal);
-
-    text::PrintContext();
 }
 
 // --- modules::DebuggerDetector ---
