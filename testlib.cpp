@@ -35,13 +35,16 @@ ta_test::context::Context ta_test::context::CurrentContext()
     return detail::ThreadState().context_stack;
 }
 
-ta_test::context::FrameGuard::FrameGuard(const BasicFrame *frame) noexcept
+ta_test::context::FrameGuard::FrameGuard(std::shared_ptr<const BasicFrame> frame) noexcept
 {
+    if (!frame)
+        return;
+
     auto &thread_state = detail::ThreadState();
-    if (thread_state.context_stack_set.insert(frame).second)
+    if (thread_state.context_stack_set.insert(frame.get()).second)
     {
-        thread_state.context_stack.push_back(frame);
-        frame_ptr = frame;
+        frame_ptr = frame.get();
+        thread_state.context_stack.push_back(std::move(frame));
     }
 
     if (thread_state.context_stack_set.size() > thread_state.context_stack.size())
@@ -55,7 +58,7 @@ ta_test::context::FrameGuard::~FrameGuard()
 
     auto &thread_state = detail::ThreadState();
 
-    if (thread_state.context_stack.empty() || thread_state.context_stack.back() != frame_ptr)
+    if (thread_state.context_stack.empty() || thread_state.context_stack.back().get() != frame_ptr)
         HardError("The context stack is corrupted: The element we're removing is not at the end of the stack.");
     thread_state.context_stack.pop_back();
 
@@ -113,6 +116,31 @@ ta_test::detail::GlobalThreadState &ta_test::detail::ThreadState()
 {
     thread_local GlobalThreadState ret;
     return ret;
+}
+
+ta_test::CaughtException::CaughtException(const BasicModule::MustThrowInfo *must_throw_call, const std::exception_ptr &e)
+    : state(std::make_shared<BasicModule::CaughtExceptionInfo>())
+{
+    state->must_throw_call = must_throw_call;
+
+    AnalyzeException(e, [&](SingleException elem)
+    {
+        state->elems.push_back(std::move(elem));
+    });
+}
+
+const std::vector<ta_test::SingleException> &ta_test::CaughtException::GetElems() const
+{
+    if (!state)
+    {
+        // This is a little stupid, but probably better than a `HardError()`?
+        static const std::vector<ta_test::SingleException> ret;
+        return ret;
+    }
+    else
+    {
+        return state->elems;
+    }
 }
 
 bool ta_test::platform::IsDebuggerAttached()
@@ -748,7 +776,7 @@ void ta_test::text::PrintContext(const context::BasicFrame *skip_last_frame, con
     for (auto it = con.end(); it != con.begin();)
     {
         --it;
-        if (first && skip_last_frame && skip_last_frame == *it)
+        if (first && skip_last_frame && skip_last_frame == it->get())
             continue;
 
         first = false;
@@ -833,7 +861,7 @@ void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
 }
 
 ta_test::detail::BasicAssertWrapper::BasicAssertWrapper()
-    : FrameGuard(this)
+    : FrameGuard({std::shared_ptr<void>{}, this}) // A non-owning shared pointer.
 {
     GlobalThreadState &thread_state = ThreadState();
     if (!thread_state.current_test)
@@ -988,13 +1016,13 @@ void ta_test::detail::MustThrowWrapper::MissingException()
         HardError("Attempted to use `TA_MUST_THROW(...)`, but no test is currently running.", HardErrorKind::user);
 
     thread_state.FailCurrentTest();
-    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(*info->must_throw_call);
+    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(*info);
 
     throw InterruptTestException{};
 }
 
-ta_test::detail::MustThrowWrapper::MustThrowWrapper(const BasicModule::CaughtExceptionInfo *info)
-    : FrameGuard(info->must_throw_call), info(info)
+ta_test::detail::MustThrowWrapper::MustThrowWrapper(const BasicModule::MustThrowInfo *info)
+    : FrameGuard({std::shared_ptr<void>{}, info}), info(info) // A non-owning shared pointer.
 {}
 
 void ta_test::Runner::SetDefaultModules()

@@ -102,9 +102,12 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Silently reject duplicate context frames.
+// Context stack should use shared_ptr's, possibly with empty deleters (for assertions and must_throws).
+// CaughtException pointers would be owning, and would share state with the actual CaughtException objects.
 
 // Some form of expect_throw.
+
+// Manually call formatters instead of std::format to use the debug format always when it's supported.
 
 // Forced pass/fail macros?
 
@@ -127,10 +130,13 @@ int main(int argc, char **argv)
 
 // Move `mutable bool should_break` to a saner location, don't keep it in the context?
 
+// Do we need `__visibility__("default")` when exporting from a shared library on Linux? And also test that somehow...
+
 // Later:
 //     Multithreading? Thread inheritance system.
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
 //     What's the deal with SEH? Do we need to do anything?
+//     Do we force-open the console on Windows if there's none? That's when `GetFileType(GetStdHandle(STD_OUTPUT_HANDLE))` returns 0.
 
 // Maybe not?
 //     Soft TA_MUST_THROW?

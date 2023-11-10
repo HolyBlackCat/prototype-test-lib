@@ -414,9 +414,6 @@ namespace ta_test
         };
     }
 
-
-    // --- EXECUTION CONTEXT ---
-
     // This lets you determine the stack of assertions (and other things) that are currently executing.
     namespace context
     {
@@ -431,7 +428,7 @@ namespace ta_test
             BasicFrame &operator=(const BasicFrame &) = default;
             virtual ~BasicFrame() = default;
         };
-        using Context = std::span<const BasicFrame *const>;
+        using Context = std::span<const std::shared_ptr<const BasicFrame>>;
 
         [[nodiscard]] CFG_TA_API Context CurrentContext();
 
@@ -448,7 +445,7 @@ namespace ta_test
             // Note, can't pass a reference here, because it would be ambiguous with the copy constructor
             //   when we inherit from both the `BasicFrame` and the `FrameGuard`.
             // If we could use a reference, we'd need a second deleted constructor to reject rvalues.
-            CFG_TA_API FrameGuard(const BasicFrame *frame) noexcept;
+            CFG_TA_API explicit FrameGuard(std::shared_ptr<const BasicFrame> frame) noexcept;
 
             FrameGuard(FrameGuard &&other) noexcept
                 : frame_ptr(std::exchange(other.frame_ptr, nullptr))
@@ -462,6 +459,27 @@ namespace ta_test
             CFG_TA_API ~FrameGuard();
         };
     }
+
+    // Information about a single exception, without nesting.
+    struct SingleException
+    {
+        // The exception we're analyzing.
+        std::exception_ptr exception;
+        // The exception type. This is set to `typeid(void)` if the type is unknown.
+        std::type_index type = typeid(void);
+        // This is usually obtained from `e.what()`.
+        std::string message;
+
+        [[nodiscard]] bool IsTypeKnown() const {return type != typeid(void);}
+
+        // Obtains the type name from `type`, using `text::Demangler`.
+        // If `IsTypeKnown() == false`, returns an empty string instead.
+        [[nodiscard]] CFG_TA_API std::string GetTypeName() const;
+    };
+
+    // Given an exception, tries to get an error message from it, using the current modules. Shouldn't throw.
+    // Returns a vector with at least one element. The last element may or may not have `IsTypeKnown() == false`, and other elements will always be known.
+    CFG_TA_API void AnalyzeException(const std::exception_ptr &e, const std::function<void(SingleException elem)> &func);
 
 
     // --- MODULE BASE ---
@@ -656,6 +674,7 @@ namespace ta_test
         // This in the context stack means that we're currently checking `CaughtException` returned from `TA_MUST_THROW()`.
         struct CaughtExceptionInfo : context::BasicFrame
         {
+            std::vector<SingleException> elems;
             const MustThrowInfo *must_throw_call = nullptr;
         };
 
@@ -719,72 +738,6 @@ namespace ta_test
     };
 
 
-    // --- EXCEPTIONS ---
-
-    // Information about a single exception, without nesting.
-    struct SingleException
-    {
-        // The exception we're analyzing.
-        std::exception_ptr exception;
-        // The exception type. This is set to `typeid(void)` if the type is unknown.
-        std::type_index type = typeid(void);
-        // This is usually obtained from `e.what()`.
-        std::string message;
-
-        [[nodiscard]] bool IsTypeKnown() const {return type != typeid(void);}
-
-        // Obtains the type name from `type`, using `text::Demangler`.
-        // If `IsTypeKnown() == false`, returns an empty string instead.
-        [[nodiscard]] CFG_TA_API std::string GetTypeName() const;
-    };
-
-    // Given an exception, tries to get an error message from it, using the current modules. Shouldn't throw.
-    // Returns a vector with at least one element. The last element may or may not have `IsTypeKnown() == false`, and other elements will always be known.
-    CFG_TA_API void AnalyzeException(const std::exception_ptr &e, const std::function<void(SingleException elem)> &func);
-
-    // This is what `TA_MUST_THROW(...)` returns.
-    // Stores a list of nested `SingleException`s, plus the information about the macro call that produced it.
-    class CaughtException
-    {
-      public:
-        class ContextGuard : context::FrameGuard
-        {
-            friend class CaughtException;
-
-          public:
-            ContextGuard(const BasicModule::CaughtExceptionInfo *info) : FrameGuard(info) {}
-        };
-
-      private:
-        std::vector<SingleException> elems;
-        const BasicModule::CaughtExceptionInfo *info = nullptr;
-
-      public:
-        CaughtException() {}
-
-        // This is primarily for internal use.
-        // `func` is `(auto &&add_elem) -> void`, where `add_elem` is `(SingleException e) -> void`.
-        // Call `add_elem` repeatedly for every `SingleException`.
-        explicit CaughtException(const BasicModule::CaughtExceptionInfo *info, const std::exception_ptr &e)
-            : info(info)
-        {
-            AnalyzeException(e, [&](SingleException elem)
-            {
-                elems.push_back(std::move(elem));
-            });
-        }
-
-        // Returns all stored nested exceptions, in case you want to examine them manually.
-        // Prefer the high-level functions below.
-        [[nodiscard]] const std::vector<SingleException> &GetElems() const {return elems;}
-
-        // When you're manually examining this exception with `TA_CHECK(...)`, create this object beforehand.
-        // While it exists, all failed assertions will mention that they happened while examnining this exception.
-        // All high-level functions below do this automatically, and redundant contexts are silently ignored.
-        [[nodiscard]] ContextGuard MakeContextGuard() const {return ContextGuard(info);}
-    };
-
-
     // --- MISC ---
 
     enum class HardErrorKind {internal, user};
@@ -802,7 +755,7 @@ namespace ta_test
 
             // This is used to print (or just examine) the current context.
             // All currently running assertions go there, and possibly other things.
-            std::vector<const context::BasicFrame *> context_stack;
+            std::vector<std::shared_ptr<const context::BasicFrame>> context_stack;
             // This is used to deduplicate the `context_stack` elements.
             std::set<const context::BasicFrame *> context_stack_set;
 
@@ -1015,6 +968,36 @@ namespace ta_test
             }();
             for (auto *m : GetModulesImplementing<func_enum>())
                 (m->*F)(params...); // No forwarding because there's more than one call.
+        }
+    };
+
+
+    // This is what `TA_MUST_THROW(...)` returns.
+    // Stores a list of nested `SingleException`s, plus the information about the macro call that produced it.
+    class CaughtException
+    {
+        std::shared_ptr<BasicModule::CaughtExceptionInfo> state;
+
+      public:
+        CaughtException() {}
+
+        // This is primarily for internal use.
+        CFG_TA_API explicit CaughtException(const BasicModule::MustThrowInfo *must_throw_call, const std::exception_ptr &e);
+
+        // Returns false for default-constructed or moved-from instances.
+        [[nodiscard]] explicit operator bool() const {return bool(state);}
+
+        // Returns all stored nested exceptions, in case you want to examine them manually.
+        // Prefer the high-level functions below.
+        [[nodiscard]] CFG_TA_API const std::vector<SingleException> &GetElems() const;
+
+        // When you're manually examining this exception with `TA_CHECK(...)`, create this object beforehand.
+        // While it exists, all failed assertions will mention that they happened while examnining this exception.
+        // All high-level functions below do this automatically, and redundant contexts are silently ignored.
+        [[nodiscard]] context::FrameGuard MakeContextGuard() const
+        {
+            // This nicely handles null state.
+            return context::FrameGuard(state);
         }
     };
 
@@ -2457,12 +2440,12 @@ namespace ta_test
         // `TA_MUST_THROW(...)` expands to this.
         class MustThrowWrapper : public context::FrameGuard
         {
-            const BasicModule::CaughtExceptionInfo *info = nullptr;
+            const BasicModule::MustThrowInfo *info = nullptr;
 
             // Fails the test because there was no exception.
             [[noreturn]] CFG_TA_API void MissingException();
 
-            CFG_TA_API MustThrowWrapper(const BasicModule::CaughtExceptionInfo *info);
+            CFG_TA_API MustThrowWrapper(const BasicModule::MustThrowInfo *info);
 
           public:
             MustThrowWrapper() {}
@@ -2471,20 +2454,15 @@ namespace ta_test
             template <ConstString File, int Line, ConstString MacroName, ConstString Expr>
             [[nodiscard]] static MustThrowWrapper Make()
             {
-                static const BasicModule::MustThrowInfo must_throw_info = []{
+                static const BasicModule::MustThrowInfo info = []{
                     BasicModule::MustThrowInfo ret;
                     ret.loc = {.file = File.view(), .line = Line};
                     ret.macro_name = MacroName.view();
                     ret.expr = Expr.view();
                     return ret;
                 }();
-                static const BasicModule::CaughtExceptionInfo caught_exception_info = []{
-                    BasicModule::CaughtExceptionInfo ret;
-                    ret.must_throw_call = &must_throw_info;
-                    return ret;
-                }();
 
-                return &caught_exception_info;
+                return &info;
             }
 
             MustThrowWrapper(const MustThrowWrapper &) = delete;
