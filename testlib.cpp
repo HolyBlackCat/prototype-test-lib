@@ -1039,6 +1039,7 @@ void ta_test::Runner::SetDefaultModules()
     modules.push_back(MakeModule<modules::DefaultExceptionAnalyzer>());
     modules.push_back(MakeModule<modules::ExceptionPrinter>());
     modules.push_back(MakeModule<modules::MustThrowPrinter>());
+    modules.push_back(MakeModule<modules::TracePrinter>());
     modules.push_back(MakeModule<modules::DebuggerDetector>());
     modules.push_back(MakeModule<modules::DebuggerStatePrinter>());
 }
@@ -1258,7 +1259,7 @@ ta_test::modules::BasicExceptionContentsPrinter::BasicExceptionContentsPrinter()
                     self.chars_type_suffix.c_str(),
                     st_message.data(),
                     self.chars_indent_message.c_str(),
-                    elem.message.c_str()
+                    ToString<std::string_view>{}(elem.message).c_str()
                 );
             }
             else
@@ -1847,7 +1848,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
     std::size_t line_counter = 0;
 
     // The file path.
-    canvas.DrawString(line_counter++, 0, common_data.LocationToString(data.SourceLocation()) + ":", {.style = style_filename, .important = true});
+    canvas.DrawString(line_counter++, 0, common_data.LocationToString(data.SourceLocation()) + ":", {.style = common_data.style_path, .important = true});
 
     { // The main error message.
         std::size_t column = 0;
@@ -1892,11 +1893,11 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
                 },
                 [&](const BasicAssertionInfo::DecoExprWithArgs &deco)
                 {
-                    column += common_data.spaces_in_call_parentheses;
+                    column += common_data.spaces_in_macro_call_parentheses;
                     expr = deco.expr;
                     expr_column = column;
                     column += text::expr::DrawToCanvas(canvas, line_counter, column, deco.expr->Expr());
-                    column += common_data.spaces_in_call_parentheses;
+                    column += common_data.spaces_in_macro_call_parentheses;
                 },
             }, var);
         }
@@ -2119,12 +2120,79 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(const BasicModule::MustThrow
     std::size_t column = common_data.code_indentation;
     column += canvas.DrawString(0, column, data.macro_name, {.style = common_data.style_failed_macro, .important = true});
     column += canvas.DrawString(0, column, "(", {.style = common_data.style_failed_macro, .important = true});
-    column += common_data.spaces_in_call_parentheses;
+    column += common_data.spaces_in_macro_call_parentheses;
     column += text::expr::DrawToCanvas(canvas, 0, column, data.expr);
-    column += common_data.spaces_in_call_parentheses;
+    column += common_data.spaces_in_macro_call_parentheses;
     column += canvas.DrawString(0, column, ")", {.style = common_data.style_failed_macro, .important = true});
     canvas.InsertLineBefore(canvas.NumLines());
     canvas.Print(terminal);
+}
+
+// --- modules::TracePrinter ---
+
+bool ta_test::modules::TracePrinter::PrintContextFrame(const context::BasicFrame &frame)
+{
+    if (auto ptr = dynamic_cast<const BasicTrace *>(&frame))
+    {
+        text::TextCanvas canvas(&common_data);
+
+        // Path.
+        canvas.DrawString(0, 0, common_data.LocationToString(ptr->GetLocation()), {.style = common_data.style_path, .important = true});
+
+        // Prefix.
+        std::size_t column = 0;
+        column += canvas.DrawString(1, column, chars_func_name_prefix, {.style = common_data.style_stack_frame, .important = true});
+
+        std::string expr;
+        { // Generate the function call string.
+            expr += ptr->GetFuncName();
+
+            // Template arguments.
+            if (!ptr->GetTemplateArgs().empty())
+            {
+                expr += "<";
+                for (bool first = true; const auto &elem : ptr->GetTemplateArgs())
+                {
+                    if (first)
+                        first = false;
+                    else
+                        expr += common_data.spaced_comma;
+                    expr += elem;
+                }
+                expr += ">";
+            }
+
+            // Function arguments.
+            expr += '(';
+            if (!ptr->GetFuncArgs().empty())
+            {
+                if (common_data.spaces_in_func_call_parentheses)
+                    expr += ' ';
+
+                for (bool first = true; const auto &elem : ptr->GetFuncArgs())
+                {
+                    if (first)
+                        first = false;
+                    else
+                        expr += common_data.spaced_comma;
+                    expr += elem;
+                }
+
+                if (common_data.spaces_in_func_call_parentheses)
+                    expr += ' ';
+            }
+            expr += ')';
+        }
+
+        text::expr::DrawToCanvas(canvas, 1, column, expr);
+
+        canvas.InsertLineBefore(canvas.NumLines());
+        canvas.Print(terminal);
+
+        return true;
+    }
+
+    return false;
 }
 
 // --- modules::DebuggerDetector ---

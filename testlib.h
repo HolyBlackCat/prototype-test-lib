@@ -731,6 +731,31 @@ namespace ta_test
     };
 
 
+    // --- STRING CONVERSIONS ---
+
+    // Don't specialize this, specialize `ToString` defined below.
+    template <typename T, typename = void>
+    struct DefaultToString
+    {
+        std::string operator()(const T &value) const
+        {
+            #if CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
+            if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
+            {
+                return CFG_TA_FMT_NAMESPACE::format("{:?}", value);
+            }
+            else
+            #endif
+            {
+                return CFG_TA_FMT_NAMESPACE::format("{}", value);
+            }
+        }
+    };
+    // You can specialize this for your types.
+    template <typename T, typename = void>
+    struct ToString : DefaultToString<T> {};
+
+
     // --- MISC ---
 
     enum class HardErrorKind {internal, user};
@@ -1488,6 +1513,9 @@ namespace ta_test
             // When printing a path with a line number, this comes after the line number.
             std::string filename_linenumber_suffix;
 
+            // A comma with optional spacing around it.
+            std::string spaced_comma = ", ";
+
             // Vertical bars, either standalone or in brackets.
             char32_t bar{};
             // Bottom brackets.
@@ -1505,10 +1533,12 @@ namespace ta_test
             // When we print a macro call, it's indented by this many spaces.
             std::size_t code_indentation = 4;
 
-            // Whether to pad the argument of `TA_CHECK()` with a space on each side.
+            // Whether to pad the argument of `TA_CHECK()` and other macros with a space on each side.
             // We can't check if the user actually had spaces, so we add them ourselves.
             // They look nice anyway.
-            bool spaces_in_call_parentheses = true;
+            bool spaces_in_macro_call_parentheses = true;
+            // Same, but for the regular non-macro functions.
+            bool spaces_in_func_call_parentheses = false;
 
             CommonData()
             {
@@ -1790,6 +1820,14 @@ namespace ta_test
             [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
         };
 
+        // Caches type names produced by `Demangler`.
+        template <typename T>
+        [[nodiscard]] const std::string &TypeName()
+        {
+            static const std::string ret = Demangler{}(typeid(T).name());
+            return ret;
+        }
+
         // A class for composing 2D ASCII graphics.
         class TextCanvas
         {
@@ -2012,29 +2050,62 @@ namespace ta_test
     };
 
 
-    // --- STRING CONVERSIONS ---
+    // --- STACK TRACE HELPERS ---
 
-    // Don't specialize this, specialize `ToString` defined below.
-    template <typename T, typename = void>
-    struct DefaultToString
+    // You can use this to get basic stack traces in your tests.
+    // ...
+    class BasicTrace : public context::BasicFrame, public context::FrameGuard
     {
-        std::string operator()(const T &value) const
+        BasicModule::SourceLoc loc;
+        std::vector<std::string> func_args;
+        std::vector<std::string> template_args;
+
+      protected:
+        BasicTrace(std::string_view file, int line)
+            : FrameGuard({std::shared_ptr<void>{}, this}), // A non-owning shared pointer.
+            loc{file, line}
+        {}
+
+      public:
+        BasicTrace(const BasicTrace &) = delete;
+        BasicTrace &operator=(const BasicTrace &) = delete;
+
+        [[nodiscard]] const BasicModule::SourceLoc &GetLocation() const {return loc;}
+        [[nodiscard]] const std::vector<std::string> &GetFuncArgs() const {return func_args;}
+        [[nodiscard]] const std::vector<std::string> &GetTemplateArgs() const {return template_args;}
+
+        [[nodiscard]] virtual std::string_view GetFuncName() const = 0;
+
+        template <typename ...P>
+        BasicTrace &AddArgs(const P &... args)
         {
-            #if CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
-            if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
-            {
-                return CFG_TA_FMT_NAMESPACE::format("{:?}", value);
-            }
-            else
-            #endif
-            {
-                return CFG_TA_FMT_NAMESPACE::format("{}", value);
-            }
+            (void(func_args.push_back(ToString<P>{}(args))), ...);
+            return *this;
+        }
+
+        template <typename ...P>
+        BasicTrace &AddTemplateTypes()
+        {
+            (void(template_args.push_back(text::TypeName<P>())), ...);
+            return *this;
+        }
+        template <typename ...P>
+        BasicTrace &AddTemplateValues(const P &... args)
+        {
+            (void(template_args.push_back(ToString<P>{}(args))), ...);
+            return *this;
         }
     };
-    // You can specialize this for your types.
-    template <typename T, typename = void>
-    struct ToString : DefaultToString<T> {};
+    template <ConstString FuncName>
+    class Trace : public BasicTrace
+    {
+      public:
+        Trace(std::string_view file = __builtin_FILE(), int line = __builtin_LINE())
+            : BasicTrace(file, line)
+        {}
+
+        std::string_view GetFuncName() const override {return FuncName.view();}
+    };
 
 
     // --- TEST RUNNER ---
@@ -2616,8 +2687,8 @@ namespace ta_test
             TextStyle style_exception_message = {.color = TextColor::light_blue};
 
             std::string chars_unknown_exception = "Unknown exception.";
-            std::string chars_indent_type = "  ";
-            std::string chars_indent_message = "    ";
+            std::string chars_indent_type = "    ";
+            std::string chars_indent_message = "        ";
             std::string chars_type_suffix = ": ";
 
             std::function<void(const BasicExceptionContentsPrinter &self, const Terminal &terminal, const std::exception_ptr &e)> print_callback;
@@ -2846,9 +2917,6 @@ namespace ta_test
             // The enclosing assertions.
             std::u32string chars_in_assertion = U"While checking assertion:";
 
-            // How to print the filename.
-            TextStyle style_filename = {.color = TextColor::none};
-
             // How to print the custom error message coming from the user (passed to the assertion macro).
             TextStyle style_user_message = {.color = TextColor::none, .bold = true};
 
@@ -2940,6 +3008,14 @@ namespace ta_test
 
             // `is_most_nested` must be false if `caught` is set.
             CFG_TA_API void PrintFrame(const BasicModule::MustThrowInfo &data, const BasicModule::CaughtExceptionInfo *caught, bool is_most_nested);
+        };
+
+        // Prints stack traces coming from `ta_test::Trace`.
+        struct TracePrinter : BasicPrintingModule
+        {
+            std::u32string chars_func_name_prefix = U"In function: ";
+
+            bool PrintContextFrame(const context::BasicFrame &frame) override;
         };
 
         // Detects whether the debugger is attached in a platform-specific way.

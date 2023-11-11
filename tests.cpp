@@ -65,10 +65,18 @@ bool fof()
     return true;
 }
 
+bool traced(int x, int y, ta_test::Trace<"traced"> trace = {})
+{
+    trace.AddTemplateValues("42");
+
+    TA_CHECK(false);
+
+    return false;
+}
+
 TA_TEST(foo/bar)
 {
-    TA_CHECK($(fof()));
-    // TA_MUST_THROW(throw std::runtime_error("Expected!"));
+    TA_CHECK($(traced(2, 3)));
 }
 
 TA_TEST(test/lul/beta)
@@ -104,9 +112,6 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Context stack should use shared_ptr's, possibly with empty deleters (for assertions and must_throws).
-// CaughtException pointers would be owning, and would share state with the actual CaughtException objects.
-
 // Some form of expect_throw.
 
 // Manually call formatters instead of std::format to use the debug format always when it's supported.
@@ -138,6 +143,8 @@ int main(int argc, char **argv)
 // Do we need `__visibility__("default")` when exporting from a shared library on Linux? And also test that somehow...
 
 // Later:
+//     Somehow don't evaluate the message if the assertion passes? Perhaps change the syntax to `CHECK(cond, LOG("{}", 42))`, reusing one of the log macros?
+//         Same for the arguments passed to `Trace`?
 //     Multithreading? Thread inheritance system.
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
 //     What's the deal with SEH? Do we need to do anything?
