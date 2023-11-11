@@ -1592,13 +1592,13 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
 
 void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data)
 {
-    { // Print the 'continuing tests...' message when resuming after a failure.
-        if (!state.failed_test_stack.empty())
+    { // Print the message when first starting tests, or when resuming from a failure.
+        if (state.test_counter == 0 || !state.failed_test_stack.empty())
         {
             terminal.Print("%s\n%s%s%s\n",
                 terminal.AnsiResetString().data(),
-                terminal.AnsiDeltaString({}, style_continuing_tests).data(),
-                chars_continuing_tests.c_str(),
+                terminal.AnsiDeltaString({}, style_starting_or_continuing_tests).data(),
+                (state.test_counter == 0 ? chars_starting_tests : chars_continuing_tests).c_str(),
                 terminal.AnsiResetString().data()
             );
         }

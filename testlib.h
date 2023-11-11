@@ -2767,6 +2767,8 @@ namespace ta_test
             std::string chars_test_failed_separator;
             // This is printed after the details of a failed test. It's repeated to fill the required width.
             std::string chars_test_failed_ending_separator;
+            // This is printed when first starting tests.
+            std::string chars_starting_tests = "Running tests...";
             // This is printed when resuming tests after a test failure.
             std::string chars_continuing_tests = "Continuing...";
             // This is printed at the end, before the list of failed tests.
@@ -2806,8 +2808,8 @@ namespace ta_test
             TextStyle style_test_failed_separator = {.color = TextColor::dark_red};
             // This line is printed after all details on the test failure.
             TextStyle style_test_failed_ending_separator = {.color = TextColorGrayscale24(10)};
-            // Style for `chars_continuing_tests`.
-            TextStyle style_continuing_tests = {.color = TextColor::light_black, .bold = true};
+            // Style for `chars_starting_tests` and `chars_continuing_tests`.
+            TextStyle style_starting_or_continuing_tests = {.color = TextColor::light_black, .bold = true};
 
             // The name of a failed test, printed at the end.
             TextStyle style_summary_failed_name = {.color = TextColor::light_red, .bold = true};

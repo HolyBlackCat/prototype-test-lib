@@ -67,7 +67,7 @@ bool fof()
 
 bool traced(int x, int y, ta_test::Trace<"traced"> trace = {})
 {
-    trace.AddTemplateValues("42");
+    trace.AddTemplateValues("42").AddArgs(x, y);
 
     TA_CHECK(false);
 
