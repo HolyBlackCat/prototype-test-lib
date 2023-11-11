@@ -55,7 +55,9 @@ bool foo()
 bool fof()
 {
     // TA_MUST_THROW(1+1);
+
     // TA_MUST_THROW(TA_CHECK(false));
+
     auto e = TA_MUST_THROW(throw std::runtime_error("Must!"));
     auto guard = e.MakeContextGuard();
     auto guard2 = e.MakeContextGuard();
@@ -109,13 +111,16 @@ int main(int argc, char **argv)
 
 // Manually call formatters instead of std::format to use the debug format always when it's supported.
 
+// Try to enforce relative paths, and try printing errors on the same line as paths.
+
 // Forced pass/fail macros?
 
 // Short macros that can be disabled in the config.
 
 // Scoped and unscoped logging macros.
 
-// Review token styles. In particular, string literals are ugly bright cyan.
+// Review styles:
+//     string literals are ugly bright cyan
 
 // Length cap on serialized values, configurable. Maybe libfmt can do the clipping for us?
 

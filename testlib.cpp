@@ -309,10 +309,10 @@ const char *ta_test::text::Demangler::operator()(const char *name)
 {
     #if CFG_TA_CXXABI_DEMANGLE
     int status = -4;
-    const char *ret = abi::__cxa_demangle(name, buf_ptr, &buf_size, &status);
+    buf_ptr = abi::__cxa_demangle(name, buf_ptr, &buf_size, &status);
     if (status != 0) // -1 = out of memory, -2 = invalid string, -3 = invalid usage
         return name;
-    return ret;
+    return buf_ptr;
     #else
     return name;
     #endif
@@ -1238,6 +1238,48 @@ int ta_test::Runner::Run()
     return results.failed_tests.size() > 0 ? int(ExitCodes::test_failed) : 0;
 }
 
+// --- modules::BasicExceptionContentsPrinter ---
+
+ta_test::modules::BasicExceptionContentsPrinter::BasicExceptionContentsPrinter()
+    : print_callback([](const BasicExceptionContentsPrinter &self, const Terminal &terminal, const std::exception_ptr &e)
+    {
+        TextStyle cur_style;
+
+        AnalyzeException(e, [&](const SingleException &elem)
+        {
+            if (elem.IsTypeKnown())
+            {
+                auto st_type = terminal.AnsiDeltaString(cur_style, self.style_exception_type);
+                auto st_message = terminal.AnsiDeltaString(cur_style, self.style_exception_message);
+                terminal.Print("%s%s%s%s\n%s%s%s\n",
+                    st_type.data(),
+                    self.chars_indent_type.c_str(),
+                    elem.GetTypeName().c_str(),
+                    self.chars_type_suffix.c_str(),
+                    st_message.data(),
+                    self.chars_indent_message.c_str(),
+                    elem.message.c_str()
+                );
+            }
+            else
+            {
+                terminal.Print("%s%s%s\n",
+                    terminal.AnsiDeltaString(cur_style, self.style_exception_type).data(),
+                    self.chars_indent_type.c_str(),
+                    self.chars_unknown_exception.c_str()
+                );
+            }
+        });
+
+        terminal.Print("%s", terminal.AnsiResetString().data());
+    })
+{}
+
+void ta_test::modules::BasicExceptionContentsPrinter::PrintException(const Terminal &terminal, const std::exception_ptr &e) const
+{
+    print_callback(*this, terminal, e);
+}
+
 // --- modules::HelpPrinter ---
 
 ta_test::modules::HelpPrinter::HelpPrinter()
@@ -1998,45 +2040,16 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 {
     (void)test;
 
-    { // Print the exception itself.
-        TextStyle cur_style;
+    terminal.Print("%s%s%s%s\n",
+        terminal.AnsiResetString().data(),
+        terminal.AnsiDeltaString({}, common_data.style_error).data(),
+        chars_error.c_str(),
+        terminal.AnsiResetString().data()
+    );
 
-        terminal.Print("%s%s%s\n",
-            terminal.AnsiResetString().data(),
-            terminal.AnsiDeltaString(cur_style, common_data.style_error).data(),
-            chars_error.c_str()
-        );
+    PrintException(terminal, e);
+    terminal.Print("\n");
 
-        AnalyzeException(e, [&](const SingleException &elem)
-        {
-            if (elem.IsTypeKnown())
-            {
-                auto st_type = terminal.AnsiDeltaString(cur_style, style_exception_type);
-                auto st_message = terminal.AnsiDeltaString(cur_style, style_exception_message);
-                terminal.Print("%s%s%s%s\n%s%s%s\n",
-                    st_type.data(),
-                    chars_indent_type.c_str(),
-                    elem.GetTypeName().c_str(),
-                    chars_type_suffix.c_str(),
-                    st_message.data(),
-                    chars_indent_message.c_str(),
-                    elem.message.c_str()
-                );
-            }
-            else
-            {
-                terminal.Print("%s%s%s\n",
-                    terminal.AnsiDeltaString(cur_style, style_exception_type).data(),
-                    chars_indent_type.c_str(),
-                    chars_unknown_exception.c_str()
-                );
-            }
-        });
-
-        terminal.Print("%s\n", terminal.AnsiResetString().data());
-    }
-
-    // Print the assertion stack, if any.
     text::PrintContext();
 }
 
@@ -2044,7 +2057,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 
 void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data)
 {
-    PrintFrame(data, FrameKind::expected_exception);
+    PrintFrame(data, nullptr, true);
     text::PrintContext(&data);
 }
 
@@ -2052,38 +2065,46 @@ bool ta_test::modules::MustThrowPrinter::PrintContextFrame(const context::BasicF
 {
     if (auto ptr = dynamic_cast<const BasicModule::MustThrowInfo *>(&frame))
     {
-        PrintFrame(*ptr, FrameKind::while_expecting);
+        PrintFrame(*ptr, nullptr, false);
         return true;
     }
     if (auto ptr = dynamic_cast<const BasicModule::CaughtExceptionInfo *>(&frame))
     {
-        PrintFrame(*ptr->must_throw_call, FrameKind::while_checking);
+        PrintFrame(*ptr->must_throw_call, ptr, false);
         return true;
     }
 
     return false;
 }
 
-void ta_test::modules::MustThrowPrinter::PrintFrame(const BasicModule::MustThrowInfo &data, FrameKind kind)
+void ta_test::modules::MustThrowPrinter::PrintFrame(const BasicModule::MustThrowInfo &data, const BasicModule::CaughtExceptionInfo *caught, bool is_most_nested)
 {
+    const std::string *message = nullptr;
+    if (caught)
+    {
+        message = &chars_throw_location;
+        terminal.Print("%s%s%s%s\n",
+            terminal.AnsiResetString().data(),
+            terminal.AnsiDeltaString({}, common_data.style_stack_frame).data(),
+            chars_exception_contents.c_str(),
+            terminal.AnsiResetString().data()
+        );
+        PrintException(terminal, caught->elems.empty() ? nullptr : caught->elems.front().exception);
+        terminal.Print("\n");
+    }
+    else if (is_most_nested)
+    {
+        message = &chars_expected_exception;
+    }
+    else
+    {
+        message = &chars_while_expecting_exception;
+    }
+
     TextStyle cur_style;
 
     auto st_path = terminal.AnsiDeltaString(cur_style, common_data.style_path);
-    auto st_message = terminal.AnsiDeltaString(cur_style, kind == FrameKind::expected_exception ? common_data.style_error : common_data.style_stack_frame);
-
-    const std::string *message = nullptr;
-    switch (kind)
-    {
-      case FrameKind::expected_exception:
-        message = &chars_expected_exception;
-        break;
-      case FrameKind::while_expecting:
-        message = &chars_while_expecting_exception;
-        break;
-      case FrameKind::while_checking:
-        message = &chars_while_checking_exception;
-        break;
-    }
+    auto st_message = terminal.AnsiDeltaString(cur_style, is_most_nested && !caught ? common_data.style_error : common_data.style_stack_frame);
 
     terminal.Print("%s%s%s:\n%s%s%s\n\n",
         terminal.AnsiResetString().data(),
@@ -2129,7 +2150,7 @@ ta_test::modules::DebuggerDetector::DebuggerDetector()
             dynamic_cast<DebuggerDetector &>(this_module).break_on_failure = enable;
         }
     ),
-    flag_catch("catch", "Catch exceptions. Disabling this means that the application will terminate on a first exception, "
+    flag_catch("catch", "Catch exceptions. Disabling this means that the application will terminate on the first exception, "
         "but this improves debugging experience by letting you configure your debugger to only break on uncaught exceptions, "
         "which means you don't need to manually skip the ones that are thrown and successfully caught. Enabling this while debugging "
         "will give you only approximate exception locations (the innermost enclosing assertion or test), rather than precise ones. (By default enabled if a debugger is not attached.)",

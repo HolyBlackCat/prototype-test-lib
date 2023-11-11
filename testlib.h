@@ -439,22 +439,15 @@ namespace ta_test
             const BasicFrame *frame_ptr = nullptr;
 
           public:
-            FrameGuard() {}
-
             // Stores a frame pointer in the stack. Make sure it doesn't dangle.
             // Note, can't pass a reference here, because it would be ambiguous with the copy constructor
             //   when we inherit from both the `BasicFrame` and the `FrameGuard`.
             // If we could use a reference, we'd need a second deleted constructor to reject rvalues.
+            // Can pass a null pointer here.
             CFG_TA_API explicit FrameGuard(std::shared_ptr<const BasicFrame> frame) noexcept;
 
-            FrameGuard(FrameGuard &&other) noexcept
-                : frame_ptr(std::exchange(other.frame_ptr, nullptr))
-            {}
-            FrameGuard &operator=(FrameGuard other) noexcept
-            {
-                std::swap(frame_ptr, other.frame_ptr);
-                return *this;
-            }
+            FrameGuard(const FrameGuard &) = delete;
+            FrameGuard &operator=(const FrameGuard &) = delete;
 
             CFG_TA_API ~FrameGuard();
         };
@@ -2448,8 +2441,6 @@ namespace ta_test
             CFG_TA_API MustThrowWrapper(const BasicModule::MustThrowInfo *info);
 
           public:
-            MustThrowWrapper() {}
-
             // Makes an instance of this class.
             template <ConstString File, int Line, ConstString MacroName, ConstString Expr>
             [[nodiscard]] static MustThrowWrapper Make()
@@ -2614,6 +2605,30 @@ namespace ta_test
 
     namespace modules
     {
+        // --- BASES ---
+
+        // Inherit modules from this when they need to print exception contents.
+        // We use inheritance instead of composition to allow mass customization of all modules using this.
+        struct BasicExceptionContentsPrinter
+        {
+          public:
+            TextStyle style_exception_type = {.color = TextColor::dark_magenta};
+            TextStyle style_exception_message = {.color = TextColor::light_blue};
+
+            std::string chars_unknown_exception = "Unknown exception.";
+            std::string chars_indent_type = "  ";
+            std::string chars_indent_message = "    ";
+            std::string chars_type_suffix = ": ";
+
+            std::function<void(const BasicExceptionContentsPrinter &self, const Terminal &terminal, const std::exception_ptr &e)> print_callback;
+
+          protected:
+            CFG_TA_API BasicExceptionContentsPrinter();
+            CFG_TA_API void PrintException(const Terminal &terminal, const std::exception_ptr &e) const;
+        };
+
+        // --- MODULES ---
+
         // Responds to `--help` by printing the flags provided by all other modules.
         struct HelpPrinter : BasicPrintingModule
         {
@@ -2905,37 +2920,26 @@ namespace ta_test
         using DefaultExceptionAnalyzer = GenericExceptionAnalyzer<std::exception>;
 
         // Prints any uncaught exceptions.
-        struct ExceptionPrinter : BasicPrintingModule
+        struct ExceptionPrinter : BasicPrintingModule, BasicExceptionContentsPrinter
         {
-            TextStyle style_exception_type = {.color = TextColor::dark_magenta};
-            TextStyle style_exception_message = {.color = TextColor::light_blue};
-
-            std::string chars_error = "UNCAUGHT EXCEPTION:";
-            std::string chars_unknown_exception = "Unknown exception.";
-            std::string chars_indent_type = "  ";
-            std::string chars_indent_message = "    ";
-            std::string chars_type_suffix = ": ";
+            std::string chars_error = "Uncaught exception:";
 
             void OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e) override;
         };
 
         // Prints things related to `TA_MUST_THROW()`.
-        struct MustThrowPrinter : BasicPrintingModule
+        struct MustThrowPrinter : BasicPrintingModule, BasicExceptionContentsPrinter
         {
             std::string chars_expected_exception = "Expected exception:";
             std::string chars_while_expecting_exception = "While expecting exception here:";
-            std::string chars_while_checking_exception = "While checking exception thrown here:";
+            std::string chars_exception_contents = "While analyzing exception:";
+            std::string chars_throw_location = "Thrown here:";
 
             void OnMissingException(const MustThrowInfo &data) override;
             bool PrintContextFrame(const context::BasicFrame &frame) override;
 
-            enum class FrameKind
-            {
-                expected_exception,
-                while_expecting,
-                while_checking,
-            };
-            CFG_TA_API void PrintFrame(const BasicModule::MustThrowInfo &data, FrameKind kind);
+            // `is_most_nested` must be false if `caught` is set.
+            CFG_TA_API void PrintFrame(const BasicModule::MustThrowInfo &data, const BasicModule::CaughtExceptionInfo *caught, bool is_most_nested);
         };
 
         // Detects whether the debugger is attached in a platform-specific way.
