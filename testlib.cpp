@@ -51,7 +51,7 @@ ta_test::context::FrameGuard::FrameGuard(std::shared_ptr<const BasicFrame> frame
         HardError("The context stack is corrupted: The set is larger than the stack.");
 }
 
-ta_test::context::FrameGuard::~FrameGuard()
+void ta_test::context::FrameGuard::Reset()
 {
     if (!frame_ptr)
         return;
@@ -67,6 +67,13 @@ ta_test::context::FrameGuard::~FrameGuard()
 
     if (thread_state.context_stack_set.size() > thread_state.context_stack.size())
         HardError("The context stack is corrupted: The set is larger than the stack.");
+
+    frame_ptr = nullptr;
+}
+
+ta_test::context::FrameGuard::~FrameGuard()
+{
+    Reset();
 }
 
 std::string ta_test::SingleException::GetTypeName() const
@@ -116,31 +123,6 @@ ta_test::detail::GlobalThreadState &ta_test::detail::ThreadState()
 {
     thread_local GlobalThreadState ret;
     return ret;
-}
-
-ta_test::CaughtException::CaughtException(const BasicModule::MustThrowInfo *must_throw_call, const std::exception_ptr &e)
-    : state(std::make_shared<BasicModule::CaughtExceptionInfo>())
-{
-    state->must_throw_call = must_throw_call;
-
-    AnalyzeException(e, [&](SingleException elem)
-    {
-        state->elems.push_back(std::move(elem));
-    });
-}
-
-const std::vector<ta_test::SingleException> &ta_test::CaughtException::GetElems() const
-{
-    if (!state)
-    {
-        // This is a little stupid, but probably better than a `HardError()`?
-        static const std::vector<ta_test::SingleException> ret;
-        return ret;
-    }
-    else
-    {
-        return state->elems;
-    }
 }
 
 bool ta_test::platform::IsDebuggerAttached()
@@ -379,8 +361,8 @@ bool ta_test::text::TextCanvas::IsLineFree(std::size_t line, std::size_t column,
         return true; // This line is completely empty.
 
     std::size_t last_column = column + width;
-    if (last_column >= this_line.info.size())
-        last_column = this_line.info.size() - 1; // `line.info` can't be empty here.
+    if (last_column >/*sic*/ this_line.info.size())
+        last_column = this_line.info.size();
 
     bool ok = true;
     for (std::size_t i = column; i < last_column; i++)
@@ -1006,6 +988,53 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
     state.name_prefixes_to_order.try_emplace(name, state.name_prefixes_to_order.size());
 }
 
+std::string ta_test::DefaultToStringTraits<ta_test::ExceptionElemToCheck>::operator()(const ExceptionElemToCheck &value) const
+{
+    switch (value)
+    {
+      case ExceptionElemToCheck::top_level:
+        return "top_level";
+      case ExceptionElemToCheck::most_nested:
+        return "most_nested";
+      case ExceptionElemToCheck::all:
+        return "all";
+    }
+    HardError("Invalid `ExceptionElemToCheck` enum.", HardErrorKind::user);
+}
+
+ta_test::CaughtException::CaughtException(const BasicModule::MustThrowInfo *must_throw_call, const std::exception_ptr &e)
+    : state(std::make_shared<BasicModule::CaughtExceptionInfo>())
+{
+    state->must_throw_call = must_throw_call;
+
+    AnalyzeException(e, [&](SingleException elem)
+    {
+        state->elems.push_back(std::move(elem));
+    });
+}
+
+const std::vector<ta_test::SingleException> &ta_test::CaughtException::GetElems() const
+{
+    if (!state)
+    {
+        // This is a little stupid, but probably better than a `HardError()`?
+        static const std::vector<ta_test::SingleException> ret;
+        return ret;
+    }
+    else
+    {
+        return state->elems;
+    }
+}
+
+void ta_test::CaughtException::CheckMessage(ExceptionElemToCheck kind, std::string_view regex, Trace<"CheckMessage"> trace) const
+{
+    trace.AddArgs(kind, regex);
+    std::regex r(regex.begin(), regex.end());
+    [[maybe_unused]] auto context = MakeContextGuard();
+    ForEachElem(kind, [&](const SingleException &elem) {TA_CHECK( std::regex_match(elem.message, r) ); return false;});
+}
+
 void ta_test::detail::MustThrowWrapper::MissingException()
 {
     auto &thread_state = ThreadState();
@@ -1020,10 +1049,6 @@ void ta_test::detail::MustThrowWrapper::MissingException()
 
     throw InterruptTestException{};
 }
-
-ta_test::detail::MustThrowWrapper::MustThrowWrapper(const BasicModule::MustThrowInfo *info)
-    : FrameGuard({std::shared_ptr<void>{}, info}), info(info) // A non-owning shared pointer.
-{}
 
 void ta_test::Runner::SetDefaultModules()
 {
@@ -1259,7 +1284,7 @@ ta_test::modules::BasicExceptionContentsPrinter::BasicExceptionContentsPrinter()
                     self.chars_type_suffix.c_str(),
                     st_message.data(),
                     self.chars_indent_message.c_str(),
-                    ToString<std::string_view>{}(elem.message).c_str()
+                    (ToString)(elem.message).c_str()
                 );
             }
             else

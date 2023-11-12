@@ -192,9 +192,7 @@
 //     TA_CHECK($(x) == 42); // `$` will print the value of `x` on failure.
 //     TA_CHECK($(x) == 42, "Checking stuff!"); // Add a custom message.
 //     TA_CHECK($(x) == 42, "Checking {}!", "stuff"); // Custom message with formatting.
-#define TA_CHECK(...) DETAIL_TA_CHECK_HARD("TA_CHECK", #__VA_ARGS__, __VA_ARGS__)
-// Same, but don't immediately fail the test, and wait until it finishes executing.
-#define TA_SOFT_CHECK(...) DETAIL_TA_CHECK_HARD("TA_SOFT_CHECK", #__VA_ARGS__, __VA_ARGS__)
+#define TA_CHECK(...) DETAIL_TA_CHECK("TA_CHECK", #__VA_ARGS__, __VA_ARGS__)
 
 // Can only be used inside of `TA_CHECK(...)`. Wrap a subexpression in this to print its value if the assertion fails.
 // Those can be nested inside one another.
@@ -225,14 +223,12 @@
     >{})) {} \
     inline void _ta_test_func(::ta_test::ConstStringTag<#name>)
 
-#define DETAIL_TA_CHECK_HARD(macro_name_, str_, ...) DETAIL_TA_CHECK_LOW(macro_name_, throw ::ta_test::InterruptTestException{};, str_, __VA_ARGS__)
-#define DETAIL_TA_CHECK_SOFT(macro_name_, str_, ...) DETAIL_TA_CHECK_LOW(macro_name_,, str_, __VA_ARGS__)
-#define DETAIL_TA_CHECK_LOW(macro_name_, on_fail_, str_, ...) \
+#define DETAIL_TA_CHECK(macro_name_, str_, ...) \
     /* Using `_ta_test_name_tag` to force this to be called only in tests. */\
     /* Using `? :` to force the contextual conversion to `bool`. */\
     if (::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion([&](auto &&_ta_func){_ta_func(__VA_ARGS__);})) {} else {\
         if (_ta_assertion.should_break) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
-        on_fail_ \
+        throw ::ta_test::InterruptTestException{}; \
     }
 
 #define DETAIL_TA_ARG(counter, ...) \
@@ -443,11 +439,15 @@ namespace ta_test
             // Note, can't pass a reference here, because it would be ambiguous with the copy constructor
             //   when we inherit from both the `BasicFrame` and the `FrameGuard`.
             // If we could use a reference, we'd need a second deleted constructor to reject rvalues.
-            // Can pass a null pointer here.
+            // Can pass a null pointer here, then we do nothing.
             CFG_TA_API explicit FrameGuard(std::shared_ptr<const BasicFrame> frame) noexcept;
 
             FrameGuard(const FrameGuard &) = delete;
             FrameGuard &operator=(const FrameGuard &) = delete;
+
+            // Removes the frame as if the guard was destroyed. Repeated calls have no effect.
+            // This can only be called if this is the last element in the stack, otherwise you get a hard error.
+            CFG_TA_API void Reset();
 
             CFG_TA_API ~FrameGuard();
         };
@@ -731,31 +731,6 @@ namespace ta_test
     };
 
 
-    // --- STRING CONVERSIONS ---
-
-    // Don't specialize this, specialize `ToString` defined below.
-    template <typename T, typename = void>
-    struct DefaultToString
-    {
-        std::string operator()(const T &value) const
-        {
-            #if CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
-            if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
-            {
-                return CFG_TA_FMT_NAMESPACE::format("{:?}", value);
-            }
-            else
-            #endif
-            {
-                return CFG_TA_FMT_NAMESPACE::format("{}", value);
-            }
-        }
-    };
-    // You can specialize this for your types.
-    template <typename T, typename = void>
-    struct ToString : DefaultToString<T> {};
-
-
     // --- MISC ---
 
     enum class HardErrorKind {internal, user};
@@ -986,36 +961,6 @@ namespace ta_test
             }();
             for (auto *m : GetModulesImplementing<func_enum>())
                 (m->*F)(params...); // No forwarding because there's more than one call.
-        }
-    };
-
-
-    // This is what `TA_MUST_THROW(...)` returns.
-    // Stores a list of nested `SingleException`s, plus the information about the macro call that produced it.
-    class CaughtException
-    {
-        std::shared_ptr<BasicModule::CaughtExceptionInfo> state;
-
-      public:
-        CaughtException() {}
-
-        // This is primarily for internal use.
-        CFG_TA_API explicit CaughtException(const BasicModule::MustThrowInfo *must_throw_call, const std::exception_ptr &e);
-
-        // Returns false for default-constructed or moved-from instances.
-        [[nodiscard]] explicit operator bool() const {return bool(state);}
-
-        // Returns all stored nested exceptions, in case you want to examine them manually.
-        // Prefer the high-level functions below.
-        [[nodiscard]] CFG_TA_API const std::vector<SingleException> &GetElems() const;
-
-        // When you're manually examining this exception with `TA_CHECK(...)`, create this object beforehand.
-        // While it exists, all failed assertions will mention that they happened while examnining this exception.
-        // All high-level functions below do this automatically, and redundant contexts are silently ignored.
-        [[nodiscard]] context::FrameGuard MakeContextGuard() const
-        {
-            // This nicely handles null state.
-            return context::FrameGuard(state);
         }
     };
 
@@ -2019,6 +1964,65 @@ namespace ta_test
         CFG_TA_API void PrintContextFrame(const context::BasicFrame &frame);
     }
 
+
+    // --- STRING CONVERSIONS ---
+
+    // Don't specialize this, specialize `ToStringTraits` defined below.
+    template <typename T, typename = void>
+    struct DefaultToStringTraits
+    {
+        std::string operator()(const T &value) const
+        {
+            #if CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
+            if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
+            {
+                return CFG_TA_FMT_NAMESPACE::format("{:?}", value);
+            }
+            else
+            #endif
+            {
+                return CFG_TA_FMT_NAMESPACE::format("{}", value);
+            }
+        }
+    };
+
+    // `ToStringTraits` serializes this as is, without escaping or quotes.
+    struct ExactString
+    {
+        std::string string;
+    };
+    template <>
+    struct DefaultToStringTraits<ExactString>
+    {
+        std::string operator()(ExactString value) const
+        {
+            return std::move(value.string);
+        }
+    };
+
+    // Type names.
+    template <typename T>
+    requires std::same_as<T, std::type_info> || std::same_as<T, std::type_index>
+    struct DefaultToStringTraits<T>
+    {
+        std::string operator()(const T &value) const
+        {
+            return text::Demangler{}(value.name());
+        }
+    };
+
+    // You can specialize this for your types.
+    template <typename T, typename = void>
+    struct ToStringTraits : DefaultToStringTraits<T> {};
+
+    // Converts `value` to a string using `ToStringTraits`.
+    template <typename T>
+    [[nodiscard]] std::string ToString(T &&value)
+    {
+        return ToStringTraits<std::remove_cvref_t<T>>{}(value);
+    }
+
+
     // The base for modules that print stuff.
     struct BasicPrintingModule : virtual BasicModule
     {
@@ -2067,8 +2071,18 @@ namespace ta_test
         {}
 
       public:
-        BasicTrace(const BasicTrace &) = delete;
+        BasicTrace(const BasicTrace &other)
+            : FrameGuard({std::shared_ptr<void>{}, this}), // A non-owning shared pointer.
+            loc(other.loc) // Only copy the location.
+        {}
+
+        BasicTrace(BasicTrace &&other)
+            : FrameGuard({std::shared_ptr<void>{}, (other.Reset(), this)}), // A non-owning shared pointer.
+            loc(other.loc) // Only copy the location.
+        {}
+
         BasicTrace &operator=(const BasicTrace &) = delete;
+        BasicTrace &operator=(BasicTrace &&) = delete;
 
         [[nodiscard]] const BasicModule::SourceLoc &GetLocation() const {return loc;}
         [[nodiscard]] const std::vector<std::string> &GetFuncArgs() const {return func_args;}
@@ -2079,7 +2093,7 @@ namespace ta_test
         template <typename ...P>
         BasicTrace &AddArgs(const P &... args)
         {
-            (void(func_args.push_back(ToString<P>{}(args))), ...);
+            (void(func_args.push_back((ToString)(args))), ...);
             return *this;
         }
 
@@ -2092,7 +2106,7 @@ namespace ta_test
         template <typename ...P>
         BasicTrace &AddTemplateValues(const P &... args)
         {
-            (void(template_args.push_back(ToString<P>{}(args))), ...);
+            (void(template_args.push_back((ToString)(args))), ...);
             return *this;
         }
     };
@@ -2108,7 +2122,7 @@ namespace ta_test
     };
 
 
-    // --- TEST RUNNER ---
+    // --- CHECKING CAUGHT EXCEPTIONS ---
 
     // Don't touch this.
     namespace detail
@@ -2138,7 +2152,7 @@ namespace ta_test
             {
                 (void)counter; // Unused, but passing it helps with parsing.
                 EnsureAssertionIsRunning();
-                target->value = ToString<std::remove_cvref_t<T>>{}(arg);
+                target->value = ToStringTraits<std::remove_cvref_t<T>>{}(arg);
                 target->state = BasicModule::BasicAssertionExpr::StoredArg::State::done;
                 return std::forward<T>(arg);
             }
@@ -2499,17 +2513,131 @@ namespace ta_test
         // Touch to register a test. `T` is `SpecificTest<??>`.
         template <typename T>
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
+    }
+
+    enum class ExceptionElemToCheck
+    {
+        top_level,
+        most_nested,
+        all,
+    };
+    using enum ExceptionElemToCheck;
+
+    template <>
+    struct DefaultToStringTraits<ExceptionElemToCheck>
+    {
+        CFG_TA_API std::string operator()(const ExceptionElemToCheck &value) const;
+    };
+
+    // This is what `TA_MUST_THROW(...)` returns.
+    // Stores a list of nested `SingleException`s, plus the information about the macro call that produced it.
+    class CaughtException
+    {
+        std::shared_ptr<BasicModule::CaughtExceptionInfo> state;
+
+      public:
+        CaughtException() {}
+
+        // This is primarily for internal use.
+        CFG_TA_API explicit CaughtException(const BasicModule::MustThrowInfo *must_throw_call, const std::exception_ptr &e);
+
+        // Returns false for default-constructed or moved-from instances.
+        [[nodiscard]] explicit operator bool() const {return bool(state);}
+
+        // Returns all stored nested exceptions, in case you want to examine them manually.
+        // Prefer the high-level functions below.
+        [[nodiscard]] CFG_TA_API const std::vector<SingleException> &GetElems() const;
+
+        // When you're manually examining this exception with `TA_CHECK(...)`, create this object beforehand.
+        // While it exists, all failed assertions will mention that they happened while examnining this exception.
+        // All high-level functions below do this automatically, and redundant contexts are silently ignored.
+        [[nodiscard]] context::FrameGuard MakeContextGuard() const
+        {
+            // This nicely handles null state.
+            return context::FrameGuard(state);
+        }
+
+        // Checks that the exception message matches the regex.
+        CFG_TA_API void CheckMessage(ExceptionElemToCheck kind, std::string_view regex, Trace<"CheckMessage"> trace = {}) const;
+        const CaughtException &CheckMessage(std::string_view regex, Trace<"CheckMessage"> trace = {}) const
+        {
+            CheckMessage(ExceptionElemToCheck::top_level, regex, std::move(trace));
+            return *this;
+        }
+
+        // Checks that the exception type is exactly `T`.
+        template <typename T>
+        const CaughtException &CheckExactType(ExceptionElemToCheck kind = ExceptionElemToCheck::top_level, Trace<"CheckExactType"> trace = {})
+        {
+            trace.AddTemplateTypes<T>().AddArgs(kind);
+            [[maybe_unused]] auto context = MakeContextGuard();
+            ForEachElem(kind, [&](const SingleException &elem){TA_CHECK( $(elem.type) == $(typeid(T)) ); return false;});
+            return *this;
+        }
+
+        // Checks that the exception type derives from `T`.
+        template <typename T>
+        requires std::is_class_v<T>
+        const CaughtException &CheckDerivedType(ExceptionElemToCheck kind = ExceptionElemToCheck::top_level, Trace<"CheckDerivedType"> trace = {})
+        {
+            trace.AddTemplateTypes<T>().AddArgs(kind);
+            [[maybe_unused]] auto context = MakeContextGuard();
+            ForEachElem(kind, [&](const SingleException &elem)
+            {
+                try
+                {
+                    std::rethrow_exception(elem.exception);
+                }
+                catch (const T &) {}
+                catch (...)
+                {
+                    TA_CHECK( false, "Exception type `{}` doesn't inherit from `{}`.", elem.IsTypeKnown() ? elem.GetTypeName() : "??", text::TypeName<T>() );
+                }
+
+                return false;
+            });
+            return *this;
+        }
+
+        // Calls `func` for one or more elements, depending on `kind`.
+        // `func` is `(const SingleException &elem) -> bool`. If it returns true, the whole function stops and also returns true.
+        template <typename F>
+        bool ForEachElem(ExceptionElemToCheck kind, F &&func) const
+        {
+            if (!state || state->elems.empty())
+                return false; // Should be good enough. This shouldn't normally happen.
+            switch (kind)
+            {
+              case ExceptionElemToCheck::top_level:
+                return std::forward<F>(func)(state->elems.front());
+              case ExceptionElemToCheck::most_nested:
+                return std::forward<F>(func)(state->elems.back());
+              case ExceptionElemToCheck::all:
+                for (const SingleException &elem : state->elems)
+                {
+                    if (func(elem))
+                        return true;
+                }
+                return false;
+            }
+            HardError("Invalid `ExceptionElemToCheck` enum.", HardErrorKind::user);
+        }
+    };
 
 
+    namespace detail
+    {
         // `TA_MUST_THROW(...)` expands to this.
-        class MustThrowWrapper : public context::FrameGuard
+        class MustThrowWrapper
         {
             const BasicModule::MustThrowInfo *info = nullptr;
 
             // Fails the test because there was no exception.
             [[noreturn]] CFG_TA_API void MissingException();
 
-            CFG_TA_API MustThrowWrapper(const BasicModule::MustThrowInfo *info);
+            MustThrowWrapper(const BasicModule::MustThrowInfo *info)
+                : info(info)
+            {}
 
           public:
             // Makes an instance of this class.
@@ -2538,6 +2666,7 @@ namespace ta_test
 
                 try
                 {
+                    context::FrameGuard guard({std::shared_ptr<void>{}, info});
                     std::forward<F>(func)();
                 }
                 catch (...)
@@ -2549,6 +2678,9 @@ namespace ta_test
             }
         };
     }
+
+
+    // --- TEST RUNNER ---
 
     // Use this to run tests.
     struct Runner
@@ -3054,8 +3186,8 @@ namespace ta_test
 #if !CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
 namespace ta_test
 {
-    template <typename Void>
-    struct DefaultToString<char, Void>
+    template <>
+    struct DefaultToStringTraits<char>
     {
         std::string operator()(char value) const
         {
@@ -3064,8 +3196,8 @@ namespace ta_test
             return ret;
         }
     };
-    template <typename Void>
-    struct DefaultToString<std::string, Void>
+    template <>
+    struct DefaultToStringTraits<std::string>
     {
         std::string operator()(const std::string &value) const
         {
@@ -3075,8 +3207,8 @@ namespace ta_test
             return ret;
         }
     };
-    template <typename Void>
-    struct DefaultToString<std::string_view, Void>
+    template <>
+    struct DefaultToStringTraits<std::string_view>
     {
         std::string operator()(const std::string_view &value) const
         {
@@ -3086,9 +3218,9 @@ namespace ta_test
             return ret;
         }
     };
-    template <typename Void> struct DefaultToString<      char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
-    template <typename Void> struct DefaultToString<const char *, Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
+    template <> struct DefaultToStringTraits<      char *> {std::string operator()(const char *value) const {return ToStringTraits<std::string_view>{}(value);}};
+    template <> struct DefaultToStringTraits<const char *> {std::string operator()(const char *value) const {return ToStringTraits<std::string_view>{}(value);}};
     // Somehow this catches const arrays too:
-    template <std::size_t N, typename Void> struct DefaultToString<char[N], Void> {std::string operator()(const char *value) const {return ToString<std::string_view>{}(value);}};
+    template <std::size_t N> struct DefaultToStringTraits<char[N]> {std::string operator()(const char *value) const {return ToStringTraits<std::string_view>{}(value);}};
 }
 #endif

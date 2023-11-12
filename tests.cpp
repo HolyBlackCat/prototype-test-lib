@@ -9,116 +9,33 @@ bool sum(const auto &...){return false;}
 // Turn `a` and `b` into `integral_constant`s with the same __COUNTER__ value, compare them in the macro to check if we're nested or not? Could work.
 #define TA_VARIANT(...) (int a = 1) if (int b = 1) {} else
 
-bool foo()
-{
-
-    // try
-    // {
-        // throw std::runtime_error("Blah!");
-    // }
-    // catch (...)
-    // {
-    //     std::throw_with_nested(std::runtime_error("Wrap!"));
-    // }
-
-    // auto e = MUST_THROW(...);
-
-    // struct SingleExceptionInfo
-    // {
-
-    // };
-
-    // using ExceptionInfo = std::vector<SingleExceptionInfo>;
-
-    // enum class SubExceptionKind
-    // {
-    //     outermost,
-    //     innermost,
-    //     all,
-    // };
-
-    // e.CheckMessage(".*");
-    // e.CheckMessage(i, ".*");
-
-    // e.CheckExactType<std::runtime_error>(i = first);
-    // e.CheckDerivedType<std::exception>(i = first);
-
-    // e.CheckMessage(".*");
-
-
-    std::string first = "aaaaaaaaaaaaa", second = "baaaaaffffffffffffar", suffix = "oof", extra = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    // TA_SOFT_CHECK( false, "Hello {}!", first);
-    TA_CHECK( $($(first) + $(second)).ends_with($($(suffix.c_str()) + $(extra) + $("123") + $("456"))) );
-    return false;
-}
-
 bool fof()
 {
     // TA_MUST_THROW(1+1);
 
     // TA_MUST_THROW(TA_CHECK(false));
 
-    auto e = TA_MUST_THROW(throw std::runtime_error("Must!"));
-    auto guard = e.MakeContextGuard();
-    auto guard2 = e.MakeContextGuard();
-    TA_CHECK(false);
+    TA_MUST_THROW(throw std::runtime_error("Must!")).CheckDerivedType<std::string>();
     return true;
 }
-
-bool traced(int x, int y, ta_test::Trace<"traced"> trace = {})
-{
-    trace.AddTemplateValues("42").AddArgs(x, y);
-
-    TA_CHECK(false);
-
-    return false;
-}
-
 TA_TEST(foo/bar)
 {
-    TA_CHECK($(traced(2, 3)));
+    fof();
 }
-
-TA_TEST(test/lul/beta)
-{
-    std::vector<int> v = {1,2,3};
-    TA_CHECK($(true) && $(foo()) && $(true), "huh");
-}
-
-TA_TEST( foo/baz )
-{
-}
-
-TA_TEST( bar/alpha )
-{
-}
-TA_TEST( omega )
-{
-    // throw std::runtime_error("123");
-}
-TA_TEST(test/lel/alpha)
-{
-    TA_CHECK(false);
-}
-TA_TEST( foo/alpha )
-{
-}
-TA_TEST( foo/alpha1 ) {}
-TA_TEST( foo/alpha2 ) {}
-TA_TEST( foo/alpha3 ) {}
 
 int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
 
-// Some form of expect_throw.
+// $(...) should tolerate non-printable arguments, but only in non-dependent context.
 
 // Manually call formatters instead of std::format to use the debug format always when it's supported.
 
 // Try to enforce relative paths, and try printing errors on the same line as paths.
 
 // Forced pass/fail macros?
+//     Then go replace `TA_CHECK( false` with one.
 
 // Short macros that can be disabled in the config.
 
@@ -134,7 +51,8 @@ int main(int argc, char **argv)
 // Test without exceptions.
 // Test without RTTI. What about exception type names?
 
-// Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
+// Add a "softness" enum argument instead of TA_SOFT_CHECK.
+//     Or perhaps a softness guard instead? SOFT{...}. This would fail the test when destroyed, if something failed inside.
 
 // Subsections, for_types, and for_values (for_values optional?)
 
@@ -142,7 +60,10 @@ int main(int argc, char **argv)
 
 // Do we need `__visibility__("default")` when exporting from a shared library on Linux? And also test that somehow...
 
+// Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
+
 // Later:
+//         Use it in CaughtException::... member functions instead of unconditional soft.
 //     Somehow don't evaluate the message if the assertion passes? Perhaps change the syntax to `CHECK(cond, LOG("{}", 42))`, reusing one of the log macros?
 //         Same for the arguments passed to `Trace`?
 //     Multithreading? Thread inheritance system.
@@ -194,11 +115,18 @@ TA_CHECK($("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") &&
 
 --- Werror on everything?
 
+TA_CHECK:
+    make sure that two values can't be printed side-by-side
+    hard errors on unprintable stuff only in non-dependent contexts
+
+TA_MUST_THROW - speaks for itself
+
 --- TA_MUST_THROW:
     Doesn't warn on unused value.
     Doesn't warn on nodiscard violation.
     Doesn't warn on `;` at the end.
     Opening two same context frames deduplicates them.
+    When doing a oneliner: `TA_MUST_THROW(...).Check...()`, make sure that the frame guard from the macro doesn't extend into the check.
 
 --- Exception printer
 Known and unknown exception types.
