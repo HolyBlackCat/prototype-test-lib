@@ -842,71 +842,74 @@ void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
     HardError("`$(...)` was evaluated when an assertion owning it already finished executing, or in a wrong thread.", HardErrorKind::user);
 }
 
-ta_test::detail::BasicAssertWrapper::BasicAssertWrapper()
-    : FrameGuard({std::shared_ptr<void>{}, this}) // A non-owning shared pointer.
+ta_test::detail::BasicAssertWrapper::Evaluator::operator std::nullptr_t()
 {
-    GlobalThreadState &thread_state = ThreadState();
-    if (!thread_state.current_test)
-        HardError("This thread doesn't have a test currently running, yet it tries to use an assertion.");
-
-    auto &cur = thread_state.current_assertion;
-    enclosing_assertion = cur;
-    cur = this;
-}
-
-ta_test::detail::BasicAssertWrapper::~BasicAssertWrapper()
-{
-    // We don't check `finished` here. It can be false when a nested assertion fails.
-
-    GlobalThreadState &thread_state = ThreadState();
-    if (thread_state.current_assertion != this)
-        HardError("Something is wrong. Are we in a coroutine that was transfered to a different thread in the middle on an assertion?");
-
-    thread_state.current_assertion = const_cast<BasicModule::BasicAssertionInfo *>(enclosing_assertion);
-}
-
-bool ta_test::detail::BasicAssertWrapper::PreEvaluate()
-{
-    if (finished)
-        HardError("Invalid usage, `operator()` called more than once on an `AssertWrapper`.");
+    AssertionStackGuard stack_guard(self);
+    context::FrameGuard context_guard({std::shared_ptr<void>{}, &self});
 
     GlobalThreadState &thread_state = ThreadState();
     if (!thread_state.current_test)
         HardError("Something is wrong, the current test information disappeared while the assertion was evaluated.");
-    if (thread_state.current_assertion != this)
+    if (thread_state.current_assertion != &self)
         HardError("The assertion being evaluated is not on the top of the assertion stack.");
 
     bool should_catch = true;
     thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreTryCatch>(should_catch);
-    return should_catch;
-}
 
-void ta_test::detail::BasicAssertWrapper::UncaughtException()
-{
-    GlobalThreadState &thread_state = ThreadState();
-    thread_state.FailCurrentTest();
-
-    auto e = std::current_exception();
-    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnUncaughtException>(*thread_state.current_test, e);
-
-    finished = true;
-}
-
-void ta_test::detail::BasicAssertWrapper::PostEvaluate(bool value, const std::optional<std::string> &fail_message)
-{
-    if (!value)
+    if (should_catch)
     {
-        GlobalThreadState &thread_state = ThreadState();
-        thread_state.FailCurrentTest();
+        try
+        {
+            self.condition_func(self, self.condition_data);
+        }
+        catch (InterruptTestException)
+        {
+            // We don't want any additional errors here.
+            return nullptr;
+        }
+        catch (...)
+        {
+            thread_state.FailCurrentTest();
 
-        std::optional<std::string_view> fail_message_view;
-        if (fail_message)
-            fail_message_view = *fail_message;
-
-        thread_state.current_test->all_tests->modules->Call<&BasicModule::OnAssertionFailed>(*this, fail_message_view);
+            auto e = std::current_exception();
+            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnUncaughtException>(*thread_state.current_test, &self, e);
+        }
+    }
+    else
+    {
+        self.condition_func(self, self.condition_data);
     }
 
-    finished = true;
+    // Fail if the condition is false.
+    if (self.condition_value_known && !self.condition_value)
+    {
+        thread_state.FailCurrentTest();
+        thread_state.current_test->all_tests->modules->Call<&BasicModule::OnAssertionFailed>(self);
+    }
+
+    // Break if a module callback (either on failed assertion or on exception) wants to.
+    if (self.should_break)
+        self.break_func();
+
+    // Interrupt the test if the condition is false or on an exception.
+    if (!self.condition_value_known || !self.condition_value)
+        throw InterruptTestException{};
+
+    return nullptr;
+}
+
+std::optional<std::string_view> ta_test::detail::BasicAssertWrapper::GetUserMessage() const
+{
+    if (message_func)
+    {
+        if (!message_cache)
+            message_cache = message_func(message_data);
+        return *message_cache;
+    }
+    else
+    {
+        return {};
+    }
 }
 
 void ta_test::detail::GlobalState::SortTestListInExecutionOrder(std::span<std::size_t> indices) const
@@ -1242,7 +1245,7 @@ int ta_test::Runner::Run()
             {
                 detail::ThreadState().FailCurrentTest();
                 auto e = std::current_exception();
-                module_lists.Call<&BasicModule::OnUncaughtException>(guard.state, e);
+                module_lists.Call<&BasicModule::OnUncaughtException>(guard.state, nullptr, e);
             }
         }
         else
@@ -1850,9 +1853,9 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 
 // --- modules::AssertionPrinter ---
 
-void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message)
+void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data)
 {
-    PrintAssertionFrameLow(data, message, true);
+    PrintAssertionFrameLow(data, true);
     text::PrintContext(&data);
 }
 
@@ -1860,14 +1863,14 @@ bool ta_test::modules::AssertionPrinter::PrintContextFrame(const context::BasicF
 {
     if (auto assertion_frame = dynamic_cast<const BasicAssertionInfo *>(&frame))
     {
-        PrintAssertionFrameLow(*assertion_frame, {}, false);
+        PrintAssertionFrameLow(*assertion_frame, false);
         return true;
     }
 
     return false;
 }
 
-void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAssertionInfo &data, std::optional<std::string_view> message, bool is_most_nested) const
+void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAssertionInfo &data, bool is_most_nested) const
 {
     text::TextCanvas canvas(&common_data);
     std::size_t line_counter = 0;
@@ -1882,7 +1885,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
         else
             column = canvas.DrawString(line_counter, 0, chars_in_assertion, {.style = common_data.style_stack_frame, .important = true});
 
-        if (message)
+        if (auto message = data.GetUserMessage())
             canvas.DrawString(line_counter, column + 1, *message, {.style = style_user_message, .important = true});
 
         line_counter++;
@@ -2062,9 +2065,10 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
 
 // --- modules::ExceptionPrinter ---
 
-void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e)
+void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e)
 {
     (void)test;
+    (void)assertion;
 
     terminal.Print("%s%s%s%s\n",
         terminal.AnsiResetString().data(),
@@ -2267,12 +2271,18 @@ bool ta_test::modules::DebuggerDetector::IsDebuggerAttached() const
     return platform::IsDebuggerAttached();
 }
 
-void ta_test::modules::DebuggerDetector::OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message)
+void ta_test::modules::DebuggerDetector::OnAssertionFailed(const BasicAssertionInfo &data)
 {
-    (void)message;
-
     if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
         data.should_break = true;
+}
+
+void ta_test::modules::DebuggerDetector::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e)
+{
+    (void)test;
+    (void)e;
+    if (assertion && (break_on_failure ? *break_on_failure : IsDebuggerAttached()))
+        assertion->should_break = true;
 }
 
 void ta_test::modules::DebuggerDetector::OnPreTryCatch(bool &should_catch)

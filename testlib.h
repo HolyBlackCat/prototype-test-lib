@@ -187,11 +187,13 @@
 
 // Check condition, immediately fail the test if false.
 // The condition can be followed by a custom message, then possibly by format arguments.
+// The custom message is evaluated only if the condition is false, so you can use expensive calls in it.
+// Returns the same boolean that was passed as the condition.
 // Usage:
 //     TA_CHECK(x == 42);
 //     TA_CHECK($(x) == 42); // `$` will print the value of `x` on failure.
-//     TA_CHECK($(x) == 42, "Checking stuff!"); // Add a custom message.
-//     TA_CHECK($(x) == 42, "Checking {}!", "stuff"); // Custom message with formatting.
+//     TA_CHECK($(x) == 42)("Checking stuff!"); // Add a custom message.
+//     TA_CHECK($(x) == 42)("Checking {}!", "stuff"); // Custom message with formatting.
 #define TA_CHECK(...) DETAIL_TA_CHECK("TA_CHECK", #__VA_ARGS__, __VA_ARGS__)
 
 // Can only be used inside of `TA_CHECK(...)`. Wrap a subexpression in this to print its value if the assertion fails.
@@ -224,18 +226,22 @@
     inline void _ta_test_func(::ta_test::ConstStringTag<#name>)
 
 #define DETAIL_TA_CHECK(macro_name_, str_, ...) \
-    /* Using `_ta_test_name_tag` to force this to be called only in tests. */\
-    /* Using `? :` to force the contextual conversion to `bool`. */\
-    if (::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__> _ta_assertion{}; _ta_assertion([&](auto &&_ta_func){_ta_func(__VA_ARGS__);})) {} else {\
-        if (_ta_assertion.should_break) {CFG_TA_BREAKPOINT(); ::std::terminate();} \
-        throw ::ta_test::InterruptTestException{}; \
-    }
+    /* First `(std::nullptr_t)` actually runs the assertion (all the code is in `operator std::nullptr_t`), */\
+    /* then `(void)` makes sure the `nullptr` isn't used for anything. */\
+    (void)(std::nullptr_t)\
+    ::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__>(\
+        /* `?:` performs a contextual bool conversion. */\
+        [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(__VA_ARGS__);}, []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
+    )\
+    .DETAIL_TA_CHECK_MESSAGE
+
+#define DETAIL_TA_CHECK_MESSAGE(...) \
+    AddMessage([&](auto &&_ta_add_message){_ta_add_message(__VA_ARGS__);})
 
 #define DETAIL_TA_ARG(counter, ...) \
     /* Note the outer parentheses, they allow this to be transparently used e.g. as a single function parameter. */\
     /* Passing `counter` the second time is redundant, but helps with our parsing. */\
-    /* Note `void(_ta_assertion)`, which prevents this from being used outside of an assertion. */\
-    (_ta_assertion.BeginArg(counter)._ta_handle_arg_(counter, __VA_ARGS__))
+    (_ta_assert.BeginArg(counter)._ta_handle_arg_(counter, __VA_ARGS__))
 
 #define DETAIL_TA_MUST_THROW(macro_name_, str_, ...) \
     ::ta_test::detail::MustThrowWrapper::Make<__FILE__, __LINE__, macro_name_, str_>()([&]{CFG_IGNORE_UNUSED_VALUE(__VA_ARGS__;)})
@@ -418,10 +424,6 @@ namespace ta_test
         struct BasicFrame
         {
           protected:
-            BasicFrame() = default;
-          public:
-            BasicFrame(const BasicFrame &) = default;
-            BasicFrame &operator=(const BasicFrame &) = default;
             virtual ~BasicFrame() = default;
         };
         using Context = std::span<const std::shared_ptr<const BasicFrame>>;
@@ -633,6 +635,9 @@ namespace ta_test
             // Where the assertion is located in the source.
             [[nodiscard]] virtual const SourceLoc &SourceLocation() const = 0;
 
+            // Returns the user message.
+            // This is lazy, the first call evaluates the message. This means it's not thread-safe.
+            [[nodiscard]] virtual std::optional<std::string_view> GetUserMessage() const = 0;
 
             // The assertion is printed as a sequence of the elements below:
 
@@ -648,11 +653,12 @@ namespace ta_test
             [[nodiscard]] virtual DecoVar GetElement(int index) const = 0;
         };
         // Called when an assertion fails.
-        // `message` is the associated user message, if any.
-        virtual void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) {(void)data; (void)message;}
+        virtual void OnAssertionFailed(const BasicAssertionInfo &data) {(void)data;}
 
-        // Called when an exception falls out of an assertion or out of the entire test (in the latter case `assertion` is null).
-        virtual void OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e) {(void)test; (void)e;}
+        // Called when an exception falls out of an assertion or out of the entire test (in the latter case `assertion` will be null).
+        // `assertion` is provided solely to allow you to do `assertion->should_break = true`. If you just want to print the failure context,
+        // use `namespace context` instead, it will give you the same assertion and more.
+        virtual void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) {(void)test; (void)assertion; (void)e;}
 
         // This in the context stack means that we're currently inside of a `TA_MUST_THROW()`.
         struct MustThrowInfo : context::BasicFrame
@@ -2160,83 +2166,120 @@ namespace ta_test
 
         // An intermediate base class that `AssertWrapper<T>` inherits from.
         // You can also inherit custom assertion classes from this, if they don't need the expression decomposition provided by `AssertWrapper<T>`.
-        class BasicAssertWrapper : public BasicModule::BasicAssertionInfo, public context::FrameGuard
+        class BasicAssertWrapper : public BasicModule::BasicAssertionInfo
         {
-            bool finished = false;
-            std::string user_message;
+            bool condition_value = false;
+
+            // User condition was evaluated to completion.
+            bool condition_value_known = false;
+
+            // This is called to evaluate the user condition.
+            void (*condition_func)(BasicAssertWrapper &self, const void *data) = nullptr;
+            const void *condition_data = nullptr;
+
+            // Call to trigger a breakpoint at the macro call site.
+            void (*break_func)();
+
+            // This is called to get the optional user message (null if no message).
+            std::string (*message_func)(const void *data) = nullptr;
+            const void *message_data = nullptr;
+            // The user message is cached here.
+            mutable std::optional<std::string> message_cache;
+
+            // Pushes and pops this into the assertion stack.
+            struct AssertionStackGuard
+            {
+                BasicAssertWrapper &self;
+
+                AssertionStackGuard(BasicAssertWrapper &self)
+                    : self(self)
+                {
+                    GlobalThreadState &thread_state = ThreadState();
+                    if (!thread_state.current_test)
+                        HardError("This thread doesn't have a test currently running, yet it tries to use an assertion.");
+
+                    auto &cur = thread_state.current_assertion;
+                    self.enclosing_assertion = cur;
+                    cur = &self;
+                }
+
+                AssertionStackGuard(const AssertionStackGuard &) = delete;
+                AssertionStackGuard &operator=(const AssertionStackGuard &) = delete;
+
+                ~AssertionStackGuard()
+                {
+                    // We don't check `finished` here. It can be false when a nested assertion fails.
+
+                    GlobalThreadState &thread_state = ThreadState();
+                    if (thread_state.current_assertion != &self)
+                        HardError("Something is wrong. Are we in a coroutine that was transfered to a different thread in the middle on an assertion?");
+
+                    thread_state.current_assertion = const_cast<BasicModule::BasicAssertionInfo *>(self.enclosing_assertion);
+                }
+            };
+
+            // This is invoked when the assertion finishes evaluating.
+            struct Evaluator
+            {
+                BasicAssertWrapper &self;
+                CFG_TA_API explicit operator std::nullptr_t();
+            };
 
           public:
-            CFG_TA_API BasicAssertWrapper();
+            // Note the weird variable name, it helps with our macro syntax that adds optional messages.
+            Evaluator DETAIL_TA_CHECK_MESSAGE{*this};
+
+            template <typename F>
+            BasicAssertWrapper(const F &func, void (*break_func)())
+                : break_func(break_func)
+            {
+                condition_func = [](BasicAssertWrapper &self, const void *data)
+                {
+                    return (*static_cast<const F *>(data))(self);
+                };
+                condition_data = &func;
+            }
+
             BasicAssertWrapper(const BasicAssertWrapper &) = delete;
             BasicAssertWrapper &operator=(const BasicAssertWrapper &) = delete;
 
-            template <typename F>
-            bool operator()(F &&func)
+            template <typename T>
+            void EvalCond(T &&value)
             {
-                bool should_catch = PreEvaluate();
-
-                bool value = false;
-
-                std::optional<std::string> message;
-
-                auto lambda = [&]
-                {
-                    func(Overload{
-                        [&]<typename C>(C &&cond)
-                        {
-                            // `?:` to force a contextual bool conversion.
-                            value = std::forward<C>(cond) ? true : false;
-                        },
-                        // This is lame, but I can't just make `format` one of the variadic arguments, because then it's not constexpr enough for `format()`.
-                        [&]<typename C, typename ...P>(C &&cond, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... message_parts)
-                        {
-                            // `?:` to force a contextual bool conversion.
-                            value = std::forward<C>(cond) ? true : false;
-                            if (!value)
-                                message = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(message_parts)...);
-                        },
-                    });
-                };
-
-                if (should_catch)
-                {
-                    try
-                    {
-                        lambda();
-                    }
-                    catch (InterruptTestException)
-                    {
-                        // We don't want any additional errors here.
-                        return false;
-                    }
-                    catch (...)
-                    {
-                        UncaughtException();
-                        return false;
-                    }
-                }
-                else
-                {
-                    lambda();
-                }
-
-                PostEvaluate(value, message);
-
-                return value;
+                // Using `? :` to force a contextual bool conversion.
+                condition_value = std::forward<T>(value) ? true : false;
+                condition_value_known = true;
             }
 
-          protected:
-            CFG_TA_API ~BasicAssertWrapper();
+            template <typename F>
+            Evaluator &AddMessage(const F &func)
+            {
+                if (!condition_value)
+                {
+                    message_func = [](const void *data)
+                    {
+                        std::string ret;
+                        (*static_cast<const F *>(data))([&]<typename ...P>(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+                        {
+                            ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                        });
+                        return ret;
+                    };
+                    message_data = &func;
+                }
+                return DETAIL_TA_CHECK_MESSAGE;
+            }
 
-          private:
-            [[nodiscard]] CFG_TA_API bool PreEvaluate(); // Returns true if we should catch exceptions.
-            CFG_TA_API void UncaughtException();
-            CFG_TA_API void PostEvaluate(bool value, const std::optional<std::string> &fail_message);
+            std::optional<std::string_view> GetUserMessage() const override;
+
+            virtual ArgWrapper BeginArg(int counter) = 0;
         };
 
         template <ConstString MacroName, ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
         struct AssertWrapper : BasicAssertWrapper, BasicModule::BasicAssertionExpr
         {
+            using BasicAssertWrapper::BasicAssertWrapper;
+
             // The number of arguments.
             static constexpr std::size_t num_args = []{
                 std::size_t ret = 0;
@@ -2395,7 +2438,7 @@ namespace ta_test
                     return std::monostate{};
             }
 
-            [[nodiscard]] ArgWrapper BeginArg(int counter)
+            [[nodiscard]] ArgWrapper BeginArg(int counter) override
             {
                 auto it = std::partition_point(arg_data.counter_to_arg_index.begin(), arg_data.counter_to_arg_index.end(),
                     [&](const CounterIndexPair &pair){return pair.counter < counter;}
@@ -2591,7 +2634,7 @@ namespace ta_test
                 catch (const T &) {}
                 catch (...)
                 {
-                    TA_CHECK( false, "Exception type `{}` doesn't inherit from `{}`.", elem.IsTypeKnown() ? elem.GetTypeName() : "??", text::TypeName<T>() );
+                    TA_CHECK( false )( "Exception type `{}` doesn't inherit from `{}`.", elem.IsTypeKnown() ? elem.GetTypeName() : "??", text::TypeName<T>() );
                 }
 
                 return false;
@@ -3078,10 +3121,10 @@ namespace ta_test
             // Same, but when there's more than one subexpression. This should never happen.
             std::u32string chars_in_this_subexpr_inexact = U"in here?";
 
-            void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) override;
+            void OnAssertionFailed(const BasicAssertionInfo &data) override;
             bool PrintContextFrame(const context::BasicFrame &frame) override;
 
-            CFG_TA_API void PrintAssertionFrameLow(const BasicAssertionInfo &data, std::optional<std::string_view> message, bool is_most_nested) const;
+            CFG_TA_API void PrintAssertionFrameLow(const BasicAssertionInfo &data, bool is_most_nested) const;
         };
 
         // A generic module to analyze exceptions.
@@ -3126,7 +3169,7 @@ namespace ta_test
         {
             std::string chars_error = "Uncaught exception:";
 
-            void OnUncaughtException(const RunSingleTestInfo &test, const std::exception_ptr &e) override;
+            void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) override;
         };
 
         // Prints things related to `TA_MUST_THROW()`.
@@ -3169,7 +3212,8 @@ namespace ta_test
             std::vector<flags::BasicFlag *> GetFlags() override;
 
             CFG_TA_API bool IsDebuggerAttached() const;
-            void OnAssertionFailed(const BasicAssertionInfo &data, std::optional<std::string_view> message) override;
+            void OnAssertionFailed(const BasicAssertionInfo &data) override;
+            void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) override;
             void OnPreTryCatch(bool &should_catch) override;
             void OnPostRunSingleTest(const RunSingleTestResults &data) override;
         };

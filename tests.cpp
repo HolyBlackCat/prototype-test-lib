@@ -11,15 +11,14 @@ bool sum(const auto &...){return false;}
 
 bool fof()
 {
-    // TA_MUST_THROW(1+1);
-
-    // TA_MUST_THROW(TA_CHECK(false));
-
-    TA_MUST_THROW(throw std::runtime_error("Must!")).CheckDerivedType<std::string>();
+    // TA_CHECK($(1) == $(2));
+    // TA_CHECK($(1) == $(2))("x = {}", 42);
+    throw std::runtime_error("123");
     return true;
 }
 TA_TEST(foo/bar)
 {
+    TA_CHECK($(fof()))("y = {}", 43);
     fof();
 }
 
@@ -28,11 +27,13 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// $(...) should tolerate non-printable arguments, but only in non-dependent context.
+// Purge project.mk from history!
+
+// Maybe not? $(...) should tolerate non-printable arguments, but only in non-dependent context.
+
+// Use .nested_ptr() to get the underlying type from nested exceptions
 
 // Manually call formatters instead of std::format to use the debug format always when it's supported.
-
-// Try to enforce relative paths, and try printing errors on the same line as paths.
 
 // Forced pass/fail macros?
 //     Then go replace `TA_CHECK( false` with one.
@@ -63,7 +64,6 @@ int main(int argc, char **argv)
 // Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
 
 // Later:
-//         Use it in CaughtException::... member functions instead of unconditional soft.
 //     Somehow don't evaluate the message if the assertion passes? Perhaps change the syntax to `CHECK(cond, LOG("{}", 42))`, reusing one of the log macros?
 //         Same for the arguments passed to `Trace`?
 //     Multithreading? Thread inheritance system.
@@ -78,6 +78,7 @@ int main(int argc, char **argv)
 //     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
 //     Deduplicate assertions in stacks? Both when an assertion fails and when an exception is triggered.
 //     Get terminal width, and limit separator length to that value (but still not make them longer than they currently are)
+//     Try to enforce relative paths, and try printing errors on the same line as paths.
 
 // Unclear how:
 //     Draw a fat bracket while explaining each test failure?
@@ -116,10 +117,14 @@ TA_CHECK($("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") &&
 --- Werror on everything?
 
 TA_CHECK:
+    return type is void
+    `TA_CHECK(true, true)` shouldn't compile because of a comma
     make sure that two values can't be printed side-by-side
     hard errors on unprintable stuff only in non-dependent contexts
-
-TA_MUST_THROW - speaks for itself
+    When doing a oneliner: `TA_CHECK(true), TA_CHECK(false)` - the first one shouldn't extend its scope into the next one.
+    We're performing a proper contextual bool conversion.
+    A non-const format string is a compilation error.
+    A bad format is a compilation error.
 
 --- TA_MUST_THROW:
     Doesn't warn on unused value.
