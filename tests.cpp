@@ -13,7 +13,9 @@ bool fof()
 {
     // TA_CHECK($(1) == $(2));
     // TA_CHECK($(1) == $(2))("x = {}", 42);
-    TA_FAIL("stuff {}", 42);
+    // TA_FAIL("stuff {}", 42);
+
+    TA_MUST_THROW(throw std::runtime_error("Boo!")).CheckDerivedType<std::exception>(0);
     return true;
 }
 TA_TEST(foo/bar)
@@ -27,8 +29,6 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Get rid of the ability to copy/move `Trace`.
-// Clean up `CaughtException` using the custom messages.
 // `CaughtException` should support an optional message too.
 
 // Manually call formatters instead of std::format to use the debug format always when it's supported.
@@ -41,11 +41,10 @@ int main(int argc, char **argv)
 // Review styles:
 //     string literals are ugly bright cyan
 
+// Throw away excessive use of `size_t`, switch to `int` or `ptrdiff_t`?
+
 // Test without exceptions.
 // Test without RTTI. What about exception type names?
-
-// Add a "softness" enum argument instead of TA_SOFT_CHECK.
-//     Or perhaps a softness guard instead? SOFT{...}. This would fail the test when destroyed, if something failed inside.
 
 // Subsections, for_types, and for_values (for_values optional?)
 
@@ -128,6 +127,8 @@ TA_CHECK:
     Doesn't warn on `;` at the end.
     Opening two same context frames deduplicates them.
     When doing a oneliner: `TA_MUST_THROW(...).Check...()`, make sure that the frame guard from the macro doesn't extend into the check.
+
+--- `Trace` type
 
 --- Exception printer
 Known and unknown exception types.

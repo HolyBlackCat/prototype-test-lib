@@ -429,6 +429,9 @@ namespace ta_test
         struct BasicFrame
         {
           protected:
+            BasicFrame() = default;
+            BasicFrame(const BasicFrame &) = default;
+            BasicFrame &operator=(const BasicFrame &) = default;
             virtual ~BasicFrame() = default;
         };
         using Context = std::span<const std::shared_ptr<const BasicFrame>>;
@@ -2082,16 +2085,6 @@ namespace ta_test
         {}
 
       public:
-        BasicTrace(const BasicTrace &other)
-            : FrameGuard({std::shared_ptr<void>{}, this}), // A non-owning shared pointer.
-            loc(other.loc) // Only copy the location.
-        {}
-
-        BasicTrace(BasicTrace &&other)
-            : FrameGuard({std::shared_ptr<void>{}, (other.Reset(), this)}), // A non-owning shared pointer.
-            loc(other.loc) // Only copy the location.
-        {}
-
         BasicTrace &operator=(const BasicTrace &) = delete;
         BasicTrace &operator=(BasicTrace &&) = delete;
 
@@ -2571,18 +2564,30 @@ namespace ta_test
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
     }
 
-    enum class ExceptionElemToCheck
+    // Designates or more components of `CaughtException`.
+    enum class ExceptionElem
     {
-        top_level,
+        // The exception itself, not something nested in it.
+        // This should be zero, to keep it the default.
+        top_level = 0,
+        // The most-nested exception.
         most_nested,
+        // The exception itself and all nested exceptions.
         all,
     };
-    using enum ExceptionElemToCheck;
+    using enum ExceptionElem;
+    // Either an index of an exception element in `CaughtException`, or a enum designating one or more elements.
+    using ExceptionElemVar = std::variant<ExceptionElem, int>;
 
     template <>
-    struct DefaultToStringTraits<ExceptionElemToCheck>
+    struct DefaultToStringTraits<ExceptionElem>
     {
-        CFG_TA_API std::string operator()(const ExceptionElemToCheck &value) const;
+        CFG_TA_API std::string operator()(const ExceptionElem &value) const;
+    };
+    template <>
+    struct DefaultToStringTraits<ExceptionElemVar>
+    {
+        CFG_TA_API std::string operator()(const ExceptionElemVar &value) const;
     };
 
     // This is what `TA_MUST_THROW(...)` returns.
@@ -2614,31 +2619,35 @@ namespace ta_test
         }
 
         // Checks that the exception message matches the regex.
-        CFG_TA_API void CheckMessage(ExceptionElemToCheck kind, std::string_view regex, Trace<"CheckMessage"> trace = {}) const;
-        const CaughtException &CheckMessage(std::string_view regex, Trace<"CheckMessage"> trace = {}) const
+        // The entire message must match, not just a part of it.
+        CFG_TA_API const CaughtException &CheckMessage(ExceptionElemVar elem, std::string_view regex, Trace<"CheckMessage"> trace = {}) const;
+        const CaughtException &CheckMessage(std::string_view regex) const
         {
-            CheckMessage(ExceptionElemToCheck::top_level, regex, std::move(trace));
-            return *this;
+            return CheckMessage(ExceptionElem::top_level, regex);
         }
 
         // Checks that the exception type is exactly `T`.
         template <typename T>
-        const CaughtException &CheckExactType(ExceptionElemToCheck kind = ExceptionElemToCheck::top_level, Trace<"CheckExactType"> trace = {})
+        const CaughtException &CheckExactType(ExceptionElemVar elem = ExceptionElem::top_level, Trace<"CheckExactType"> trace = {})
         {
-            trace.AddTemplateTypes<T>().AddArgs(kind);
+            trace.AddTemplateTypes<T>().AddArgs(elem);
             [[maybe_unused]] auto context = MakeContextGuard();
-            ForEachElem(kind, [&](const SingleException &elem){TA_CHECK( $(elem.type) == $(typeid(T)) ); return false;});
+            ForEachElem(elem, [&](const SingleException &elem)
+            {
+                TA_CHECK( $(elem.type) == $(typeid(T)) )("Expected the exception type to be exactly `{}`, but got `{}`.", text::TypeName<T>(), (ToString)(elem.type));
+                return false;
+            });
             return *this;
         }
 
         // Checks that the exception type derives from `T`.
         template <typename T>
         requires std::is_class_v<T>
-        const CaughtException &CheckDerivedType(ExceptionElemToCheck kind = ExceptionElemToCheck::top_level, Trace<"CheckDerivedType"> trace = {})
+        const CaughtException &CheckDerivedType(ExceptionElemVar elem = ExceptionElem::top_level, Trace<"CheckDerivedType"> trace = {})
         {
-            trace.AddTemplateTypes<T>().AddArgs(kind);
+            trace.AddTemplateTypes<T>().AddArgs(elem);
             [[maybe_unused]] auto context = MakeContextGuard();
-            ForEachElem(kind, [&](const SingleException &elem)
+            ForEachElem(elem, [&](const SingleException &elem)
             {
                 try
                 {
@@ -2647,7 +2656,7 @@ namespace ta_test
                 catch (const T &) {}
                 catch (...)
                 {
-                    TA_FAIL( "Exception type `{}` doesn't inherit from `{}`.", elem.IsTypeKnown() ? elem.GetTypeName() : "??", text::TypeName<T>() );
+                    TA_FAIL("Expected the exception type to inherit from `{}`, but got `{}`.", text::TypeName<T>(), elem.GetTypeName());
                 }
 
                 return false;
@@ -2658,25 +2667,38 @@ namespace ta_test
         // Calls `func` for one or more elements, depending on `kind`.
         // `func` is `(const SingleException &elem) -> bool`. If it returns true, the whole function stops and also returns true.
         template <typename F>
-        bool ForEachElem(ExceptionElemToCheck kind, F &&func) const
+        bool ForEachElem(ExceptionElemVar elem, F &&func) const
         {
+            if (elem.valueless_by_exception())
+                HardError("Invalid `ExceptionElemVar` variant.");
             if (!state || state->elems.empty())
                 return false; // Should be good enough. This shouldn't normally happen.
-            switch (kind)
-            {
-              case ExceptionElemToCheck::top_level:
-                return std::forward<F>(func)(state->elems.front());
-              case ExceptionElemToCheck::most_nested:
-                return std::forward<F>(func)(state->elems.back());
-              case ExceptionElemToCheck::all:
-                for (const SingleException &elem : state->elems)
+            return std::visit(Overload{
+                [&](ExceptionElem elem)
                 {
-                    if (func(elem))
-                        return true;
-                }
-                return false;
-            }
-            HardError("Invalid `ExceptionElemToCheck` enum.", HardErrorKind::user);
+                    switch (elem)
+                    {
+                      case ExceptionElem::top_level:
+                        return std::forward<F>(func)(state->elems.front());
+                      case ExceptionElem::most_nested:
+                        return std::forward<F>(func)(state->elems.back());
+                      case ExceptionElem::all:
+                        for (const SingleException &elem : state->elems)
+                        {
+                            if (func(elem))
+                                return true;
+                        }
+                        return false;
+                    }
+                    HardError("Invalid `ExceptionElem` enum.", HardErrorKind::user);
+                },
+                [&](int index)
+                {
+                    if (index < 0 || std::size_t(index) >= state->elems.size())
+                        HardError("`ExceptionElemVar` index is out of range.", HardErrorKind::user);
+                    return func(state->elems[std::size_t(index)]);
+                },
+            }, elem);
         }
     };
 

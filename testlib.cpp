@@ -991,18 +991,28 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
     state.name_prefixes_to_order.try_emplace(name, state.name_prefixes_to_order.size());
 }
 
-std::string ta_test::DefaultToStringTraits<ta_test::ExceptionElemToCheck>::operator()(const ExceptionElemToCheck &value) const
+std::string ta_test::DefaultToStringTraits<ta_test::ExceptionElem>::operator()(const ExceptionElem &value) const
 {
     switch (value)
     {
-      case ExceptionElemToCheck::top_level:
+      case ExceptionElem::top_level:
         return "top_level";
-      case ExceptionElemToCheck::most_nested:
+      case ExceptionElem::most_nested:
         return "most_nested";
-      case ExceptionElemToCheck::all:
+      case ExceptionElem::all:
         return "all";
     }
-    HardError("Invalid `ExceptionElemToCheck` enum.", HardErrorKind::user);
+    HardError("Invalid `ExceptionElem` enum.", HardErrorKind::user);
+}
+
+std::string ta_test::DefaultToStringTraits<ta_test::ExceptionElemVar>::operator()(const ExceptionElemVar &value) const
+{
+    if (value.valueless_by_exception())
+        HardError("Invalid `ExceptionElemVar` variant.");
+    return std::visit(Overload{
+        [](ExceptionElem elem) {return (ToString)(elem);},
+        [](int index) {return (ToString)(index);},
+    }, value);
 }
 
 ta_test::CaughtException::CaughtException(const BasicModule::MustThrowInfo *must_throw_call, const std::exception_ptr &e)
@@ -1030,12 +1040,17 @@ const std::vector<ta_test::SingleException> &ta_test::CaughtException::GetElems(
     }
 }
 
-void ta_test::CaughtException::CheckMessage(ExceptionElemToCheck kind, std::string_view regex, Trace<"CheckMessage"> trace) const
+const ta_test::CaughtException &ta_test::CaughtException::CheckMessage(ExceptionElemVar elem, std::string_view regex, Trace<"CheckMessage"> trace) const
 {
-    trace.AddArgs(kind, regex);
+    trace.AddArgs(elem, regex);
     std::regex r(regex.begin(), regex.end());
     [[maybe_unused]] auto context = MakeContextGuard();
-    ForEachElem(kind, [&](const SingleException &elem) {TA_CHECK( std::regex_match(elem.message, r) ); return false;});
+    ForEachElem(elem, [&](const SingleException &elem)
+    {
+        TA_CHECK( std::regex_match(elem.message, r) )("Expected the exception message to match regex `{}`, but got `{}`.", regex, elem.message);
+        return false;
+    });
+    return *this;
 }
 
 void ta_test::detail::MustThrowWrapper::MissingException()
