@@ -195,6 +195,9 @@
 //     TA_CHECK($(x) == 42)("Checking stuff!"); // Add a custom message.
 //     TA_CHECK($(x) == 42)("Checking {}!", "stuff"); // Custom message with formatting.
 #define TA_CHECK(...) DETAIL_TA_CHECK("TA_CHECK", #__VA_ARGS__, __VA_ARGS__)
+// Equivalent to `TA_CHECK(false)`, except the printed message is slightly different.
+// Also accepts an optional message: `TA_FAIL("Checking {}!", "stuff");`.
+#define TA_FAIL DETAIL_TA_CHECK("", "", false)
 
 // Can only be used inside of `TA_CHECK(...)`. Wrap a subexpression in this to print its value if the assertion fails.
 // Those can be nested inside one another.
@@ -234,6 +237,8 @@
         [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(__VA_ARGS__);}, []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
     )\
     .DETAIL_TA_CHECK_MESSAGE
+
+#define DETAIL_TA_FAIL(macro_name_) DETAIL_TA_CHECK(macro_name_, "", false)
 
 #define DETAIL_TA_CHECK_MESSAGE(...) \
     AddMessage([&](auto &&_ta_add_message){_ta_add_message(__VA_ARGS__);})
@@ -2427,15 +2432,23 @@ namespace ta_test
             const BasicModule::SourceLoc &SourceLocation() const override {return location;}
             DecoVar GetElement(int index) const override
             {
-                static constexpr ConstString name_with_paren = MacroName + "(";
-                if (index == 0)
-                    return DecoFixedString{.string = name_with_paren.view()};
-                else if (index == 1)
-                    return DecoExprWithArgs{.expr = this};
-                else if (index == 2)
-                    return DecoFixedString{.string = ")"};
-                else
+                if constexpr (RawString.view().empty())
+                {
+                    // `TA_FAIL` uses this.
                     return std::monostate{};
+                }
+                else
+                {
+                    static constexpr ConstString name_with_paren = MacroName + "(";
+                    if (index == 0)
+                        return DecoFixedString{.string = name_with_paren.view()};
+                    else if (index == 1)
+                        return DecoExprWithArgs{.expr = this};
+                    else if (index == 2)
+                        return DecoFixedString{.string = ")"};
+                    else
+                        return std::monostate{};
+                }
             }
 
             [[nodiscard]] ArgWrapper BeginArg(int counter) override
@@ -2634,7 +2647,7 @@ namespace ta_test
                 catch (const T &) {}
                 catch (...)
                 {
-                    TA_CHECK( false )( "Exception type `{}` doesn't inherit from `{}`.", elem.IsTypeKnown() ? elem.GetTypeName() : "??", text::TypeName<T>() );
+                    TA_FAIL( "Exception type `{}` doesn't inherit from `{}`.", elem.IsTypeKnown() ? elem.GetTypeName() : "??", text::TypeName<T>() );
                 }
 
                 return false;
@@ -3090,7 +3103,9 @@ namespace ta_test
 
             // The primary error message.
             // Uses `common_styles.error` as a style.
-            std::u32string chars_assertion_failed = U"Assertion failed:";
+            std::u32string chars_assertion_failed = U"Assertion failed";
+            // Same, but used when no expression is provided (e.g. by `TA_FAIL`).
+            std::u32string chars_assertion_failed_no_cond = U"Test manually failed";
             // The enclosing assertions.
             std::u32string chars_in_assertion = U"While checking assertion:";
 

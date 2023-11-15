@@ -1878,12 +1878,21 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
     // The file path.
     canvas.DrawString(line_counter++, 0, common_data.LocationToString(data.SourceLocation()) + ":", {.style = common_data.style_path, .important = true});
 
+    bool has_elems = !std::holds_alternative<std::monostate>(data.GetElement(0));
+
     { // The main error message.
         std::size_t column = 0;
         if (is_most_nested)
-            column = canvas.DrawString(line_counter, 0, chars_assertion_failed, {.style = common_data.style_error, .important = true});
+        {
+            column += canvas.DrawString(line_counter, column, has_elems ? chars_assertion_failed : chars_assertion_failed_no_cond, {.style = common_data.style_error, .important = true});
+
+            // Add a `:` or `.`.
+            column += canvas.DrawString(line_counter, column, has_elems || data.GetUserMessage() ? ":" : ".", {.style = common_data.style_error, .important = true});
+        }
         else
-            column = canvas.DrawString(line_counter, 0, chars_in_assertion, {.style = common_data.style_stack_frame, .important = true});
+        {
+            column += canvas.DrawString(line_counter, column, chars_in_assertion, {.style = common_data.style_stack_frame, .important = true});
+        }
 
         if (auto message = data.GetUserMessage())
             canvas.DrawString(line_counter, column + 1, *message, {.style = style_user_message, .important = true});
@@ -1898,7 +1907,9 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
     std::size_t expr_line = line_counter;
     std::size_t expr_column = 0; // This is also set later.
 
-    { // The assertion call.
+    // The assertion call.
+    if (has_elems)
+    {
         std::size_t column = common_data.code_indentation;
 
         const text::TextCanvas::CellInfo assertion_macro_cell_info = {.style = common_data.style_failed_macro, .important = true};

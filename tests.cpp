@@ -13,7 +13,7 @@ bool fof()
 {
     // TA_CHECK($(1) == $(2));
     // TA_CHECK($(1) == $(2))("x = {}", 42);
-    throw std::runtime_error("123");
+    TA_FAIL("stuff {}", 42);
     return true;
 }
 TA_TEST(foo/bar)
@@ -27,16 +27,12 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Purge project.mk from history!
-
-// Maybe not? $(...) should tolerate non-printable arguments, but only in non-dependent context.
-
-// Use .nested_ptr() to get the underlying type from nested exceptions
+// Get rid of the ability to copy/move `Trace`.
+// Clean up `CaughtException` using the custom messages.
+// `CaughtException` should support an optional message too.
 
 // Manually call formatters instead of std::format to use the debug format always when it's supported.
-
-// Forced pass/fail macros?
-//     Then go replace `TA_CHECK( false` with one.
+// Length cap on serialized values, configurable. Maybe libfmt can do the clipping for us?
 
 // Short macros that can be disabled in the config.
 
@@ -44,10 +40,6 @@ int main(int argc, char **argv)
 
 // Review styles:
 //     string literals are ugly bright cyan
-
-// Length cap on serialized values, configurable. Maybe libfmt can do the clipping for us?
-
-// Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
 
 // Test without exceptions.
 // Test without RTTI. What about exception type names?
@@ -70,6 +62,7 @@ int main(int argc, char **argv)
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
 //     What's the deal with SEH? Do we need to do anything?
 //     Do we force-open the console on Windows if there's none? That's when `GetFileType(GetStdHandle(STD_OUTPUT_HANDLE))` returns 0.
+//     Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
 
 // Maybe not?
 //     Soft TA_MUST_THROW?
@@ -79,6 +72,7 @@ int main(int argc, char **argv)
 //     Deduplicate assertions in stacks? Both when an assertion fails and when an exception is triggered.
 //     Get terminal width, and limit separator length to that value (but still not make them longer than they currently are)
 //     Try to enforce relative paths, and try printing errors on the same line as paths.
+//     $(...) should tolerate non-printable arguments, but only in non-dependent context.
 
 // Unclear how:
 //     Draw a fat bracket while explaining each test failure?
@@ -89,7 +83,9 @@ int main(int argc, char **argv)
 
 // Selling points:
 //     * Expression unwrapping
-//     * Printing nested exceptions out of the box
+//     * First-class nested exceptions support out of the box
+//     * Lazy message evaluation
+//     * No comma weirdness
 
 
 /* Pending tests:
