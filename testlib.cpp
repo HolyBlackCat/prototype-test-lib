@@ -1045,7 +1045,7 @@ const ta_test::CaughtException &ta_test::CaughtException::CheckMessage(Exception
     trace.AddArgs(elem, regex);
     std::regex r(regex.begin(), regex.end());
     [[maybe_unused]] auto context = MakeContextGuard();
-    ForEachElem(elem, [&](const SingleException &elem)
+    ForElem(elem, [&](const SingleException &elem)
     {
         TA_CHECK( std::regex_match(elem.message, r) )("Expected the exception message to match regex `{}`, but got `{}`.", regex, elem.message);
         return false;

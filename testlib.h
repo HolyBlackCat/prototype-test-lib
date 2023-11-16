@@ -135,17 +135,6 @@
 #endif
 #endif
 
-// Whether `{:?}` is a valid format for strings and characters.
-#ifndef CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
-// NOTE: Must check this before defining `CFG_TA_FMT_NAMESPACE`.
-// We're optimistically assuming that a custom `CFG_TA_FMT_NAMESPACE` means this is supported, but you can opt out.
-#if CFG_TA_CXX_STANDARD >= 23 || CFG_TA_USE_LIBFMT || defined(CFG_TA_FMT_NAMESPACE)
-#define CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS 1
-#else
-#define CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS 0
-#endif
-#endif
-
 // The namespace of the formatting function. We'll use `CFG_TA_FMT_NAMESPACE::format()` and `CFG_TA_FMT_NAMESPACE::format_string`.
 #ifndef CFG_TA_FMT_NAMESPACE
 #if CFG_TA_USE_LIBFMT
@@ -1981,22 +1970,66 @@ namespace ta_test
 
     // --- STRING CONVERSIONS ---
 
+    // You normally shouldn't specialize this, specialize `ToStringTraits` defined below.
+    // `DefaultToStringTraits` uses this for types that don't support the debug format `"{:?}"`.
+    template <typename T, typename = void>
+    struct DefaultFallbackToStringTraits
+    {
+        std::string operator()(const T &value) const
+        {
+            return CFG_TA_FMT_NAMESPACE::format("{}", value);
+        }
+    };
+    // Throw in some fallback formatters to escape strings, for format libraries that don't support this yet.
+    template <>
+    struct DefaultFallbackToStringTraits<char>
+    {
+        std::string operator()(char value) const
+        {
+            char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
+            text::EscapeString({&value, 1}, ret, false);
+            return ret;
+        }
+    };
+    template <>
+    struct DefaultFallbackToStringTraits<std::string>
+    {
+        std::string operator()(const std::string &value) const
+        {
+            std::string ret;
+            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
+            text::EscapeString(value, std::back_inserter(ret), true);
+            return ret;
+        }
+    };
+    template <>
+    struct DefaultFallbackToStringTraits<std::string_view>
+    {
+        std::string operator()(const std::string_view &value) const
+        {
+            std::string ret;
+            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
+            text::EscapeString(value, std::back_inserter(ret), true);
+            return ret;
+        }
+    };
+    template <> struct DefaultFallbackToStringTraits<char *> : DefaultFallbackToStringTraits<std::string_view> {};
+    template <> struct DefaultFallbackToStringTraits<const char *> : DefaultFallbackToStringTraits<std::string_view> {};
+    // Somehow this catches const arrays too.
+    template <std::size_t N> struct DefaultFallbackToStringTraits<char[N]> : DefaultFallbackToStringTraits<std::string_view> {};
+
     // Don't specialize this, specialize `ToStringTraits` defined below.
+    // `ToStringTraits` inherits from this by default.
     template <typename T, typename = void>
     struct DefaultToStringTraits
     {
         std::string operator()(const T &value) const
         {
-            #if CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
-            if constexpr (std::is_same_v<T, char> || std::is_same_v<T, wchar_t> || std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>)
-            {
+            // There seems to be no way to use `std::
+            if constexpr (requires(CFG_TA_FMT_NAMESPACE::formatter<T> f){f.set_debug_format();})
                 return CFG_TA_FMT_NAMESPACE::format("{:?}", value);
-            }
             else
-            #endif
-            {
-                return CFG_TA_FMT_NAMESPACE::format("{}", value);
-            }
+                return DefaultFallbackToStringTraits<T>{}(value);
         }
     };
 
@@ -2632,7 +2665,7 @@ namespace ta_test
         {
             trace.AddTemplateTypes<T>().AddArgs(elem);
             [[maybe_unused]] auto context = MakeContextGuard();
-            ForEachElem(elem, [&](const SingleException &elem)
+            ForElem(elem, [&](const SingleException &elem)
             {
                 TA_CHECK( $(elem.type) == $(typeid(T)) )("Expected the exception type to be exactly `{}`, but got `{}`.", text::TypeName<T>(), (ToString)(elem.type));
                 return false;
@@ -2647,7 +2680,7 @@ namespace ta_test
         {
             trace.AddTemplateTypes<T>().AddArgs(elem);
             [[maybe_unused]] auto context = MakeContextGuard();
-            ForEachElem(elem, [&](const SingleException &elem)
+            ForElem(elem, [&](const SingleException &elem)
             {
                 try
                 {
@@ -2667,7 +2700,7 @@ namespace ta_test
         // Calls `func` for one or more elements, depending on `kind`.
         // `func` is `(const SingleException &elem) -> bool`. If it returns true, the whole function stops and also returns true.
         template <typename F>
-        bool ForEachElem(ExceptionElemVar elem, F &&func) const
+        bool ForElem(ExceptionElemVar elem, F &&func) const
         {
             if (elem.valueless_by_exception())
                 HardError("Invalid `ExceptionElemVar` variant.");
@@ -2695,7 +2728,10 @@ namespace ta_test
                 [&](int index)
                 {
                     if (index < 0 || std::size_t(index) >= state->elems.size())
-                        HardError("`ExceptionElemVar` index is out of range.", HardErrorKind::user);
+                    {
+                        TA_FAIL("Exception element index {} is out of range, have {} elements.", index, state->elems.size());
+                        return false;
+                    }
                     return func(state->elems[std::size_t(index)]);
                 },
             }, elem);
@@ -3127,7 +3163,10 @@ namespace ta_test
             // Uses `common_styles.error` as a style.
             std::u32string chars_assertion_failed = U"Assertion failed";
             // Same, but used when no expression is provided (e.g. by `TA_FAIL`).
-            std::u32string chars_assertion_failed_no_cond = U"Test manually failed";
+            // Slightly weird string here.
+            // Thought about "test manually failed", which sounds good until it's called internally
+            // by the library, and then it should no longer count as "manually".
+            std::u32string chars_assertion_failed_no_cond = U"Failure";
             // The enclosing assertions.
             std::u32string chars_in_assertion = U"While checking assertion:";
 
@@ -3262,46 +3301,3 @@ namespace ta_test
         };
     }
 }
-
-// Manually support quoting strings if the formatting library can't do that.
-#if !CFG_TA_FMT_SUPPORTS_DEBUG_STRINGS
-namespace ta_test
-{
-    template <>
-    struct DefaultToStringTraits<char>
-    {
-        std::string operator()(char value) const
-        {
-            char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
-            text::EscapeString({&value, 1}, ret, false);
-            return ret;
-        }
-    };
-    template <>
-    struct DefaultToStringTraits<std::string>
-    {
-        std::string operator()(const std::string &value) const
-        {
-            std::string ret;
-            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-            text::EscapeString(value, std::back_inserter(ret), true);
-            return ret;
-        }
-    };
-    template <>
-    struct DefaultToStringTraits<std::string_view>
-    {
-        std::string operator()(const std::string_view &value) const
-        {
-            std::string ret;
-            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-            text::EscapeString(value, std::back_inserter(ret), true);
-            return ret;
-        }
-    };
-    template <> struct DefaultToStringTraits<      char *> {std::string operator()(const char *value) const {return ToStringTraits<std::string_view>{}(value);}};
-    template <> struct DefaultToStringTraits<const char *> {std::string operator()(const char *value) const {return ToStringTraits<std::string_view>{}(value);}};
-    // Somehow this catches const arrays too:
-    template <std::size_t N> struct DefaultToStringTraits<char[N]> {std::string operator()(const char *value) const {return ToStringTraits<std::string_view>{}(value);}};
-}
-#endif

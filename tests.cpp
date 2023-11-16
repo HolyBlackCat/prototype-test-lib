@@ -15,12 +15,12 @@ bool fof()
     // TA_CHECK($(1) == $(2))("x = {}", 42);
     // TA_FAIL("stuff {}", 42);
 
-    TA_MUST_THROW(throw std::runtime_error("Boo!")).CheckDerivedType<std::exception>(0);
+    TA_MUST_THROW(throw std::runtime_error("123")).CheckDerivedType<std::exception>(1);
     return true;
 }
 TA_TEST(foo/bar)
 {
-    TA_CHECK($(fof()))("y = {}", 43);
+    TA_CHECK($(std::string("1\n2")).size() > 0 && $(fof()))("y = {}", 43);
     fof();
 }
 
@@ -30,9 +30,6 @@ int main(int argc, char **argv)
 }
 
 // `CaughtException` should support an optional message too.
-
-// Manually call formatters instead of std::format to use the debug format always when it's supported.
-// Length cap on serialized values, configurable. Maybe libfmt can do the clipping for us?
 
 // Short macros that can be disabled in the config.
 
@@ -62,6 +59,7 @@ int main(int argc, char **argv)
 //     What's the deal with SEH? Do we need to do anything?
 //     Do we force-open the console on Windows if there's none? That's when `GetFileType(GetStdHandle(STD_OUTPUT_HANDLE))` returns 0.
 //     Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
+//     Length cap on serialized values, configurable.
 
 // Maybe not?
 //     Soft TA_MUST_THROW?
@@ -120,6 +118,7 @@ TA_CHECK:
     We're performing a proper contextual bool conversion.
     A non-const format string is a compilation error.
     A bad format is a compilation error.
+    Check that on libfmt, the check for `{:?}` being supported actually passes.
 
 --- TA_MUST_THROW:
     Doesn't warn on unused value.
@@ -127,6 +126,7 @@ TA_CHECK:
     Doesn't warn on `;` at the end.
     Opening two same context frames deduplicates them.
     When doing a oneliner: `TA_MUST_THROW(...).Check...()`, make sure that the frame guard from the macro doesn't extend into the check.
+    Element index out of range is a test fail, not a hard error.
 
 --- `Trace` type
 
