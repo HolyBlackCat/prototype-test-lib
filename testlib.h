@@ -218,18 +218,16 @@
     inline void _ta_test_func(::ta_test::ConstStringTag<#name>)
 
 #define DETAIL_TA_CHECK(macro_name_, str_, ...) \
-    /* First `(std::nullptr_t)` actually runs the assertion (all the code is in `operator std::nullptr_t`), */\
-    /* then `(void)` makes sure the `nullptr` isn't used for anything. */\
-    (void)(std::nullptr_t)\
-    ::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__>(\
-        /* `?:` performs a contextual bool conversion. */\
-        [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(__VA_ARGS__);}, []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
+    /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
+    ~::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__>(\
+        [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(__VA_ARGS__);},\
+        []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
     )\
-    .DETAIL_TA_CHECK_MESSAGE
+    .DETAIL_TA_ADD_MESSAGE
 
 #define DETAIL_TA_FAIL(macro_name_) DETAIL_TA_CHECK(macro_name_, "", false)
 
-#define DETAIL_TA_CHECK_MESSAGE(...) \
+#define DETAIL_TA_ADD_MESSAGE(...) \
     AddMessage([&](auto &&_ta_add_message){_ta_add_message(__VA_ARGS__);})
 
 #define DETAIL_TA_ARG(counter, ...) \
@@ -238,7 +236,12 @@
     (_ta_assert.BeginArg(counter)._ta_handle_arg_(counter, __VA_ARGS__))
 
 #define DETAIL_TA_MUST_THROW(macro_name_, str_, ...) \
-    ::ta_test::detail::MustThrowWrapper::Make<__FILE__, __LINE__, macro_name_, str_>()([&]{CFG_IGNORE_UNUSED_VALUE(__VA_ARGS__;)})
+    /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
+    ~::ta_test::detail::MustThrowWrapper::Make<__FILE__, __LINE__, macro_name_, str_>(\
+        [&]{CFG_IGNORE_UNUSED_VALUE(__VA_ARGS__;)},\
+        []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
+    )\
+    .DETAIL_TA_ADD_MESSAGE
 
 
 namespace ta_test
@@ -443,6 +446,8 @@ namespace ta_test
 
             FrameGuard(const FrameGuard &) = delete;
             FrameGuard &operator=(const FrameGuard &) = delete;
+
+            [[nodiscard]] explicit operator bool() const {return bool(frame_ptr);}
 
             // Removes the frame as if the guard was destroyed. Repeated calls have no effect.
             // This can only be called if this is the last element in the stack, otherwise you get a hard error.
@@ -657,8 +662,8 @@ namespace ta_test
         // use `namespace context` instead, it will give you the same assertion and more.
         virtual void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) {(void)test; (void)assertion; (void)e;}
 
-        // This in the context stack means that we're currently inside of a `TA_MUST_THROW()`.
-        struct MustThrowInfo : context::BasicFrame
+        // A compile-time information about a `TA_MUST_THROW(...)` call.
+        struct MustThrowStaticInfo
         {
             // The source location of `TA_MUST_THROW(...)`.
             BasicModule::SourceLoc loc;
@@ -667,15 +672,38 @@ namespace ta_test
             // The spelling of the macro argument.
             std::string_view expr;
         };
-        // This in the context stack means that we're currently checking `CaughtException` returned from `TA_MUST_THROW()`.
+        // A runtime information about a `TA_MUST_THROW(...)` call
+        struct MustThrowDynamicInfo
+        {
+          protected:
+            ~MustThrowDynamicInfo() = default;
+
+          public:
+            // This is lazy, the first call constructs the message.
+            // This makes it not thread-safe.
+            virtual std::optional<std::string_view> GetUserMessage() const = 0;
+        };
+        // This in the context stack means that a `TA_MUST_THROW(...)` is currently executing.
+        struct MustThrowInfo : context::BasicFrame
+        {
+            // Never null.
+            const MustThrowStaticInfo *static_info = nullptr;
+            // Never null.
+            const MustThrowDynamicInfo *dynamic_info = nullptr;
+        };
+        // This in the context stack means that we're currently checking `CaughtException` returned from `TA_MUST_THROW(...)`.
         struct CaughtExceptionInfo : context::BasicFrame
         {
             std::vector<SingleException> elems;
-            const MustThrowInfo *must_throw_call = nullptr;
+            // Never null.
+            const MustThrowStaticInfo *static_info = nullptr;
+            // This is only available until the end of the full expression where `TA_MUST_THROW(...)` was initially executed.
+            std::weak_ptr<const MustThrowDynamicInfo> dynamic_info;
         };
 
         // This is called when `TA_MUST_THROW` doesn't throw an exception.
-        virtual void OnMissingException(const MustThrowInfo &data) {(void)data;}
+        // If `should_break` ends up true (it's false by default), then a breakpoint at the call site will be triggered.
+        virtual void OnMissingException(const MustThrowInfo &data, bool &should_break) {(void)data; (void)should_break;}
 
         // --- MISC ---
 
@@ -1451,6 +1479,8 @@ namespace ta_test
             TextStyle style_failed_macro = {.color = TextColor::none, .bold = true};
             // Highlighted expressions.
             expr::Style style_expr;
+            // The custom messages that can be optionally passed to `TA_CHECK` and `TA_MUST_THROW`.
+            TextStyle style_user_message = {.color = TextColor::none, .bold = true};
 
             // Characters:
 
@@ -2103,59 +2133,98 @@ namespace ta_test
 
     // --- STACK TRACE HELPERS ---
 
-    // You can use this to get basic stack traces in your tests.
-    // ...
+    // Don't use this, use `Trace<...>` defined below.
     class BasicTrace : public context::BasicFrame, public context::FrameGuard
     {
+        bool enabled = false;
+        bool accept_args = false;
         BasicModule::SourceLoc loc;
+        std::string_view func;
         std::vector<std::string> func_args;
         std::vector<std::string> template_args;
 
       protected:
-        BasicTrace(std::string_view file, int line)
-            : FrameGuard({std::shared_ptr<void>{}, this}), // A non-owning shared pointer.
-            loc{file, line}
+        BasicTrace() : FrameGuard(nullptr) {}
+
+        BasicTrace(
+            bool enabled, bool accept_args,
+            std::string_view file, int line, std::string_view func,
+            std::vector<std::string> func_args, std::vector<std::string> template_args)
+            : FrameGuard(enabled ? std::shared_ptr<const BasicFrame>(std::shared_ptr<void>{}, this) : nullptr), // A non-owning shared pointer.
+            enabled(enabled), accept_args(accept_args), loc{file, line}, func(func),
+            func_args(std::move(func_args)), template_args(std::move(template_args))
         {}
+
+        ~BasicTrace() = default;
 
       public:
         BasicTrace &operator=(const BasicTrace &) = delete;
         BasicTrace &operator=(BasicTrace &&) = delete;
 
-        [[nodiscard]] const BasicModule::SourceLoc &GetLocation() const {return loc;}
-        [[nodiscard]] const std::vector<std::string> &GetFuncArgs() const {return func_args;}
-        [[nodiscard]] const std::vector<std::string> &GetTemplateArgs() const {return template_args;}
+        // Whether we have a location information here.
+        // If you call the inherited `Reset()`, this will still return true, even though the object will not be in the stack.
+        [[nodiscard]] explicit operator bool() const {return enabled;}
 
-        [[nodiscard]] virtual std::string_view GetFuncName() const = 0;
+        [[nodiscard]] const BasicModule::SourceLoc &GetLocation() const {return loc;}
+        [[nodiscard]] const std::vector<std::string>  &GetFuncArgs() const  & {return func_args;}
+        [[nodiscard]]       std::vector<std::string> &&GetFuncArgs()       && {return std::move(func_args);}
+        [[nodiscard]] const std::vector<std::string>  &GetTemplateArgs() const  & {return template_args;}
+        [[nodiscard]]       std::vector<std::string> &&GetTemplateArgs()       && {return std::move(template_args);}
+        [[nodiscard]] std::string_view GetFuncName() const {return func;}
 
         template <typename ...P>
         BasicTrace &AddArgs(const P &... args)
         {
-            (void(func_args.push_back((ToString)(args))), ...);
+            if (accept_args)
+                (void(func_args.push_back((ToString)(args))), ...);
             return *this;
         }
 
         template <typename ...P>
         BasicTrace &AddTemplateTypes()
         {
-            (void(template_args.push_back(text::TypeName<P>())), ...);
+            if (accept_args)
+                (void(template_args.push_back(text::TypeName<P>())), ...);
             return *this;
         }
         template <typename ...P>
         BasicTrace &AddTemplateValues(const P &... args)
         {
-            (void(template_args.push_back((ToString)(args))), ...);
+            if (accept_args)
+                (void(template_args.push_back((ToString)(args))), ...);
             return *this;
         }
     };
+    // A tag for a `Trace` constructor, constructs a null object that doesn't trace.
+    struct NoTrace {};
+    // Add this as the last function parameter: `Trace<"MyFunc"> trace = {}` to show this function call as the context when a test fails.
+    // You can optionally do `trace.AddArgs/AddTemplateTypes/AddTemplateValues()` to also display information about the function arguments.
+    // Those functions are not lazy, and calculate the new strings immediately, so don't overuse them.
+    // You can construct from `NoTrace{}` instead of `{}` to disable tracing for that specific object.
+    // You can call the inherited `Reset()` to disarm if a `Trace` to remove it from the stack.
+    // You can copy and move `Trace` to propagate the location and function name (moving also `Reset()`s the original).
+    // Copying/moving constructs a live instance even if the original was `Reset()`, but not if it was constructed from `NoTrace()`.
     template <ConstString FuncName>
     class Trace : public BasicTrace
     {
       public:
-        Trace(std::string_view file = __builtin_FILE(), int line = __builtin_LINE())
-            : BasicTrace(file, line)
+        // Default constructor - traces normally.
+        // Don't pass any parameters manually.
+        Trace(std::string_view file = __builtin_FILE(), int line = __builtin_LINE(), std::string_view func = FuncName.view())
+            : BasicTrace(true, true, file, line, func, {}, {})
         {}
+        Trace(NoTrace) {}
 
-        std::string_view GetFuncName() const override {return FuncName.view();}
+        Trace(const Trace &other) : Trace(static_cast<const BasicTrace &>(other)) {}
+        Trace(const BasicTrace &other)
+            : BasicTrace(bool(other), false, other.GetLocation().file, other.GetLocation().line, other.GetFuncName(), other.GetFuncArgs(), other.GetTemplateArgs())
+        {}
+        Trace(Trace &&other) : Trace(static_cast<BasicTrace &&>(other)) {}
+        Trace(BasicTrace &&other)
+            // Calling `Reset()` in this manner happens in an unspecified order relative to the other arguments,
+            // but it doesn't matter as long as its not UB, as it doesn't affect the values of the arguments.
+            : BasicTrace((other.Reset(), bool(other)), false, other.GetLocation().file, other.GetLocation().line, other.GetFuncName(), std::move(other).GetFuncArgs(), std::move(other).GetTemplateArgs())
+        {}
     };
 
 
@@ -2209,7 +2278,7 @@ namespace ta_test
             const void *condition_data = nullptr;
 
             // Call to trigger a breakpoint at the macro call site.
-            void (*break_func)();
+            void (*break_func)() = nullptr;
 
             // This is called to get the optional user message (null if no message).
             std::string (*message_func)(const void *data) = nullptr;
@@ -2253,12 +2322,12 @@ namespace ta_test
             struct Evaluator
             {
                 BasicAssertWrapper &self;
-                CFG_TA_API explicit operator std::nullptr_t();
+                CFG_TA_API void operator~();
             };
 
           public:
             // Note the weird variable name, it helps with our macro syntax that adds optional messages.
-            Evaluator DETAIL_TA_CHECK_MESSAGE{*this};
+            Evaluator DETAIL_TA_ADD_MESSAGE{*this};
 
             template <typename F>
             BasicAssertWrapper(const F &func, void (*break_func)())
@@ -2298,7 +2367,7 @@ namespace ta_test
                     };
                     message_data = &func;
                 }
-                return DETAIL_TA_CHECK_MESSAGE;
+                return DETAIL_TA_ADD_MESSAGE;
             }
 
             std::optional<std::string_view> GetUserMessage() const override;
@@ -2597,6 +2666,9 @@ namespace ta_test
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
     }
 
+
+    // --- ANALYZING EXCEPTIONS ---
+
     // Designates or more components of `CaughtException`.
     enum class ExceptionElem
     {
@@ -2623,119 +2695,240 @@ namespace ta_test
         CFG_TA_API std::string operator()(const ExceptionElemVar &value) const;
     };
 
+    namespace detail
+    {
+        CFG_TA_API const std::vector<ta_test::SingleException> &GetEmptyExceptionListSingleton();
+
+        // A CRTP base.
+        // `Ref` is a self reference that we return from chained functions, normally either `const Derived &` or `Derived &&`.
+        // If `IsWrapper` is false, `Derived` must have a `??shared_ptr<BasicModule::CaughtExceptionInfo>?? _get_state() const` private member (with this class as a friend).
+        // We'll examine the exception details pointed by that member. You can return any kind of a shared pointer or a reference to one.
+        // Of `IsWrapepr` is true, `Derived` must have a `const ?? &_get_state() const` private member that returns an object also inherited from this base,
+        // to which we'll forward all calls.
+        template <typename Derived, typename Ref, bool IsWrapper>
+        class BasicCaughtExceptionInterface
+        {
+            // If `IsWrapper == true`, returns the object we're wrapping that must inherit from this template too. Can return by value.
+            // If `IsWrapper == false`, returns a `const BasicModule::CaughtExceptionInfo *`.
+            // All of our members are `const` anyway, so we only have a const overload here.s
+            [[nodiscard]] decltype(auto) State() const
+            {
+                return static_cast<const Derived &>(*this)._get_state();
+            }
+
+            // This is what you should return from functions returning `Ref`.
+            // It's either a reference to `*this` or to `state` (coming from `State()`), depending on the type of `Ref`.
+            [[nodiscard]] Ref ReturnedRef(auto &&state) const
+            {
+                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(State())>, std::remove_cvref_t<Ref>>)
+                    return std::move(state);
+                else
+                    return std::move(const_cast<Derived &>(static_cast<const Derived &>(*this)));
+            }
+
+          protected:
+            // This is initially `protected` because it makes no sense to call it directly on rvalues.
+            // Derived classes can make it public.
+
+            // When you're manually examining this exception with `TA_CHECK(...)`, create this object beforehand.
+            // While it exists, all failed assertions will mention that they happened while examnining this exception.
+            // All high-level functions below do this automatically, and redundant contexts are silently ignored.
+            [[nodiscard]] context::FrameGuard MakeContextGuard() const
+            {
+                if constexpr (IsWrapper)
+                    return State().FrameGuard();
+                else
+                {
+                    // This nicely handles null state.
+                    return context::FrameGuard(State());
+                }
+            }
+
+          public:
+            // Returns all stored nested exceptions, in case you want to examine them manually.
+            // Prefer the high-level functions below.
+            [[nodiscard]] const std::vector<SingleException> &GetElems() const
+            {
+                if constexpr (IsWrapper)
+                    return State().GetElems();
+                else
+                {
+                    if (State())
+                        return State()->elems;
+                    else
+                        return GetEmptyExceptionListSingleton(); // This is a little stupid, but probably better than a `HardError()`?
+                }
+            }
+
+            // Checks that the exception message matches the regex.
+            // The entire message must match, not just a part of it.
+            Ref CheckMessage(/* elem = top_level, */ std::string_view regex, Trace<"CheckMessage"> trace = {}) const
+            {
+                // No need to wrap this.
+                trace.AddArgs(regex);
+                return CheckMessage(ExceptionElem::top_level, regex, std::move(trace));
+            }
+            // Checks that the exception message matches the regex.
+            // The entire message must match, not just a part of it.
+            Ref CheckMessage(ExceptionElemVar elem, std::string_view regex, Trace<"CheckMessage"> trace = {}) const
+            {
+                if constexpr (IsWrapper)
+                {
+                    trace.Reset();
+                    decltype(auto) state = State();
+                    state.CheckMessage(elem, regex, std::move(trace));
+                    return ReturnedRef(state);
+                }
+                else
+                {
+                    trace.AddArgs(elem, regex);
+                    std::regex r(regex.begin(), regex.end());
+                    [[maybe_unused]] auto context = MakeContextGuard();
+                    ForElem(elem, [&](const SingleException &elem)
+                    {
+                        TA_CHECK( std::regex_match(elem.message, r) )("Expected the exception message to match regex `{}`, but got `{}`.", regex, elem.message);
+                        return false;
+                    });
+                    return static_cast<Ref>(*this);
+                }
+            }
+
+            // Checks that the exception type is exactly `T`.
+            template <typename T>
+            Ref CheckExactType(ExceptionElemVar elem = ExceptionElem::top_level, Trace<"CheckExactType"> trace = {}) const
+            {
+                if constexpr (IsWrapper)
+                {
+                    trace.Reset();
+                    decltype(auto) state = State();
+                    state.template CheckExactType<T>(elem, std::move(trace));
+                    return ReturnedRef(state);
+                }
+                else
+                {
+                    trace.AddTemplateTypes<T>().AddArgs(elem);
+                    [[maybe_unused]] auto context = MakeContextGuard();
+                    ForElem(elem, [&](const SingleException &elem)
+                    {
+                        TA_CHECK( $(elem.type) == $(typeid(T)) )("Expected the exception type to be exactly `{}`, but got `{}`.", text::TypeName<T>(), (ToString)(elem.type));
+                        return false;
+                    });
+                    return static_cast<Ref>(*this);
+                }
+            }
+
+            // Checks that the exception type derives from `T`.
+            template <typename T>
+            requires std::is_class_v<T>
+            Ref CheckDerivedType(ExceptionElemVar elem = ExceptionElem::top_level, Trace<"CheckDerivedType"> trace = {}) const
+            {
+                if constexpr (IsWrapper)
+                {
+                    trace.Reset();
+                    decltype(auto) state = State();
+                    state.template CheckDerivedType<T>(elem, std::move(trace));
+                    return ReturnedRef(state);
+                }
+                else
+                {
+                    trace.AddTemplateTypes<T>().AddArgs(elem);
+                    [[maybe_unused]] auto context = MakeContextGuard();
+                    ForElem(elem, [&](const SingleException &elem)
+                    {
+                        try
+                        {
+                            std::rethrow_exception(elem.exception);
+                        }
+                        catch (const T &) {}
+                        catch (...)
+                        {
+                            TA_FAIL("Expected the exception type to inherit from `{}`, but got `{}`.", text::TypeName<T>(), elem.GetTypeName());
+                        }
+
+                        return false;
+                    });
+                    return static_cast<Ref>(*this);
+                }
+            }
+
+            // Calls `func` for one or more elements, depending on `kind`.
+            // `func` is `(const SingleException &elem) -> bool`. If it returns true, the whole function stops and also returns true.
+            template <typename F>
+            bool ForElem(ExceptionElemVar elem, F &&func) const
+            {
+                if constexpr (IsWrapper)
+                    return State().ForElem(elem, std::forward<F>(func));
+                else
+                {
+                    if (elem.valueless_by_exception())
+                        HardError("Invalid `ExceptionElemVar` variant.");
+                    if (!State() || State()->elems.empty())
+                        return false; // Should be good enough. This shouldn't normally happen.
+                    return std::visit(Overload{
+                        [&](ExceptionElem elem)
+                        {
+                            switch (elem)
+                            {
+                              case ExceptionElem::top_level:
+                                return std::forward<F>(func)(State()->elems.front());
+                              case ExceptionElem::most_nested:
+                                return std::forward<F>(func)(State()->elems.back());
+                              case ExceptionElem::all:
+                                for (const SingleException &elem : State()->elems)
+                                {
+                                    if (func(elem))
+                                        return true;
+                                }
+                                return false;
+                            }
+                            HardError("Invalid `ExceptionElem` enum.", HardErrorKind::user);
+                        },
+                        [&](int index)
+                        {
+                            if (index < 0 || std::size_t(index) >= State()->elems.size())
+                            {
+                                TA_FAIL("Exception element index {} is out of range, have {} elements.", index, State()->elems.size());
+                                return false;
+                            }
+                            return func(State()->elems[std::size_t(index)]);
+                        },
+                    }, elem);
+                }
+            }
+        };
+    }
+
     // This is what `TA_MUST_THROW(...)` returns.
     // Stores a list of nested `SingleException`s, plus the information about the macro call that produced it.
     class CaughtException
+        // Most user-facing functions are in this base, because reasons.
+        // You can look at the comment on `ta_test::detail::MustThrowWrapper::Evaluator` for why we do this, if you're interested.
+        : public detail::BasicCaughtExceptionInterface<CaughtException, const CaughtException &, false>
     {
+        // This is a `shared_ptr` to allow `MakeContextGuard()` to outlive this object without causing UB.
         std::shared_ptr<BasicModule::CaughtExceptionInfo> state;
+
+        // For the CRTP base.
+        friend detail::BasicCaughtExceptionInterface<CaughtException, const CaughtException &, false>;
+        const decltype(state) &_get_state() const
+        {
+            return state;
+        }
 
       public:
         CaughtException() {}
 
         // This is primarily for internal use.
-        CFG_TA_API explicit CaughtException(const BasicModule::MustThrowInfo *must_throw_call, const std::exception_ptr &e);
+        CFG_TA_API explicit CaughtException(
+            const BasicModule::MustThrowStaticInfo *static_info,
+            std::weak_ptr<const BasicModule::MustThrowDynamicInfo> dynamic_info,
+            const std::exception_ptr &e
+        );
 
         // Returns false for default-constructed or moved-from instances.
+        // This is not in the base class because it's impossible to call on any other class derived from it,
+        //   unless you use the functional notation, which isn't a use case.
         [[nodiscard]] explicit operator bool() const {return bool(state);}
-
-        // Returns all stored nested exceptions, in case you want to examine them manually.
-        // Prefer the high-level functions below.
-        [[nodiscard]] CFG_TA_API const std::vector<SingleException> &GetElems() const;
-
-        // When you're manually examining this exception with `TA_CHECK(...)`, create this object beforehand.
-        // While it exists, all failed assertions will mention that they happened while examnining this exception.
-        // All high-level functions below do this automatically, and redundant contexts are silently ignored.
-        [[nodiscard]] context::FrameGuard MakeContextGuard() const
-        {
-            // This nicely handles null state.
-            return context::FrameGuard(state);
-        }
-
-        // Checks that the exception message matches the regex.
-        // The entire message must match, not just a part of it.
-        CFG_TA_API const CaughtException &CheckMessage(ExceptionElemVar elem, std::string_view regex, Trace<"CheckMessage"> trace = {}) const;
-        const CaughtException &CheckMessage(std::string_view regex) const
-        {
-            return CheckMessage(ExceptionElem::top_level, regex);
-        }
-
-        // Checks that the exception type is exactly `T`.
-        template <typename T>
-        const CaughtException &CheckExactType(ExceptionElemVar elem = ExceptionElem::top_level, Trace<"CheckExactType"> trace = {})
-        {
-            trace.AddTemplateTypes<T>().AddArgs(elem);
-            [[maybe_unused]] auto context = MakeContextGuard();
-            ForElem(elem, [&](const SingleException &elem)
-            {
-                TA_CHECK( $(elem.type) == $(typeid(T)) )("Expected the exception type to be exactly `{}`, but got `{}`.", text::TypeName<T>(), (ToString)(elem.type));
-                return false;
-            });
-            return *this;
-        }
-
-        // Checks that the exception type derives from `T`.
-        template <typename T>
-        requires std::is_class_v<T>
-        const CaughtException &CheckDerivedType(ExceptionElemVar elem = ExceptionElem::top_level, Trace<"CheckDerivedType"> trace = {})
-        {
-            trace.AddTemplateTypes<T>().AddArgs(elem);
-            [[maybe_unused]] auto context = MakeContextGuard();
-            ForElem(elem, [&](const SingleException &elem)
-            {
-                try
-                {
-                    std::rethrow_exception(elem.exception);
-                }
-                catch (const T &) {}
-                catch (...)
-                {
-                    TA_FAIL("Expected the exception type to inherit from `{}`, but got `{}`.", text::TypeName<T>(), elem.GetTypeName());
-                }
-
-                return false;
-            });
-            return *this;
-        }
-
-        // Calls `func` for one or more elements, depending on `kind`.
-        // `func` is `(const SingleException &elem) -> bool`. If it returns true, the whole function stops and also returns true.
-        template <typename F>
-        bool ForElem(ExceptionElemVar elem, F &&func) const
-        {
-            if (elem.valueless_by_exception())
-                HardError("Invalid `ExceptionElemVar` variant.");
-            if (!state || state->elems.empty())
-                return false; // Should be good enough. This shouldn't normally happen.
-            return std::visit(Overload{
-                [&](ExceptionElem elem)
-                {
-                    switch (elem)
-                    {
-                      case ExceptionElem::top_level:
-                        return std::forward<F>(func)(state->elems.front());
-                      case ExceptionElem::most_nested:
-                        return std::forward<F>(func)(state->elems.back());
-                      case ExceptionElem::all:
-                        for (const SingleException &elem : state->elems)
-                        {
-                            if (func(elem))
-                                return true;
-                        }
-                        return false;
-                    }
-                    HardError("Invalid `ExceptionElem` enum.", HardErrorKind::user);
-                },
-                [&](int index)
-                {
-                    if (index < 0 || std::size_t(index) >= state->elems.size())
-                    {
-                        TA_FAIL("Exception element index {} is out of range, have {} elements.", index, state->elems.size());
-                        return false;
-                    }
-                    return func(state->elems[std::size_t(index)]);
-                },
-            }, elem);
-        }
     };
 
 
@@ -2744,51 +2937,145 @@ namespace ta_test
         // `TA_MUST_THROW(...)` expands to this.
         class MustThrowWrapper
         {
-            const BasicModule::MustThrowInfo *info = nullptr;
+            // `final` removes the Clang warning about a non-virtual destructor.
+            struct Info final : BasicModule::MustThrowDynamicInfo
+            {
+                MustThrowWrapper &self;
 
-            // Fails the test because there was no exception.
-            [[noreturn]] CFG_TA_API void MissingException();
+                BasicModule::MustThrowInfo info;
 
-            MustThrowWrapper(const BasicModule::MustThrowInfo *info)
-                : info(info)
+                Info(MustThrowWrapper &self, const BasicModule::MustThrowStaticInfo *static_info)
+                    : self(self)
+                {
+                    info.static_info = static_info;
+                    info.dynamic_info = this;
+                }
+
+                CFG_TA_API std::optional<std::string_view> GetUserMessage() const;
+            };
+            // This is a `shared_ptr` to allow us to detect when the object goes out of scope.
+            // After that we refuse to evaluate the user message.
+            std::shared_ptr<Info> info;
+
+            // This is called to hopefully throw the user exception.
+            void (*body_func)(const void *data) = nullptr;
+            const void *body_data = nullptr;
+
+            // Call to trigger a breakpoint at the macro call site.
+            void (*break_func)() = nullptr;
+
+            // This is called to get the optional user message (null if no message).
+            std::string (*message_func)(const void *data) = nullptr;
+            const void *message_data = nullptr;
+            // The user message is cached here.
+            mutable std::optional<std::string> message_cache;
+
+            template <typename F>
+            MustThrowWrapper(const F &func, void (*break_func)(), const BasicModule::MustThrowStaticInfo *static_info)
+                : info(std::make_shared<Info>(*this, static_info)),
+                body_func([](const void *data) {(*static_cast<const F *>(data))();}),
+                body_data(&func),
+                break_func(break_func)
             {}
 
-          public:
-            // Makes an instance of this class.
-            template <ConstString File, int Line, ConstString MacroName, ConstString Expr>
-            [[nodiscard]] static MustThrowWrapper Make()
+            class Evaluator;
+
+            // See comment on `class Evaluator` for what this is.
+            class TemporaryCaughtException
+                : public detail::BasicCaughtExceptionInterface<TemporaryCaughtException, TemporaryCaughtException &&, true>
             {
-                static const BasicModule::MustThrowInfo info = []{
-                    BasicModule::MustThrowInfo ret;
+                CaughtException underlying;
+
+                friend class Evaluator;
+                TemporaryCaughtException(CaughtException &&underlying) : underlying(std::move(underlying)) {}
+
+                // For the CRTP baes.
+                friend detail::BasicCaughtExceptionInterface<TemporaryCaughtException, TemporaryCaughtException &&, true>;
+                const CaughtException &_get_state() const
+                {
+                    return underlying;
+                }
+
+              public:
+                CaughtException operator~() &&
+                {
+                    return std::move(underlying);
+                }
+            };
+
+            // There's a lot of really moist code here.
+            // * We want to return `CaughtException` from `TA_MUST_THROW(...)`, but we can't just do that, because we also must support optional messages,
+            //   and there's no way to make them work if we immediately return the right type.
+            // * Therefore, `TA_MUST_THROW(...)` expands to `~foo(...).DETAIL_TA_ADD_MESSAGE`, and `~` is doing all the work, regardless if there are
+            //   parentheses on the right with the user message. `DETAIL_TA_ADD_MESSAGE`, when not expanded as a macro, is an instance of `class Evaluator`.
+            // * This works perfectly for `TA_CHECK(...)`, but here in `TA_MUST_THROW(...)` the user can do a oneliner: `TA_MUST_THROW(...).Check...(foo)`,
+            //   and that messes up with the priority of `~`.
+            // * To work around all that, we do something really stupid. There are three different classes with the exact same interface,
+            //   all inheriting from `BasicCaughtExceptionInterface`. `CaughtException` is one of them, and it behaves as you would expect.
+            //   `Evaluator` also inherits from it, but any function that you call on it would first evaluate the `TA_MUST_THROW(...)` body instead of
+            //   waiting for `~` to do that. Additionally, whenever `CaughtException` would `return *this`, `Evaluator` instead returns an instance of
+            //   `class TemporaryCaughtException` BY VALUE, which is basically a clone of `CaughtException`, except that it also overloads `~` to
+            //   convert it to a `CaughtException` (the conversion itself is almost a no-op).
+            //   Also `TemporaryCaughtException`, whenever it needs to `return *this`, does this by rvalue reference, unlike `CaughtException`
+            //   which does so by a const lvalue reference.
+            class Evaluator
+                : public detail::BasicCaughtExceptionInterface<Evaluator, TemporaryCaughtException, true>
+            {
+                MustThrowWrapper &self;
+
+                friend MustThrowWrapper;
+                Evaluator(MustThrowWrapper &self) : self(self) {}
+
+                // For the CRTP baes.
+                friend detail::BasicCaughtExceptionInterface<Evaluator, TemporaryCaughtException, true>;
+                TemporaryCaughtException _get_state() const
+                {
+                    return operator~();
+                }
+
+              public:
+                // This must be const because `_get_state()` is const.
+                CFG_TA_API CaughtException operator~() const;
+            };
+
+          public:
+            // The weird name helps with supporting optional messages.
+            Evaluator DETAIL_TA_ADD_MESSAGE = *this;
+
+            // Makes an instance of this class.
+            template <ConstString File, int Line, ConstString MacroName, ConstString Expr, typename F>
+            [[nodiscard]] static MustThrowWrapper Make(const F &func, void (*break_func)())
+            {
+                static const BasicModule::MustThrowStaticInfo info = []{
+                    BasicModule::MustThrowStaticInfo ret;
                     ret.loc = {.file = File.view(), .line = Line};
                     ret.macro_name = MacroName.view();
                     ret.expr = Expr.view();
                     return ret;
                 }();
 
-                return &info;
+                return MustThrowWrapper(func, break_func, &info);
             }
 
             MustThrowWrapper(const MustThrowWrapper &) = delete;
             MustThrowWrapper &operator=(const MustThrowWrapper &) = delete;
 
+            // This doesn't return `Evaluator &`, even though that would make sense for consistency.
+            // Doing that would prevent a `TA_MUST_THROW(...).Check...()` oneliner from working.
             template <typename F>
-            CaughtException operator()(F &&func) &&
+            Evaluator &AddMessage(const F &func)
             {
-                if (!ThreadState().current_test)
-                    HardError("Attempted to use `TA_MUST_THROW(...)`, but no test is currently running.", HardErrorKind::user);
-
-                try
+                message_func = [](const void *data)
                 {
-                    context::FrameGuard guard({std::shared_ptr<void>{}, info});
-                    std::forward<F>(func)();
-                }
-                catch (...)
-                {
-                    return CaughtException(info, std::current_exception());
-                }
-
-                MissingException();
+                    std::string ret;
+                    (*static_cast<const F *>(data))([&]<typename ...P>(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+                    {
+                        ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                    });
+                    return ret;
+                };
+                message_data = &func;
+                return DETAIL_TA_ADD_MESSAGE;
             }
         };
     }
@@ -3170,9 +3457,6 @@ namespace ta_test
             // The enclosing assertions.
             std::u32string chars_in_assertion = U"While checking assertion:";
 
-            // How to print the custom error message coming from the user (passed to the assertion macro).
-            TextStyle style_user_message = {.color = TextColor::none, .bold = true};
-
             // The argument colors. They are cycled in this order.
             std::vector<TextStyle> style_arguments = {
                 {.color = TextColorRgb6(1,4,1), .bold = true},
@@ -3256,11 +3540,15 @@ namespace ta_test
             std::string chars_exception_contents = "While analyzing exception:";
             std::string chars_throw_location = "Thrown here:";
 
-            void OnMissingException(const MustThrowInfo &data) override;
+            void OnMissingException(const MustThrowInfo &data, bool &should_break) override;
             bool PrintContextFrame(const context::BasicFrame &frame) override;
 
-            // `is_most_nested` must be false if `caught` is set.
-            CFG_TA_API void PrintFrame(const BasicModule::MustThrowInfo &data, const BasicModule::CaughtExceptionInfo *caught, bool is_most_nested);
+            CFG_TA_API void PrintFrame(
+                const BasicModule::MustThrowStaticInfo &static_info,
+                const BasicModule::MustThrowDynamicInfo *dynamic_info, // Optional.
+                const BasicModule::CaughtExceptionInfo *caught, // Optional. If set, we're analyzing a caught exception. If null, we're looking at a macro call.
+                bool is_most_nested // Must be false if `caught` is set.
+            );
         };
 
         // Prints stack traces coming from `ta_test::Trace`.
@@ -3290,6 +3578,7 @@ namespace ta_test
             CFG_TA_API bool IsDebuggerAttached() const;
             void OnAssertionFailed(const BasicAssertionInfo &data) override;
             void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) override;
+            void OnMissingException(const MustThrowInfo &data, bool &should_break) override;
             void OnPreTryCatch(bool &should_catch) override;
             void OnPostRunSingleTest(const RunSingleTestResults &data) override;
         };

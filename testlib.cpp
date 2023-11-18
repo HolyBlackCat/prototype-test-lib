@@ -842,7 +842,7 @@ void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
     HardError("`$(...)` was evaluated when an assertion owning it already finished executing, or in a wrong thread.", HardErrorKind::user);
 }
 
-ta_test::detail::BasicAssertWrapper::Evaluator::operator std::nullptr_t()
+void ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
 {
     AssertionStackGuard stack_guard(self);
     context::FrameGuard context_guard({std::shared_ptr<void>{}, &self});
@@ -865,7 +865,7 @@ ta_test::detail::BasicAssertWrapper::Evaluator::operator std::nullptr_t()
         catch (InterruptTestException)
         {
             // We don't want any additional errors here.
-            return nullptr;
+            return;
         }
         catch (...)
         {
@@ -894,8 +894,6 @@ ta_test::detail::BasicAssertWrapper::Evaluator::operator std::nullptr_t()
     // Interrupt the test if the condition is false or on an exception.
     if (!self.condition_value_known || !self.condition_value)
         throw InterruptTestException{};
-
-    return nullptr;
 }
 
 std::optional<std::string_view> ta_test::detail::BasicAssertWrapper::GetUserMessage() const
@@ -1015,10 +1013,22 @@ std::string ta_test::DefaultToStringTraits<ta_test::ExceptionElemVar>::operator(
     }, value);
 }
 
-ta_test::CaughtException::CaughtException(const BasicModule::MustThrowInfo *must_throw_call, const std::exception_ptr &e)
+const std::vector<ta_test::SingleException> &ta_test::detail::GetEmptyExceptionListSingleton()
+{
+    // This is a little stupid, but probably better than a `HardError()`?
+    static const std::vector<ta_test::SingleException> ret;
+    return ret;
+}
+
+ta_test::CaughtException::CaughtException(
+    const BasicModule::MustThrowStaticInfo *static_info,
+    std::weak_ptr<const BasicModule::MustThrowDynamicInfo> dynamic_info,
+    const std::exception_ptr &e
+)
     : state(std::make_shared<BasicModule::CaughtExceptionInfo>())
 {
-    state->must_throw_call = must_throw_call;
+    state->static_info = static_info;
+    state->dynamic_info = std::move(dynamic_info);
 
     AnalyzeException(e, [&](SingleException elem)
     {
@@ -1026,44 +1036,47 @@ ta_test::CaughtException::CaughtException(const BasicModule::MustThrowInfo *must
     });
 }
 
-const std::vector<ta_test::SingleException> &ta_test::CaughtException::GetElems() const
+std::optional<std::string_view> ta_test::detail::MustThrowWrapper::Info::GetUserMessage() const
 {
-    if (!state)
+    if (self.message_func)
     {
-        // This is a little stupid, but probably better than a `HardError()`?
-        static const std::vector<ta_test::SingleException> ret;
-        return ret;
+        if (!self.message_cache)
+            self.message_cache = self.message_func(self.message_data);
+        return *self.message_cache;
     }
     else
     {
-        return state->elems;
+        return {};
     }
 }
 
-const ta_test::CaughtException &ta_test::CaughtException::CheckMessage(ExceptionElemVar elem, std::string_view regex, Trace<"CheckMessage"> trace) const
-{
-    trace.AddArgs(elem, regex);
-    std::regex r(regex.begin(), regex.end());
-    [[maybe_unused]] auto context = MakeContextGuard();
-    ForElem(elem, [&](const SingleException &elem)
-    {
-        TA_CHECK( std::regex_match(elem.message, r) )("Expected the exception message to match regex `{}`, but got `{}`.", regex, elem.message);
-        return false;
-    });
-    return *this;
-}
-
-void ta_test::detail::MustThrowWrapper::MissingException()
+ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~() const
 {
     auto &thread_state = ThreadState();
 
-    // This check should be redundant, since `operator()` already checks the same thing.
-    // But it's better to have it, in case something changes in the future.
-    if (!thread_state.current_test)
+    if (!ThreadState().current_test)
         HardError("Attempted to use `TA_MUST_THROW(...)`, but no test is currently running.", HardErrorKind::user);
 
+    try
+    {
+        context::FrameGuard guard({self.info, &self.info->info}); // A wonky owning pointer that points to a subobject.
+        self.body_func(self.body_data);
+    }
+    catch (...)
+    {
+        return CaughtException(
+            self.info->info.static_info,
+            std::shared_ptr<const BasicModule::MustThrowDynamicInfo>{self.info, self.info->info.dynamic_info},
+            std::current_exception()
+        );
+    }
+
     thread_state.FailCurrentTest();
-    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(*info);
+
+    bool should_break = false;
+    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(self.info->info, should_break);
+    if (should_break)
+        self.break_func();
 
     throw InterruptTestException{};
 }
@@ -1910,7 +1923,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
         }
 
         if (auto message = data.GetUserMessage())
-            canvas.DrawString(line_counter, column + 1, *message, {.style = style_user_message, .important = true});
+            canvas.DrawString(line_counter, column + 1, *message, {.style = common_data.style_user_message, .important = true});
 
         line_counter++;
     }
@@ -2111,9 +2124,10 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 
 // --- modules::MustThrowPrinter ---
 
-void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data)
+void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data, bool &should_break)
 {
-    PrintFrame(data, nullptr, true);
+    (void)should_break;
+    PrintFrame(*data.static_info, data.dynamic_info, nullptr, true);
     text::PrintContext(&data);
 }
 
@@ -2121,24 +2135,29 @@ bool ta_test::modules::MustThrowPrinter::PrintContextFrame(const context::BasicF
 {
     if (auto ptr = dynamic_cast<const BasicModule::MustThrowInfo *>(&frame))
     {
-        PrintFrame(*ptr, nullptr, false);
+        PrintFrame(*ptr->static_info, ptr->dynamic_info, nullptr, false);
         return true;
     }
     if (auto ptr = dynamic_cast<const BasicModule::CaughtExceptionInfo *>(&frame))
     {
-        PrintFrame(*ptr->must_throw_call, ptr, false);
+        PrintFrame(*ptr->static_info, ptr->dynamic_info.lock().get(), ptr, false);
         return true;
     }
 
     return false;
 }
 
-void ta_test::modules::MustThrowPrinter::PrintFrame(const BasicModule::MustThrowInfo &data, const BasicModule::CaughtExceptionInfo *caught, bool is_most_nested)
+void ta_test::modules::MustThrowPrinter::PrintFrame(
+    const BasicModule::MustThrowStaticInfo &static_info,
+    const BasicModule::MustThrowDynamicInfo *dynamic_info,
+    const BasicModule::CaughtExceptionInfo *caught,
+    bool is_most_nested
+)
 {
-    const std::string *message = nullptr;
+    const std::string *error_message = nullptr;
     if (caught)
     {
-        message = &chars_throw_location;
+        error_message = &chars_throw_location;
         terminal.Print("%s%s%s%s\n",
             terminal.AnsiResetString().data(),
             terminal.AnsiDeltaString({}, common_data.style_stack_frame).data(),
@@ -2150,33 +2169,45 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(const BasicModule::MustThrow
     }
     else if (is_most_nested)
     {
-        message = &chars_expected_exception;
+        error_message = &chars_expected_exception;
     }
     else
     {
-        message = &chars_while_expecting_exception;
+        error_message = &chars_while_expecting_exception;
     }
 
     TextStyle cur_style;
 
     auto st_path = terminal.AnsiDeltaString(cur_style, common_data.style_path);
-    auto st_message = terminal.AnsiDeltaString(cur_style, is_most_nested && !caught ? common_data.style_error : common_data.style_stack_frame);
+    auto st_error_message = terminal.AnsiDeltaString(cur_style, is_most_nested && !caught ? common_data.style_error : common_data.style_stack_frame);
 
-    terminal.Print("%s%s%s:\n%s%s%s\n\n",
+    terminal.Print("%s%s%s:\n%s%s",
         terminal.AnsiResetString().data(),
         st_path.data(),
-        common_data.LocationToString(data.loc).c_str(),
-        st_message.data(),
-        message->c_str(),
+        common_data.LocationToString(static_info.loc).c_str(),
+        st_error_message.data(),
+        error_message->c_str()
+    );
+    if (dynamic_info)
+    {
+        if (auto message = dynamic_info->GetUserMessage())
+        {
+            terminal.Print(" %s%*s",
+                terminal.AnsiDeltaString(cur_style, common_data.style_user_message).data(),
+                int(message->size()), message->data()
+            );
+        }
+    }
+    terminal.Print("%s\n\n",
         terminal.AnsiResetString().data()
     );
 
     text::TextCanvas canvas(&common_data);
     std::size_t column = common_data.code_indentation;
-    column += canvas.DrawString(0, column, data.macro_name, {.style = common_data.style_failed_macro, .important = true});
+    column += canvas.DrawString(0, column, static_info.macro_name, {.style = common_data.style_failed_macro, .important = true});
     column += canvas.DrawString(0, column, "(", {.style = common_data.style_failed_macro, .important = true});
     column += common_data.spaces_in_macro_call_parentheses;
-    column += text::expr::DrawToCanvas(canvas, 0, column, data.expr);
+    column += text::expr::DrawToCanvas(canvas, 0, column, static_info.expr);
     column += common_data.spaces_in_macro_call_parentheses;
     column += canvas.DrawString(0, column, ")", {.style = common_data.style_failed_macro, .important = true});
     canvas.InsertLineBefore(canvas.NumLines());
@@ -2309,6 +2340,13 @@ void ta_test::modules::DebuggerDetector::OnUncaughtException(const RunSingleTest
     (void)e;
     if (assertion && (break_on_failure ? *break_on_failure : IsDebuggerAttached()))
         assertion->should_break = true;
+}
+
+void ta_test::modules::DebuggerDetector::OnMissingException(const MustThrowInfo &data, bool &should_break)
+{
+    (void)data;
+    if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
+        should_break = true;
 }
 
 void ta_test::modules::DebuggerDetector::OnPreTryCatch(bool &should_catch)

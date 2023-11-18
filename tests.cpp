@@ -15,21 +15,19 @@ bool fof()
     // TA_CHECK($(1) == $(2))("x = {}", 42);
     // TA_FAIL("stuff {}", 42);
 
-    TA_MUST_THROW(throw std::runtime_error("123")).CheckDerivedType<std::exception>(1);
+    auto x = TA_MUST_THROW(throw std::runtime_error("123"))("z={}",43);
+    x.CheckMessage("123").CheckMessage("1234");
     return true;
 }
 TA_TEST(foo/bar)
 {
     TA_CHECK($(std::string("1\n2")).size() > 0 && $(fof()))("y = {}", 43);
-    fof();
 }
 
 int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
-
-// `CaughtException` should support an optional message too.
 
 // Short macros that can be disabled in the config.
 
@@ -46,6 +44,7 @@ int main(int argc, char **argv)
 // Subsections, for_types, and for_values (for_values optional?)
 
 // Move `mutable bool should_break` to a saner location, don't keep it in the context?
+// Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
 
 // Do we need `__visibility__("default")` when exporting from a shared library on Linux? And also test that somehow...
 
@@ -70,6 +69,8 @@ int main(int argc, char **argv)
 //     Get terminal width, and limit separator length to that value (but still not make them longer than they currently are)
 //     Try to enforce relative paths, and try printing errors on the same line as paths.
 //     $(...) should tolerate non-printable arguments, but only in non-dependent context.
+//     In, $(...) for really long lines, do just [1], then a reference at the bottom: `[1]: ...`. (Decide on the exact spelling, for this to not be confused with a single-element vector, or whatever)
+//         What's the point? $(...) isn't lazy, so you shouldn't have long lines in it anyway. Use the user message, which is lazy.
 
 // Unclear how:
 //     Draw a fat bracket while explaining each test failure?
@@ -111,6 +112,7 @@ TA_CHECK($("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") &&
 
 TA_CHECK:
     return type is void
+    local variable capture actually works, and the values are correct
     `TA_CHECK(true, true)` shouldn't compile because of a comma
     make sure that two values can't be printed side-by-side
     hard errors on unprintable stuff only in non-dependent contexts
@@ -119,16 +121,28 @@ TA_CHECK:
     A non-const format string is a compilation error.
     A bad format is a compilation error.
     Check that on libfmt, the check for `{:?}` being supported actually passes.
+    correctly breaks on the call site
+    usable without (...) in fold expressions
 
 --- TA_MUST_THROW:
+    local variable capture actually works, and the values are correct
     Doesn't warn on unused value.
     Doesn't warn on nodiscard violation.
     Doesn't warn on `;` at the end.
     Opening two same context frames deduplicates them.
     When doing a oneliner: `TA_MUST_THROW(...).Check...()`, make sure that the frame guard from the macro doesn't extend into the check.
     Element index out of range is a test fail, not a hard error.
+    correctly breaks on the call site
+    usable without (...) in fold expressions
+
+    call ABSOLUTELY ALL methods in three contexts: inline, inline after another method, out of line
+        We must check all this due to the weird way TA_MUST_THROW is written.
+        Make sure the stacks are printed correctly, including the function argments.
 
 --- `Trace` type
+    All the ten thousand constructor overloads.
+    Reset()
+    NoTrace{}
 
 --- Exception printer
 Known and unknown exception types.
