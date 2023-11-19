@@ -11,12 +11,20 @@ bool sum(const auto &...){return false;}
 
 bool fof()
 {
-    // TA_CHECK($(1) == $(2));
+    TA_CONTEXT("Hello {}", []{std::cout << "A\n"; return 42;}());
+    TA_LOG("Hello!");
+    TA_CONTEXT_LAZY("Hello {}", []{std::cout << "B\n"; return 43;}());
+
+    try{
+        TA_CHECK($(1) == $(2));
+    }
+    catch (ta_test::InterruptTestException) {}
+        TA_CHECK($(1) == $(2));
     // TA_CHECK($(1) == $(2))("x = {}", 42);
     // TA_FAIL("stuff {}", 42);
 
-    auto x = TA_MUST_THROW(throw std::runtime_error("123"))("z={}",43);
-    x.CheckMessage("123").CheckMessage("1234");
+    // auto x = TA_MUST_THROW(throw std::runtime_error("123"))("z={}",43);
+    // x.CheckMessage("123").CheckMessage("1234");
     return true;
 }
 TA_TEST(foo/bar)
@@ -28,10 +36,6 @@ int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
-
-// Short macros that can be disabled in the config.
-
-// Scoped and unscoped logging macros.
 
 // Review styles:
 //     string literals are ugly bright cyan
@@ -48,7 +52,10 @@ int main(int argc, char **argv)
 
 // Do we need `__visibility__("default")` when exporting from a shared library on Linux? And also test that somehow...
 
+// Short macros that can be disabled in the config.
+
 // Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
+// Sort declarations, then sort definitions.
 
 // Later:
 //     Somehow don't evaluate the message if the assertion passes? Perhaps change the syntax to `CHECK(cond, LOG("{}", 42))`, reusing one of the log macros?
@@ -71,6 +78,7 @@ int main(int argc, char **argv)
 //     $(...) should tolerate non-printable arguments, but only in non-dependent context.
 //     In, $(...) for really long lines, do just [1], then a reference at the bottom: `[1]: ...`. (Decide on the exact spelling, for this to not be confused with a single-element vector, or whatever)
 //         What's the point? $(...) isn't lazy, so you shouldn't have long lines in it anyway. Use the user message, which is lazy.
+//     Decorate line breaks in logs with `//` as well?
 
 // Unclear how:
 //     Draw a fat bracket while explaining each test failure?
@@ -123,6 +131,8 @@ TA_CHECK:
     Check that on libfmt, the check for `{:?}` being supported actually passes.
     correctly breaks on the call site
     usable without (...) in fold expressions
+    Gracefully fail the test if the lazy message throws?
+    Error if outlives the test. Error if destroyed out of order?
 
 --- TA_MUST_THROW:
     local variable capture actually works, and the values are correct
@@ -134,10 +144,31 @@ TA_CHECK:
     Element index out of range is a test fail, not a hard error.
     correctly breaks on the call site
     usable without (...) in fold expressions
+    Gracefully fail the test if the lazy message throws?
+    Error if outlives the test. Error if destroyed out of order?
+    Error if context guard is destroyed out of order?
 
     call ABSOLUTELY ALL methods in three contexts: inline, inline after another method, out of line
         We must check all this due to the weird way TA_MUST_THROW is written.
         Make sure the stacks are printed correctly, including the function argments.
+
+--- TA_LOG
+    \n suffix is silently stripped, but at most once.
+    Don't break if an argument throws.
+    Usable in fold expressions without parentheses.
+
+--- TA_CONTEXT
+    \n suffix is silently stripped, but at most once (check both lazy and non-lazy versions)
+    Don't break if an argument in the non-lazy version throws.
+    What happens if the lazy version throws? We should probably gracefully stop the test.
+    Usable in fold expressions without parentheses.
+    Error if it outlives the test.
+
+--- All the macros nicely no-op when tests are disabled
+    TA_CHECK validates the arguments (crash on call?)
+    $(...) only works inside of TA_CHECK
+    TA_TEST generates a dummy function to validate stuff
+    TA_LOG and TA_CONTEXT - crash on call??? (disable crash with a macro?)
 
 --- `Trace` type
     All the ten thousand constructor overloads.
@@ -206,5 +237,11 @@ Good test names:
     A run with all features, and --no-unicode, automatically test that no unicode crap is printed.
 
 --- Try to start the tests again while they are already running. Should crash with an error.
+
+---------------
+
+DOCUMENTATION:
+
+* Document that you can catch InterruptTestException to ensure softness (or come up with a better looking macro)
 
 */

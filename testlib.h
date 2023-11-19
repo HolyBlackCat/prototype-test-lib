@@ -201,8 +201,27 @@
 #define TA_MUST_THROW(...) \
     DETAIL_TA_MUST_THROW("TA_MUST_THROW", #__VA_ARGS__, __VA_ARGS__)
 
+// Logs a formatted line. The log is printed only on test failure.
+// Example:
+//     TA_LOG("Hello!");
+//     TA_LOG("x = {}", 42);
+// The trailing `\n`, if any, is ignored.
+#define TA_LOG(...) DETAIL_TA_LOG(__VA_ARGS__)
+// Creates a scoped log message. It's printed only if this line is in scope when something fails.
+// Unlike `TA_LOG()`, the message can be printed multiple times, if there are multiple failures in this scope.
+// The trailing `\n`, if any, is ignored.
+// The code calls this a "scoped log", and "context" means something else in the code.
+#define TA_CONTEXT(...) DETAIL_TA_CONTEXT(__VA_ARGS__)
+// Like `TA_CONTEXT`, but only evaluates the message when needed.
+// This means you need to make sure none of your variables dangle, and that they have sane values for the entire lifetime of this context.
+// Can evaluate the message more than once. You can utilize this to display the current variable values.
+#define TA_CONTEXT_LAZY(...) DETAIL_TA_CONTEXT_LAZY(__VA_ARGS__)
+
 
 // --- INTERNAL MACROS ---
+
+#define DETAIL_TA_CAT(x, y) DETAIL_TA_CAT_(x, y)
+#define DETAIL_TA_CAT_(x, y) x##y
 
 #define DETAIL_TA_TEST(name) \
     inline void _ta_test_func(::ta_test::ConstStringTag<#name>); \
@@ -243,6 +262,9 @@
     )\
     .DETAIL_TA_ADD_MESSAGE
 
+#define DETAIL_TA_LOG(...) ::ta_test::detail::AddLogEntry(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
+#define DETAIL_TA_CONTEXT(...) ::ta_test::detail::ScopedLogGuard DETAIL_TA_CAT(_ta_context,__COUNTER__)(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
+#define DETAIL_TA_CONTEXT_LAZY(...) ::ta_test::detail::ScopedLogGuardLazy DETAIL_TA_CAT(_ta_context,__COUNTER__)([&]{return CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__);})
 
 namespace ta_test
 {
@@ -258,6 +280,67 @@ namespace ta_test
         bad_command_line_arguments = 2, // A generic issue with command line arguments.
         bad_test_name_pattern = 3, // `--include` or `--exclude` didn't match any tests.
     };
+
+    enum class HardErrorKind {internal, user};
+    // Aborts the application with an error.
+    [[noreturn]] CFG_TA_API void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal);
+
+    // We throw this to abort a test (not necessarily fail it).
+    // You can catch and rethrow this before a `catch (...)` to still be able to abort tests inside one.
+    // You could throw this manually, but I don't see why you'd want to.
+    struct InterruptTestException {};
+
+    // A compile-time string.
+    template <std::size_t N>
+    struct ConstString
+    {
+        char str[N]{};
+
+        static constexpr std::size_t size = N - 1;
+
+        consteval ConstString() {}
+        consteval ConstString(const char (&new_str)[N])
+        {
+            if (new_str[N-1] != '\0')
+                HardError("The input string must be null-terminated.");
+            std::copy_n(new_str, size, str);
+        }
+
+        [[nodiscard]] consteval std::string_view view() const &
+        {
+            return {str, str + size};
+        }
+        [[nodiscard]] consteval std::string_view view() const && = delete;
+    };
+    template <std::size_t A, std::size_t B>
+    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const ConstString<B> &b)
+    {
+        ConstString<A + B - 1> ret;
+        std::copy_n(a.str, a.size, ret.str);
+        std::copy_n(b.str, b.size, ret.str + a.size);
+        return ret;
+    }
+    template <std::size_t A, std::size_t B>
+    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const char (&b)[B])
+    {
+        return a + ConstString<B>(b);
+    }
+    template <std::size_t A, std::size_t B>
+    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const char (&a)[A], const ConstString<B> &b)
+    {
+        return ConstString<A>(a) + b;
+    }
+    template <ConstString X>
+    struct ConstStringTag
+    {
+        static constexpr auto value = X;
+    };
+
+    // The lambda overloader.
+    template <typename ...P>
+    struct Overload : P... {using P::operator()...;};
+    template <typename ...P>
+    Overload(P...) -> Overload<P...>;
 
     // Parsing command line arguments.
     namespace flags
@@ -414,8 +497,11 @@ namespace ta_test
     }
 
     // This lets you determine the stack of assertions (and other things) that are currently executing.
+    // Also this manages the logs.
     namespace context
     {
+        // --- CONTEXT STACK ---
+
         // A single entry in the context stack.
         // You can add your own classes derived from this, if you add custom modules that can process them.
         struct BasicFrame
@@ -455,6 +541,73 @@ namespace ta_test
 
             CFG_TA_API ~FrameGuard();
         };
+
+        // --- LOGS ---
+
+        // A single entry in the log, either scoped or unscoped.
+        class LogEntry
+        {
+            std::size_t incremental_id = 0;
+
+            std::string message;
+
+            std::string (*message_refresh_func)(const void *data) = nullptr;
+            const void *message_refresh_data = nullptr;
+
+            void FixMessage()
+            {
+                if (message.ends_with('\n'))
+                    message.pop_back();
+            }
+
+          public:
+            // The constructors are primarily for internal use.
+
+            LogEntry() {}
+
+            // A fixed message.
+            LogEntry(std::size_t incremental_id, std::string &&message)
+                : incremental_id(incremental_id), message(std::move(message))
+            {
+                FixMessage();
+            }
+            // A generated message. Doesn't own the function.
+            template <typename F>
+            LogEntry(std::size_t incremental_id, const F &generate_message)
+            requires requires{generate_message();}
+                : incremental_id(incremental_id),
+                message_refresh_func([](const void *data)
+                {
+                    return (*static_cast<const F *>(data))();
+                }),
+                message_refresh_data(&generate_message)
+            {}
+
+            // The incremental ID of the log entry.
+            [[nodiscard]] std::size_t IncrementalId() const {return incremental_id;}
+
+            // This will be called automatically, you don't need to touch it (and can't, since it's non-const).
+            // Regenerates the message using the stored function, if any.
+            void RefreshMessage()
+            {
+                if (message_refresh_func)
+                {
+                    message = message_refresh_func(message_refresh_data);
+                    FixMessage();
+                }
+            }
+
+            // The message. Can be lazy, so this is not thread-safe.
+            // Can theoretically throw when evaluating the lazy message, keep that in mind.
+            [[nodiscard]] std::string_view Message() const
+            {
+                return message;
+            }
+        };
+
+        // The current scoped log. The unscoped log sits in the `BasicModule::RunSingleTestResults`.
+        // None of the pointers will be null.
+        [[nodiscard]] CFG_TA_API std::span<const LogEntry *const> CurrentScopedLog();
     }
 
     // Information about a single exception, without nesting.
@@ -556,6 +709,9 @@ namespace ta_test
         struct RunSingleTestResults : RunSingleTestInfo
         {
             bool failed = false;
+
+            // This is guaranteed to not contain any lazy log statements.
+            std::vector<context::LogEntry> unscoped_log;
 
             // You can set this to true to break after the test.
             mutable bool should_break = false;
@@ -762,13 +918,9 @@ namespace ta_test
     };
 
 
-    // --- MISC ---
+    // --- MODULE STORAGE ---
 
-    enum class HardErrorKind {internal, user};
-    // Aborts the application with an error.
-    [[noreturn]] CFG_TA_API void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal);
-
-    // Don't touch this.
+    // Thread state, modules.
     namespace detail
     {
         // The global per-thread state.
@@ -782,6 +934,12 @@ namespace ta_test
             std::vector<std::shared_ptr<const context::BasicFrame>> context_stack;
             // This is used to deduplicate the `context_stack` elements.
             std::set<const context::BasicFrame *> context_stack_set;
+
+            // Each log statement (scoped or not) receives an incremental thread-specific ID.
+            std::size_t log_id_counter = 0;
+            // The current scoped log, which is what `context::CurrentScopedLog()` returns.
+            // The unscoped log sits in `BasicModule::RunSingleTestResults`.
+            std::vector<context::LogEntry *> scoped_log;
 
             // Gracefully fails the current test, if not already failed.
             // Call this first, before printing any messages.
@@ -835,63 +993,6 @@ namespace ta_test
         template <auto>
         struct ValueTag {};
     }
-
-    // We throw this to abort a test (not necessarily fail it).
-    // You can catch and rethrow this before a `catch (...)` to still be able to abort tests inside one.
-    // You could throw this manually, but I don't see why you'd want to.
-    struct InterruptTestException {};
-
-    // A compile-time string.
-    template <std::size_t N>
-    struct ConstString
-    {
-        char str[N]{};
-
-        static constexpr std::size_t size = N - 1;
-
-        consteval ConstString() {}
-        consteval ConstString(const char (&new_str)[N])
-        {
-            if (new_str[N-1] != '\0')
-                HardError("The input string must be null-terminated.");
-            std::copy_n(new_str, size, str);
-        }
-
-        [[nodiscard]] consteval std::string_view view() const &
-        {
-            return {str, str + size};
-        }
-        [[nodiscard]] consteval std::string_view view() const && = delete;
-    };
-    template <std::size_t A, std::size_t B>
-    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const ConstString<B> &b)
-    {
-        ConstString<A + B - 1> ret;
-        std::copy_n(a.str, a.size, ret.str);
-        std::copy_n(b.str, b.size, ret.str + a.size);
-        return ret;
-    }
-    template <std::size_t A, std::size_t B>
-    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const char (&b)[B])
-    {
-        return a + ConstString<B>(b);
-    }
-    template <std::size_t A, std::size_t B>
-    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const char (&a)[A], const ConstString<B> &b)
-    {
-        return ConstString<A>(a) + b;
-    }
-    template <ConstString X>
-    struct ConstStringTag
-    {
-        static constexpr auto value = X;
-    };
-
-    // The lambda overloader.
-    template <typename ...P>
-    struct Overload : P... {using P::operator()...;};
-    template <typename ...P>
-    Overload(P...) -> Overload<P...>;
 
 
     // A pointer to a class derived from `BasicModule`.
@@ -1995,6 +2096,10 @@ namespace ta_test
         CFG_TA_API void PrintContext(const context::BasicFrame *skip_last_frame = nullptr, context::Context con = context::CurrentContext());
         // Same, but only prints a single context frame.
         CFG_TA_API void PrintContextFrame(const context::BasicFrame &frame);
+
+        // Prints the current log, using the current modules.
+        // Returns true if at least one module has printed something.
+        CFG_TA_API void PrintLog();
     }
 
 
@@ -2125,6 +2230,11 @@ namespace ta_test
         // Return true if this type of context frame is known to you and you handled it, then the other modules won't receive this call.
         // Do nothing and return false if you don't know this context frame type.
         virtual bool PrintContextFrame(const context::BasicFrame &frame) {(void)frame; return false;}
+        // This is called to print the log.
+        // Return true to prevent other modules from receiving this call.
+        // `unscoped_log` can alternatively be obtained from `BasicModule::RunSingleTestResults`.
+        // `scoped_log` can alternatively be obtained from `context::CurrentScopedLog()`.
+        virtual bool PrintLogEntries(std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) {(void)unscoped_log; (void)scoped_log; return false;}
 
       protected:
         CFG_TA_API void PrintNote(std::string_view text) const;
@@ -2228,11 +2338,11 @@ namespace ta_test
     };
 
 
-    // --- CHECKING CAUGHT EXCEPTIONS ---
-
-    // Don't touch this.
+    // Macro internals, except `TA_MUST_THROW(...)`.
     namespace detail
     {
+        // --- ASSERTIONS ---
+
         // `TA_ARG` ultimately expands to this.
         // Stores a pointer to a `StoredArg` in an `AssertWrapper` where it will write the argument as a string.
         struct ArgWrapper
@@ -2558,6 +2668,8 @@ namespace ta_test
             }
         };
 
+        // --- TESTS ---
+
         struct BasicTest : BasicModule::BasicTestInfo
         {
             virtual void Run() const = 0;
@@ -2664,6 +2776,47 @@ namespace ta_test
         // Touch to register a test. `T` is `SpecificTest<??>`.
         template <typename T>
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
+
+        // --- LOGS ---
+
+        [[nodiscard]] CFG_TA_API std::size_t GenerateLogId();
+        CFG_TA_API void AddLogEntry(std::string &&message);
+
+        class BasicScopedLogGuard
+        {
+            context::LogEntry *entry = nullptr;
+
+          protected:
+            CFG_TA_API BasicScopedLogGuard(context::LogEntry *entry);
+
+          public:
+            BasicScopedLogGuard(const BasicScopedLogGuard &) = delete;
+            BasicScopedLogGuard &operator=(const BasicScopedLogGuard &) = delete;
+
+            CFG_TA_API ~BasicScopedLogGuard();
+        };
+
+        class ScopedLogGuard : BasicScopedLogGuard
+        {
+            context::LogEntry entry;
+
+          public:
+            ScopedLogGuard(std::string &&message)
+                : BasicScopedLogGuard(&entry), entry(GenerateLogId(), std::move(message))
+            {}
+        };
+
+        template <typename F>
+        class ScopedLogGuardLazy : BasicScopedLogGuard
+        {
+            F func;
+            context::LogEntry entry;
+
+          public:
+            ScopedLogGuardLazy(F &&func)
+                : BasicScopedLogGuard(&entry), func(std::move(func)), entry(GenerateLogId(), this->func)
+            {}
+        };
     }
 
 
@@ -2695,6 +2848,7 @@ namespace ta_test
         CFG_TA_API std::string operator()(const ExceptionElemVar &value) const;
     };
 
+    // Internals of `CaughtException`.
     namespace detail
     {
         CFG_TA_API const std::vector<ta_test::SingleException> &GetEmptyExceptionListSingleton();
@@ -2932,6 +3086,7 @@ namespace ta_test
     };
 
 
+    // Internals of `TA_MUST_THROW(...)`.
     namespace detail
     {
         // `TA_MUST_THROW(...)` expands to this.
@@ -3485,6 +3640,23 @@ namespace ta_test
             bool PrintContextFrame(const context::BasicFrame &frame) override;
 
             CFG_TA_API void PrintAssertionFrameLow(const BasicAssertionInfo &data, bool is_most_nested) const;
+        };
+
+        // Responds to `text::PrintLog()` to print the current log.
+        // Does nothing by itself, is only used by the other modules.
+        struct LogPrinter : BasicPrintingModule
+        {
+            TextStyle style_message = {.color = TextColor::dark_cyan};
+
+            std::string chars_message_prefix = "// ";
+
+            // The current position in the unscoped log vector, to avoid printing the same stuff twice. We reset this when we start a new test.
+            // We intentionally re-print the scoped logs every time they're needed.
+            std::size_t unscoped_log_pos = 0;
+
+            void OnPreRunSingleTest(const RunSingleTestInfo &data) override;
+            void OnPostRunSingleTest(const RunSingleTestResults &data) override;
+            bool PrintLogEntries(std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) override;
         };
 
         // A generic module to analyze exceptions.

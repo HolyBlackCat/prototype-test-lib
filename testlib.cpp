@@ -30,9 +30,33 @@
 #endif
 #endif
 
+void ta_test::HardError(std::string_view message, HardErrorKind kind)
+{
+    // A threadsafe once flag.
+    bool once = false;
+    [[maybe_unused]] static const auto once_trigger = [&]
+    {
+        once = true;
+        return nullptr;
+    }();
+
+    if (!once)
+        std::terminate(); // We've already been there.
+
+    std::fprintf(stderr, "ta_test: %s: %.*s\n", kind == HardErrorKind::internal ? "Internal error" : "Error", int(message.size()), message.data());
+
+    // Stop.
+    // Don't need to check whether the debugger is attached, a crash is fine.
+    CFG_TA_BREAKPOINT();
+    std::terminate();
+}
+
 ta_test::context::Context ta_test::context::CurrentContext()
 {
-    return detail::ThreadState().context_stack;
+    auto &thread_state = detail::ThreadState();
+    if (!thread_state.current_test)
+        HardError("No test is currently running, can't access the current context.", HardErrorKind::user);
+    return thread_state.context_stack;
 }
 
 ta_test::context::FrameGuard::FrameGuard(std::shared_ptr<const BasicFrame> frame) noexcept
@@ -76,33 +100,20 @@ ta_test::context::FrameGuard::~FrameGuard()
     Reset();
 }
 
+std::span<const ta_test::context::LogEntry *const> ta_test::context::CurrentScopedLog()
+{
+    auto &thread_state = detail::ThreadState();
+    if (!thread_state.current_test)
+        HardError("No test is currently running, can't access the current scoped log.", HardErrorKind::user);
+    return thread_state.scoped_log;
+}
+
 std::string ta_test::SingleException::GetTypeName() const
 {
     if (IsTypeKnown())
         return text::Demangler{}(type.name());
     else
         return "";
-}
-
-void ta_test::HardError(std::string_view message, HardErrorKind kind)
-{
-    // A threadsafe once flag.
-    bool once = false;
-    [[maybe_unused]] static const auto once_trigger = [&]
-    {
-        once = true;
-        return nullptr;
-    }();
-
-    if (!once)
-        std::terminate(); // We've already been there.
-
-    std::fprintf(stderr, "%s: %.*s\n", kind == HardErrorKind::internal ? "Internal error" : "Error", int(message.size()), message.data());
-
-    // Stop.
-    // Don't need to check whether the debugger is attached, a crash is fine.
-    CFG_TA_BREAKPOINT();
-    std::terminate();
 }
 
 // Gracefully fails the current test, if not already failed.
@@ -782,6 +793,26 @@ void ta_test::text::PrintContextFrame(const context::BasicFrame &frame)
     }
 }
 
+void ta_test::text::PrintLog()
+{
+    auto &thread_state = detail::ThreadState();
+    if (!thread_state.current_test)
+        HardError("No test is currently running, can't print log.", HardErrorKind::user);
+
+    // Refresh the messages. Only the scoped log, since the unscoped one should never be lazy.
+    for (auto *entry : thread_state.scoped_log)
+        entry->RefreshMessage();
+
+    for (const auto &m : thread_state.current_test->all_tests->modules->AllModules())
+    {
+        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+        {
+            if (base->PrintLogEntries(thread_state.current_test->unscoped_log, context::CurrentScopedLog()))
+                break;
+        }
+    }
+}
+
 void ta_test::BasicPrintingModule::PrintNote(std::string_view text) const
 {
     terminal.Print("%s%s%s%.*s%s\n",
@@ -795,7 +826,7 @@ void ta_test::BasicPrintingModule::PrintNote(std::string_view text) const
 
 void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<void(SingleException elem)> &func)
 {
-    detail::GlobalThreadState &thread_state = detail::ThreadState();
+    auto &thread_state = detail::ThreadState();
     if (!thread_state.current_test)
         HardError("The current thread currently isn't running any test, can't use `AnalyzeException()`.", HardErrorKind::user);
 
@@ -989,6 +1020,41 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
     state.name_prefixes_to_order.try_emplace(name, state.name_prefixes_to_order.size());
 }
 
+std::size_t ta_test::detail::GenerateLogId()
+{
+    auto &thread_state = ThreadState();
+    if (!thread_state.current_test)
+        HardError("Can't log when no test is running.", HardErrorKind::user);
+    return thread_state.log_id_counter++;
+}
+
+void ta_test::detail::AddLogEntry(std::string &&message)
+{
+    auto &thread_state = ThreadState();
+    if (!thread_state.current_test)
+        HardError("Can't log when no test is running.", HardErrorKind::user);
+    thread_state.current_test->unscoped_log.emplace_back(GenerateLogId(), std::move(message));
+}
+
+ta_test::detail::BasicScopedLogGuard::BasicScopedLogGuard(context::LogEntry *entry)
+    : entry(entry)
+{
+    auto &thread_state = ThreadState();
+    if (!thread_state.current_test)
+        HardError("Can't log when no test is running.", HardErrorKind::user);
+    thread_state.scoped_log.push_back(entry);
+}
+
+ta_test::detail::BasicScopedLogGuard::~BasicScopedLogGuard()
+{
+    auto &thread_state = ThreadState();
+    if (!thread_state.current_test)
+        HardError("A scoped log guard somehow outlived the test.");
+    if (thread_state.scoped_log.empty() || thread_state.scoped_log.back() != entry)
+        HardError("The scoped log stack got corrupted.");
+    thread_state.scoped_log.pop_back();
+}
+
 std::string ta_test::DefaultToStringTraits<ta_test::ExceptionElem>::operator()(const ExceptionElem &value) const
 {
     switch (value)
@@ -1092,6 +1158,7 @@ void ta_test::Runner::SetDefaultModules()
     modules.push_back(MakeModule<modules::ProgressPrinter>());
     modules.push_back(MakeModule<modules::ResultsPrinter>());
     modules.push_back(MakeModule<modules::AssertionPrinter>());
+    modules.push_back(MakeModule<modules::LogPrinter>());
     modules.push_back(MakeModule<modules::DefaultExceptionAnalyzer>());
     modules.push_back(MakeModule<modules::ExceptionPrinter>());
     modules.push_back(MakeModule<modules::MustThrowPrinter>());
@@ -1883,6 +1950,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 
 void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data)
 {
+    text::PrintLog();
     PrintAssertionFrameLow(data, true);
     text::PrintContext(&data);
 }
@@ -2102,12 +2170,75 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
     canvas.Print(terminal);
 }
 
+// --- modules::LogPrinter
+
+void ta_test::modules::LogPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data)
+{
+    (void)data;
+    unscoped_log_pos = 0;
+}
+
+void ta_test::modules::LogPrinter::OnPostRunSingleTest(const RunSingleTestResults &data)
+{
+    // Doing it in both places (before and after a test) is redundant, but doesn't hurt.
+    (void)data;
+    unscoped_log_pos = 0;
+}
+
+bool ta_test::modules::LogPrinter::PrintLogEntries(std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log)
+{
+    if (unscoped_log_pos > unscoped_log.size())
+        HardError("Less entires in the unscoped log than expected.");
+
+    // Remove the already printed unscoped log messages.
+    unscoped_log = unscoped_log.last(unscoped_log.size() - unscoped_log_pos);
+    unscoped_log_pos += unscoped_log.size();
+
+    if (!unscoped_log.empty() || !scoped_log.empty())
+    {
+        do
+        {
+            bool use_unscoped = false;
+            if (unscoped_log.empty())
+                use_unscoped = false;
+            else if (scoped_log.empty())
+                use_unscoped = true;
+            else
+                use_unscoped = unscoped_log.front().IncrementalId() < scoped_log.front()->IncrementalId();
+
+            // Since this is lazy, this can throw.
+            std::string_view message = (use_unscoped ? unscoped_log.front() : *scoped_log.front()).Message();
+
+            if (use_unscoped)
+                unscoped_log = unscoped_log.last(unscoped_log.size() - 1);
+            else
+                scoped_log = scoped_log.last(scoped_log.size() - 1);
+
+            // We reset the style every time in case the `Message()` is lazy and ends up throwing.
+            terminal.Print("%s%s%s%*s%s\n",
+                terminal.AnsiResetString().data(),
+                terminal.AnsiDeltaString({}, style_message).data(),
+                chars_message_prefix.c_str(),
+                int(message.size()), message.data(),
+                terminal.AnsiResetString().data()
+            );
+        }
+        while (!unscoped_log.empty() || !scoped_log.empty());
+
+        terminal.Print("\n");
+    }
+
+    return false; // Shrug.
+}
+
 // --- modules::ExceptionPrinter ---
 
 void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e)
 {
     (void)test;
     (void)assertion;
+
+    text::PrintLog();
 
     terminal.Print("%s%s%s%s\n",
         terminal.AnsiResetString().data(),
@@ -2127,6 +2258,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data, bool &should_break)
 {
     (void)should_break;
+    text::PrintLog();
     PrintFrame(*data.static_info, data.dynamic_info, nullptr, true);
     text::PrintContext(&data);
 }
