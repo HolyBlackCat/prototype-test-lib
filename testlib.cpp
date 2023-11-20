@@ -573,10 +573,6 @@ std::size_t ta_test::text::expr::DrawToCanvas(TextCanvas &canvas, std::size_t li
                 break;
             }
         }
-        else if (std::all_of(ident.begin(), ident.end(), [](char ch){return chars::IsIdentifierChar(ch) && !chars::IsAlphaLowercase(ch);}))
-        {
-            ident_style = &style->all_caps;
-        }
 
         // If this identifier needs a custom style...
         if (ident_style)
@@ -588,8 +584,11 @@ std::size_t ta_test::text::expr::DrawToCanvas(TextCanvas &canvas, std::size_t li
 
     auto lambda = [&](const char &ch, CharKind kind)
     {
+        if (!uni::IsFirstByte(ch))
+            return;
+
         TextCanvas::CellInfo &info = canvas.CellInfoAt(line, start + i);
-        bool is_punct = !chars::IsIdentifierChar(ch);
+        bool is_punct = chars::IsPunct(ch);
 
         const char *const prev_identifier_start = identifier_start;
 

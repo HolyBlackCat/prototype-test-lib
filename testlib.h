@@ -1252,6 +1252,12 @@ namespace ta_test
                     return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
                 return IsIdentifierCharStrict(ch);
             }
+            // Whether `ch` is a punctuation character.
+            // Unlike the standard function, we don't reject invisible characters here. Importantly, we do reject unicode.
+            [[nodiscard]] constexpr bool IsPunct(char ch)
+            {
+                return ch >= 0 && ch <= 127 && !IsIdentifierChar(ch);
+            }
             // Returns true if `name` is `"TA_ARG"` or one of its aliases.
             [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
             {
@@ -1438,30 +1444,28 @@ namespace ta_test
                 TextStyle keyword_generic = {.color = TextColor::light_blue, .bold = true};
                 TextStyle keyword_value = {.color = TextColor::dark_magenta, .bold = true};
                 TextStyle keyword_op = {.color = TextColor::light_white, .bold = true};
-                // Identifiers written in all caps, probably macros.
-                TextStyle all_caps = {.color = TextColor::dark_red};
                 // Numbers.
                 TextStyle number = {.color = TextColor::dark_green, .bold = true};
                 // User-defined literal on a number, starting with `_`. For my sanity, literals not starting with `_` are colored like the rest of the number.
                 TextStyle number_suffix = {.color = TextColor::dark_green};
                 // A string literal; everything between the quotes inclusive.
-                TextStyle string = {.color = TextColor::dark_cyan, .bold = true};
+                TextStyle string = {.color = TextColor::dark_yellow, .bold = true};
                 // Stuff before the opening `"`.
-                TextStyle string_prefix = {.color = TextColor::dark_cyan};
+                TextStyle string_prefix = {.color = TextColor::dark_yellow};
                 // Stuff after the closing `"`.
-                TextStyle string_suffix = {.color = TextColor::dark_cyan};
+                TextStyle string_suffix = {.color = TextColor::dark_yellow};
                 // A character literal.
-                TextStyle character = {.color = TextColor::dark_yellow, .bold = true};
-                TextStyle character_prefix = {.color = TextColor::dark_yellow};
-                TextStyle character_suffix = {.color = TextColor::dark_yellow};
+                TextStyle character = {.color = TextColor::dark_magenta, .bold = true};
+                TextStyle character_prefix = {.color = TextColor::dark_magenta};
+                TextStyle character_suffix = {.color = TextColor::dark_magenta};
                 // A raw string literal; everything between the parentheses exclusive.
-                TextStyle raw_string = {.color = TextColor::light_blue, .bold = true};
+                TextStyle raw_string = {.color = TextColor::dark_cyan, .bold = true};
                 // Stuff before the opening `"`.
-                TextStyle raw_string_prefix = {.color = TextColor::dark_magenta};
+                TextStyle raw_string_prefix = {.color = TextColor::dark_cyan};
                 // Stuff after the closing `"`.
-                TextStyle raw_string_suffix = {.color = TextColor::dark_magenta};
+                TextStyle raw_string_suffix = {.color = TextColor::dark_cyan};
                 // Quotes, parentheses, and everything between them.
-                TextStyle raw_string_delimiters = {.color = TextColor::dark_magenta, .bold = true};
+                TextStyle raw_string_delimiters = {.color = TextColor::light_blue, .bold = true};
 
                 // Keywords classification. The lists should be mutually exclusive.
                 std::map<std::string, KeywordKind, std::less<>> highlighted_keywords = {
