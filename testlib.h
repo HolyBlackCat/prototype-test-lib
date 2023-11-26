@@ -106,6 +106,13 @@
 #define CFG_TA_MSVC_STYLE_ERRORS 0
 #endif
 #endif
+// This location format is used for internal error messages.
+// Most user-facing messages don't use this, as they're printed by modules, which are configured separately.
+#if CFG_TA_MSVC_STYLE_ERRORS
+#define DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "{}({})"
+#else
+#define DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "{}:{}"
+#endif
 
 // Whether to use `<cxxabi.h>` to demangle names from `typeid(...).name()`.
 // Otherwise the names are used as is.
@@ -187,13 +194,16 @@
 // Equivalent to `TA_CHECK(false)`, except the printed message is slightly different.
 // Also accepts an optional message: `TA_FAIL("Checking {}!", "stuff");`.
 #define TA_FAIL DETAIL_TA_CHECK("", "", false)
+// Stops the test immediately, not necessarily failing it.
+// Equivalent to throwing `ta_test::InterruptTestException`.
+#define TA_INTERRUPT_TEST DETAIL_TA_INTERRUPT_TEST
 
 // Can only be used inside of `TA_CHECK(...)`. Wrap a subexpression in this to print its value if the assertion fails.
 // Those can be nested inside one another.
 // The expansion is enclosed in `(...)`, which lets you use it e.g. as a sole function argument: `func $(var)`.
 #define TA_ARG(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
 #if CFG_TA_USE_DOLLAR
-#define $(...) TA_ARG(__VA_ARGS__)
+#define $(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
 #endif
 
 // Checks that `...` throws an exception (it can even contain more than one statement), otherwise fails the test immediately.
@@ -216,6 +226,29 @@
 // This means you need to make sure none of your variables dangle, and that they have sane values for the entire lifetime of this context.
 // Can evaluate the message more than once. You can utilize this to display the current variable values.
 #define TA_CONTEXT_LAZY(...) DETAIL_TA_CONTEXT_LAZY(__VA_ARGS__)
+
+// Repeats the test for all values in the range `...`. (Either a `{...}` list or a C++20 range.)
+// `name` is the name for logging purposes, it must be a valid identifier.
+// You can't use any local variables in `...`, that's a compilation error. Use `TA_GENERATE_FUNC` if you need more flexibility.
+// #define TA_GENERATE
+
+// Repeats the test for all values returned by the lambda.
+// Usage: `T x = TA_GENERATE_FUNC(name, lambda);`.
+// The lambda must be `(bool &repeat) -> ??`. The return type can be anything, possibly a reference.
+// Saves the return value from the lambda and returns it from `TA_GENERATE(...)`.
+// `repeat` receives `true` by default. If it remains true, the test will be restarted and the lambda will be called again to compute the new value.
+// If it's set to false, the
+//  by const reference: `const decltype(func(...)) &`.
+// Note that this means that if `func()` returns by reference, the possible lack of constness of the reference is preserved:
+//   Lambda returns | TA_GENERATE_FUNC returns
+//   ---------------|-------------------------
+//             T    | const T &
+//             T &  |       T &
+//             T && |       T &&
+// The lambda won't be called again, or at least not until its recreated to restart the sequence, if necessary.
+// The lambda is not evaluated/constructed at all when reentering `TA_GENERATE_FUNC(...)`, if we already have one from the previous run.
+// WARNING!! Since the lambda will outlive the test, make sure your captures don't dangle.
+#define TA_GENERATE_FUNC(name, ...) DETAIL_TA_GENERATE_FUNC(name, __VA_ARGS__)
 
 
 // --- INTERNAL MACROS ---
@@ -246,6 +279,8 @@
 
 #define DETAIL_TA_FAIL(macro_name_) DETAIL_TA_CHECK(macro_name_, "", false)
 
+#define DETAIL_TA_INTERRUPT_TEST (throw ::ta_test::InterruptTestException{})
+
 #define DETAIL_TA_ADD_MESSAGE(...) \
     AddMessage([&](auto &&_ta_add_message){_ta_add_message(__VA_ARGS__);})
 
@@ -262,9 +297,33 @@
     )\
     .DETAIL_TA_ADD_MESSAGE
 
-#define DETAIL_TA_LOG(...) ::ta_test::detail::AddLogEntry(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
-#define DETAIL_TA_CONTEXT(...) ::ta_test::detail::ScopedLogGuard DETAIL_TA_CAT(_ta_context,__COUNTER__)(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
-#define DETAIL_TA_CONTEXT_LAZY(...) ::ta_test::detail::ScopedLogGuardLazy DETAIL_TA_CAT(_ta_context,__COUNTER__)([&]{return CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__);})
+#define DETAIL_TA_LOG(...) \
+    ::ta_test::detail::AddLogEntry(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
+#define DETAIL_TA_CONTEXT(...) \
+    ::ta_test::detail::ScopedLogGuard DETAIL_TA_CAT(_ta_context,__COUNTER__)(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
+#define DETAIL_TA_CONTEXT_LAZY(...) \
+    ::ta_test::detail::ScopedLogGuardLazy DETAIL_TA_CAT(_ta_context,__COUNTER__)([&]{return CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__);})
+
+#define DETAIL_TA_GENERATE_FUNC(name, ...) \
+    ::ta_test::detail::Generate<#name, __FILE__, __LINE__, __COUNTER__>([&]{return __VA_ARGS__;})
+
+// --- ENUM FLAGS MACROS ---
+
+// Synthesizes operators for a enum of flags: `&`, `|`, and `~`. Also multiplication by a bool.
+#define DETAIL_TA_FLAG_OPERATORS(name_) DETAIL_TA_FLAG_OPERATORS_CUSTOM(static, name_)
+// Same, but works at class scope.
+#define DETAIL_TA_FLAG_OPERATORS_IN_CLASS(name_) DETAIL_TA_FLAG_OPERATORS_CUSTOM(friend, name_)
+// Same, but lets you specify a custom decl-specifier-seq.
+#define DETAIL_TA_FLAG_OPERATORS_CUSTOM(prefix_, name_) \
+    [[nodiscard, maybe_unused]] prefix_ name_ operator&(name_ a, name_ b) {return name_(::std::underlying_type_t<name_>(a) & ::std::underlying_type_t<name_>(b));} \
+    [[nodiscard, maybe_unused]] prefix_ name_ operator|(name_ a, name_ b) {return name_(::std::underlying_type_t<name_>(a) | ::std::underlying_type_t<name_>(b));} \
+    [[nodiscard, maybe_unused]] prefix_ name_ operator~(name_ a) {return name_(~::std::underlying_type_t<name_>(a));} \
+    [[maybe_unused]] prefix_ name_ &operator&=(name_ &a, name_ b) {return a = a & b;} \
+    [[maybe_unused]] prefix_ name_ &operator|=(name_ &a, name_ b) {return a = a | b;} \
+    [[nodiscard, maybe_unused]] prefix_ name_ operator*(name_ a, bool b) {return b ? a : name_{};} \
+    [[nodiscard, maybe_unused]] prefix_ name_ operator*(bool a, name_ b) {return a ? b : name_{};} \
+    [[maybe_unused]] prefix_ name_ &operator*=(name_ &a, bool b) {return a = a * b;}
+
 
 namespace ta_test
 {
@@ -281,6 +340,7 @@ namespace ta_test
         bad_test_name_pattern = 3, // `--include` or `--exclude` didn't match any tests.
     };
 
+    // We try to classify the hard errors into interal ones and user-induced ones, but this is only an approximation.
     enum class HardErrorKind {internal, user};
     // Aborts the application with an error.
     [[noreturn]] CFG_TA_API void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal);
@@ -341,6 +401,95 @@ namespace ta_test
     struct Overload : P... {using P::operator()...;};
     template <typename ...P>
     Overload(P...) -> Overload<P...>;
+
+    // --- STRING CONVERSIONS ---
+
+    namespace string_conv
+    {
+        // You normally shouldn't specialize this, specialize `ToStringTraits` defined below.
+        // `DefaultToStringTraits` uses this for types that don't support the debug format `"{:?}"`.
+        template <typename T, typename = void>
+        struct DefaultFallbackToStringTraits
+        {
+            std::string operator()(const T &value) const
+            // `std::formattable` is from C++23, and could be unavailable.
+            requires std::default_initializable<CFG_TA_FMT_NAMESPACE::formatter<T, char>>
+            {
+                return CFG_TA_FMT_NAMESPACE::format("{}", value);
+            }
+        };
+        // Throw in some fallback formatters to escape strings, for format libraries that don't support this yet.
+        template <>
+        struct DefaultFallbackToStringTraits<char>
+        {
+            CFG_TA_API std::string operator()(char value) const;
+        };
+        template <>
+        struct DefaultFallbackToStringTraits<std::string_view>
+        {
+            CFG_TA_API std::string operator()(std::string_view value) const;
+        };
+        template <> struct DefaultFallbackToStringTraits<std::string > : DefaultFallbackToStringTraits<std::string_view> {};
+        template <> struct DefaultFallbackToStringTraits<      char *> : DefaultFallbackToStringTraits<std::string_view> {};
+        template <> struct DefaultFallbackToStringTraits<const char *> : DefaultFallbackToStringTraits<std::string_view> {};
+        // Somehow this catches const arrays too.
+        template <std::size_t N> struct DefaultFallbackToStringTraits<char[N]> : DefaultFallbackToStringTraits<std::string_view> {};
+
+        // Don't specialize this, specialize `ToStringTraits` defined below.
+        // `ToStringTraits` inherits from this by default.
+        template <typename T, typename = void>
+        struct DefaultToStringTraits
+        {
+            std::string operator()(const T &value) const
+            requires requires {DefaultFallbackToStringTraits<T>{}(value);}
+            {
+                // There seems to be no way to use `std::
+                if constexpr (requires(CFG_TA_FMT_NAMESPACE::formatter<T> f){f.set_debug_format();})
+                    return CFG_TA_FMT_NAMESPACE::format("{:?}", value);
+                else
+                    return DefaultFallbackToStringTraits<T>{}(value);
+            }
+        };
+
+        // `ToStringTraits` serializes this as is, without escaping or quotes.
+        struct ExactString
+        {
+            std::string string;
+        };
+        template <>
+        struct DefaultToStringTraits<ExactString>
+        {
+            std::string operator()(ExactString value) const
+            {
+                return std::move(value.string);
+            }
+        };
+
+        // Type names.
+        template <>
+        struct DefaultToStringTraits<std::type_index>
+        {
+            CFG_TA_API std::string operator()(std::type_index value) const;
+        };
+        template <>
+        struct DefaultToStringTraits<std::type_info> : DefaultToStringTraits<std::type_index> {};
+
+        // You can specialize this for your types.
+        template <typename T, typename = void>
+        struct ToStringTraits : DefaultToStringTraits<T> {};
+
+        // Whether `ToString()` works on `T`.
+        // Ignores cvref-qualifiers (well, except volatile).
+        template <typename T>
+        concept SupportsToString = requires(const T &t){ToStringTraits<std::remove_cvref_t<T>>{}(t);};
+
+        // Converts `value` to a string using `ToStringTraits`.
+        template <typename T>
+        [[nodiscard]] std::string ToString(T &&value)
+        {
+            return ToStringTraits<std::remove_cvref_t<T>>{}(value);
+        }
+    }
 
     // Parsing command line arguments.
     namespace flags
@@ -665,6 +814,12 @@ namespace ta_test
             int line = 0;
             friend auto operator<=>(const SourceLoc &, const SourceLoc &) = default;
         };
+        // A source location with a value of `__COUNTER__`.
+        struct SourceLocWithCounter : SourceLoc
+        {
+            int counter = 0;
+            friend auto operator<=>(const SourceLocWithCounter &, const SourceLocWithCounter &) = default;
+        };
 
         struct BasicTestInfo
         {
@@ -701,10 +856,146 @@ namespace ta_test
         // This is called after all tests run.
         virtual void OnPostRunTests(const RunTestsResults &data) {(void)data;}
 
+        // Describes a generator created with `TA_GENERATE(...)`.
+        struct BasicGenerator
+        {
+            BasicGenerator() = default;
+            BasicGenerator(const BasicGenerator &) = delete;
+            BasicGenerator &operator=(const BasicGenerator &) = delete;
+            virtual ~BasicGenerator() = default;
+
+            // The source location.
+            [[nodiscard]] virtual const BasicModule::SourceLocWithCounter &GetLocation() const = 0;
+            // The identifier passed to `TA_GENERATE(...)`.
+            [[nodiscard]] virtual std::string_view GetName() const = 0;
+
+            // The return type.
+            // Note that `std::type_index` can't encode cvref-qualifiers, see `GetTypeFlags()` for those.
+            [[nodiscard]] virtual std::type_index GetType() const = 0;
+
+            enum class TypeFlags
+            {
+                unqualified = 0,
+                const_ = 1 << 0,
+                volatile_ = 1 << 1,
+                lvalue_ref = 1 << 2,
+                rvalue_ref = 1 << 3,
+                any_ref = lvalue_ref | rvalue_ref,
+            };
+            DETAIL_TA_FLAG_OPERATORS_IN_CLASS(TypeFlags)
+            using enum TypeFlags;
+            // Returns cvref-qualifiers of the type, since they don't fit into `std::type_index`.
+            [[nodiscard]] virtual TypeFlags GetTypeFlags() const = 0;
+
+            // Demangles the type from `GetType()`, and adds qualifiers from `GetTypeFlags()`.
+            [[nodiscard]] CFG_TA_API std::string GetTypeName() const;
+
+            // Whether the last generated value is the last one for this generator.
+            [[nodiscard]] bool IsLastValue() const {return !repeat;}
+
+            // This is false when the generator is reached for the first time and didn't generate a value yet.
+            // Calling `GetValue()` in that case will crash.
+            [[nodiscard]] virtual bool HasValue() const = 0;
+
+            // Whether `ToString()` works for this generated type.
+            [[nodiscard]] virtual bool ValueSupportsToString() const = 0;
+            // Converts the current `GetValue()` to a string, or returns an empty string if `ValueSupportsToString()` is false.
+            [[nodiscard]] virtual std::string ValueToString() const = 0;
+
+            // This is incremented every time a new value is generated.
+            // You can treat this as a 1-based value index.
+            [[nodiscard]] int NumGeneratedValues() const {return num_generated_values;}
+
+            // For internal use. Generates the next value and updates `repeat`.
+            virtual void Generate() = 0;
+
+          protected:
+            // `Generate()` updates this to indicate whether more values will follow.
+            bool repeat = true;
+            int num_generated_values = 0;
+
+            // `BasicTypedGenerator` uses this to wrap a reference to store it in a `std::optional`.
+            template <typename T>
+            struct ReferenceWrapper
+            {
+                T ref_value;
+                ReferenceWrapper(T ref_value) : ref_value(std::forward<T>(ref_value)) {}
+            };
+        };
+
+        // The generator for a specific type.
+        // `ReturnType` may or may not be a reference.
+        template <typename ReturnType>
+        struct BasicTypedGenerator : BasicGenerator
+        {
+            // Need a struct wrapper for references.
+            std::optional<
+                std::conditional_t<
+                    std::is_reference_v<ReturnType>,
+                    ReferenceWrapper<ReturnType>,
+                    ReturnType
+                >
+            >
+            storage;
+
+            [[nodiscard]] std::type_index GetType() const override final
+            {
+                return typeid(ReturnType);
+            }
+            [[nodiscard]] TypeFlags GetTypeFlags() const override final
+            {
+                return
+                    TypeFlags::const_ * std::is_const_v<ReturnType> |
+                    TypeFlags::volatile_ * std::is_volatile_v<ReturnType> |
+                    TypeFlags::lvalue_ref * std::is_lvalue_reference_v<ReturnType> |
+                    TypeFlags::rvalue_ref * std::is_rvalue_reference_v<ReturnType>;
+            }
+
+            [[nodiscard]] bool HasValue() const override final
+            {
+                return storage.has_value();
+            }
+
+            [[nodiscard]] bool ValueSupportsToString() const override final
+            {
+                return string_conv::SupportsToString<ReturnType>;
+            }
+
+            [[nodiscard]] std::string ValueToString() const override final
+            {
+                if constexpr (string_conv::SupportsToString<ReturnType>)
+                    return string_conv::ToString(GetValue());
+                else
+                    return {};
+            }
+
+            [[nodiscard]] const ReturnType &GetValue() const
+            {
+                if (!storage)
+                    HardError("The generator somehow holds no value."); // This should never happen.
+
+                if constexpr (std::is_reference_v<ReturnType>)
+                    return storage->ref_value;
+                else
+                    return *storage;
+            }
+        };
+
         struct RunSingleTestInfo
         {
             const RunTestsResults *all_tests = nullptr;
             const BasicTestInfo *test = nullptr;
+
+            // The generator stack.
+            // This starts empty when entering the test for the first time.
+            // Reaching `TA_GENERATE` can push or modify the last element of the stack.
+            // Right after `OnPostRunSingleTest`, any trailing elements with `.IsLastValue() == true` are pruned.
+            // If the stack isn't empty after that, the test is restarted with the same stack.
+            std::vector<std::unique_ptr<const BasicGenerator>> generator_stack;
+
+            // True when entering the test for the first time, as opposed to repeating it because of a generator.
+            // This is set to `generator_stack.empty()` when entering the test.
+            bool is_first_generator_repetition = false;
         };
         struct RunSingleTestResults : RunSingleTestInfo
         {
@@ -713,6 +1004,11 @@ namespace ta_test
             // This is guaranteed to not contain any lazy log statements.
             std::vector<context::LogEntry> unscoped_log;
 
+            // Which generator in `RunSingleTestInfo::generator_stack` we expect to hit next, or `generator_stack.size()` if none.
+            // This starts at `0` every time the test is entered.
+            // When exiting a test normally, this should be at `generator_stack.size()`.
+            std::size_t generator_index = 0;
+
             // You can set this to true to break after the test.
             mutable bool should_break = false;
         };
@@ -720,6 +1016,11 @@ namespace ta_test
         virtual void OnPreRunSingleTest(const RunSingleTestInfo &data) {(void)data;}
         // This is called after every single test runs.
         virtual void OnPostRunSingleTest(const RunSingleTestResults &data) {(void)data;}
+
+        // This is called before every `TA_GENERATE(...)`.
+        virtual void OnPreGenerate(const BasicGenerator &data) {(void)data;}
+        // This is called after every `TA_GENERATE(...)`.
+        virtual void OnPostGenerate(const BasicGenerator &data) {(void)data;}
 
         // --- FAILING TESTS ---
 
@@ -894,6 +1195,8 @@ namespace ta_test
             x(OnPostRunTests) \
             x(OnPreRunSingleTest) \
             x(OnPostRunSingleTest) \
+            x(OnPreGenerate) \
+            x(OnPostGenerate) \
             x(OnPreFailTest) \
             x(OnAssertionFailed) \
             x(OnUncaughtException) \
@@ -2106,109 +2409,6 @@ namespace ta_test
         CFG_TA_API void PrintLog();
     }
 
-
-    // --- STRING CONVERSIONS ---
-
-    // You normally shouldn't specialize this, specialize `ToStringTraits` defined below.
-    // `DefaultToStringTraits` uses this for types that don't support the debug format `"{:?}"`.
-    template <typename T, typename = void>
-    struct DefaultFallbackToStringTraits
-    {
-        std::string operator()(const T &value) const
-        {
-            return CFG_TA_FMT_NAMESPACE::format("{}", value);
-        }
-    };
-    // Throw in some fallback formatters to escape strings, for format libraries that don't support this yet.
-    template <>
-    struct DefaultFallbackToStringTraits<char>
-    {
-        std::string operator()(char value) const
-        {
-            char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
-            text::EscapeString({&value, 1}, ret, false);
-            return ret;
-        }
-    };
-    template <>
-    struct DefaultFallbackToStringTraits<std::string>
-    {
-        std::string operator()(const std::string &value) const
-        {
-            std::string ret;
-            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-            text::EscapeString(value, std::back_inserter(ret), true);
-            return ret;
-        }
-    };
-    template <>
-    struct DefaultFallbackToStringTraits<std::string_view>
-    {
-        std::string operator()(const std::string_view &value) const
-        {
-            std::string ret;
-            ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-            text::EscapeString(value, std::back_inserter(ret), true);
-            return ret;
-        }
-    };
-    template <> struct DefaultFallbackToStringTraits<char *> : DefaultFallbackToStringTraits<std::string_view> {};
-    template <> struct DefaultFallbackToStringTraits<const char *> : DefaultFallbackToStringTraits<std::string_view> {};
-    // Somehow this catches const arrays too.
-    template <std::size_t N> struct DefaultFallbackToStringTraits<char[N]> : DefaultFallbackToStringTraits<std::string_view> {};
-
-    // Don't specialize this, specialize `ToStringTraits` defined below.
-    // `ToStringTraits` inherits from this by default.
-    template <typename T, typename = void>
-    struct DefaultToStringTraits
-    {
-        std::string operator()(const T &value) const
-        {
-            // There seems to be no way to use `std::
-            if constexpr (requires(CFG_TA_FMT_NAMESPACE::formatter<T> f){f.set_debug_format();})
-                return CFG_TA_FMT_NAMESPACE::format("{:?}", value);
-            else
-                return DefaultFallbackToStringTraits<T>{}(value);
-        }
-    };
-
-    // `ToStringTraits` serializes this as is, without escaping or quotes.
-    struct ExactString
-    {
-        std::string string;
-    };
-    template <>
-    struct DefaultToStringTraits<ExactString>
-    {
-        std::string operator()(ExactString value) const
-        {
-            return std::move(value.string);
-        }
-    };
-
-    // Type names.
-    template <typename T>
-    requires std::same_as<T, std::type_info> || std::same_as<T, std::type_index>
-    struct DefaultToStringTraits<T>
-    {
-        std::string operator()(const T &value) const
-        {
-            return text::Demangler{}(value.name());
-        }
-    };
-
-    // You can specialize this for your types.
-    template <typename T, typename = void>
-    struct ToStringTraits : DefaultToStringTraits<T> {};
-
-    // Converts `value` to a string using `ToStringTraits`.
-    template <typename T>
-    [[nodiscard]] std::string ToString(T &&value)
-    {
-        return ToStringTraits<std::remove_cvref_t<T>>{}(value);
-    }
-
-
     // The base for modules that print stuff.
     struct BasicPrintingModule : virtual BasicModule
     {
@@ -2290,7 +2490,7 @@ namespace ta_test
         BasicTrace &AddArgs(const P &... args)
         {
             if (accept_args)
-                (void(func_args.push_back((ToString)(args))), ...);
+                (void(func_args.push_back(string_conv::ToString(args))), ...);
             return *this;
         }
 
@@ -2305,7 +2505,7 @@ namespace ta_test
         BasicTrace &AddTemplateValues(const P &... args)
         {
             if (accept_args)
-                (void(template_args.push_back((ToString)(args))), ...);
+                (void(template_args.push_back(string_conv::ToString(args))), ...);
             return *this;
         }
     };
@@ -2372,7 +2572,7 @@ namespace ta_test
             {
                 (void)counter; // Unused, but passing it helps with parsing.
                 EnsureAssertionIsRunning();
-                target->value = ToStringTraits<std::remove_cvref_t<T>>{}(arg);
+                target->value = string_conv::ToString(arg);
                 target->state = BasicModule::BasicAssertionExpr::StoredArg::State::done;
                 return std::forward<T>(arg);
             }
@@ -2821,6 +3021,113 @@ namespace ta_test
                 : BasicScopedLogGuard(&entry), func(std::move(func)), entry(GenerateLogId(), this->func)
             {}
         };
+
+        // --- GENERATORS ---
+
+        // Runs the module callbacks before or after generation.
+        CFG_TA_API void RunOnGenerateCallbacks(bool post, const BasicModule::BasicGenerator &gen);
+
+        template <ConstString Name, ConstString LocFile, int LocLine, int LocCounter, typename ReturnType, typename F>
+        struct SpecificGenerator : BasicModule::BasicTypedGenerator<ReturnType>
+        {
+            F func;
+
+            SpecificGenerator(F &&func) : func(std::move(func)) {}
+
+            static constexpr BasicModule::SourceLocWithCounter location = {
+                BasicModule::SourceLoc{
+                    .file = LocFile.view(),
+                    .line = LocLine,
+                },
+                LocCounter,
+            };
+
+            const BasicModule::SourceLocWithCounter &GetLocation() const override
+            {
+                return location;
+            }
+
+            std::string_view GetName() const override
+            {
+                return Name.view();
+            }
+
+            void Generate() override
+            {
+                RunOnGenerateCallbacks(false, *this);
+
+                // I hope this makes sense.
+                if constexpr (std::is_move_assignable_v<ReturnType>)
+                    this->storage = func(this->repeat);
+                else
+                    this->storage.emplace(func(this->repeat));
+
+                this->num_generated_values++;
+
+                RunOnGenerateCallbacks(true, *this);
+            }
+        };
+
+        template <
+            // Manually specified:
+            ConstString Name, ConstString LocFile, int LocLine, int LocCounter,
+            // Deduced:
+            typename F,
+            // Computed:
+            typename InnerLambdaType = decltype(std::declval<F &&>()()),
+            typename ReturnType = decltype(std::declval<InnerLambdaType &>()(std::declval<bool &>()))
+        >
+        [[nodiscard]] const ReturnType &Generate(F &&func)
+        {
+            auto &thread_state = ThreadState();
+            if (!thread_state.current_test)
+                HardError("Can't use `TA_GENERATE(...)` when no test is running.", HardErrorKind::user);
+
+            using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, ReturnType, InnerLambdaType>;
+
+            GeneratorType *this_generator = nullptr;
+
+            if (thread_state.current_test->generator_index < thread_state.current_test->generator_stack.size())
+            {
+                // Revisiting a generator.
+                auto *this_untyped_generator = thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get();
+
+                this_generator = const_cast<GeneratorType *>(dynamic_cast<const GeneratorType *>(this_untyped_generator));
+
+                // Make sure this is the right generator.
+                // Since the location is a part of the type, this nicely checks for the location equality.
+                if (!this_generator)
+                {
+                    // Theoretically we can have two different generators at the same line, but I think this message is ok even in that case.
+                    HardError(CFG_TA_FMT_NAMESPACE::format(
+                        "Invalid non-deterministic use of generators. "
+                        "Was expecting to reach the generator at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`, "
+                        "but instead reached a different one at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`.",
+                        this_untyped_generator->GetLocation().file, this_untyped_generator->GetLocation().line,
+                        LocFile.view(), LocLine
+                    ), HardErrorKind::user);
+                }
+            }
+            else
+            {
+                // Visiting a generator for the first time.
+
+                if (thread_state.current_test->generator_index != thread_state.current_test->generator_stack.size())
+                    HardError("Something is wrong with the generator index."); // This should never happen.
+
+                auto new_generator = std::make_unique<GeneratorType>(std::forward<F>(func)());
+                this_generator = new_generator.get();
+                thread_state.current_test->generator_stack.push_back(std::move(new_generator));
+            }
+
+            thread_state.current_test->generator_index++;
+
+            // Advance the generator if it's the last one in the stack.
+            if (thread_state.current_test->generator_index == thread_state.current_test->generator_stack.size())
+                this_generator->Generate();
+
+            return this_generator->GetValue();
+        }
     }
 
 
@@ -2842,12 +3149,12 @@ namespace ta_test
     using ExceptionElemVar = std::variant<ExceptionElem, int>;
 
     template <>
-    struct DefaultToStringTraits<ExceptionElem>
+    struct string_conv::DefaultToStringTraits<ExceptionElem>
     {
         CFG_TA_API std::string operator()(const ExceptionElem &value) const;
     };
     template <>
-    struct DefaultToStringTraits<ExceptionElemVar>
+    struct string_conv::DefaultToStringTraits<ExceptionElemVar>
     {
         CFG_TA_API std::string operator()(const ExceptionElemVar &value) const;
     };
@@ -2968,7 +3275,7 @@ namespace ta_test
                     [[maybe_unused]] auto context = MakeContextGuard();
                     ForElem(elem, [&](const SingleException &elem)
                     {
-                        TA_CHECK( $(elem.type) == $(typeid(T)) )("Expected the exception type to be exactly `{}`, but got `{}`.", text::TypeName<T>(), (ToString)(elem.type));
+                        TA_CHECK( $(elem.type) == $(typeid(T)) )("Expected the exception type to be exactly `{}`, but got `{}`.", text::TypeName<T>(), string_conv::ToString(elem.type));
                         return false;
                     });
                     return static_cast<Ref>(*this);

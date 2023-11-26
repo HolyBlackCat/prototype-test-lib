@@ -3,18 +3,15 @@
 
 #include "testlib.h"
 
-// int sum(int a, int b, int c){return a + b + c;}
-bool sum(const auto &...){return false;}
+#error 1. Print generation progress in ProgressModule
+#error 2. Handle interruptions (failed test or IntteruptException = prune remaining generators, otherwise complain about non-determinism)
 
-// Turn `a` and `b` into `integral_constant`s with the same __COUNTER__ value, compare them in the macro to check if we're nested or not? Could work.
-#define TA_VARIANT(...) (int a = 1) if (int b = 1) {} else
-
+#if 0
 bool fof()
 {
     TA_CONTEXT("Hello {}", []{std::cout << "A\n"; return 42;}());
     TA_LOG("Hello!");
     TA_CONTEXT_LAZY("Hello {}", []{std::cout << "B\n"; return 43;}());
-
     try{
         TA_CHECK($(1) == $(2));
     }
@@ -25,22 +22,84 @@ bool fof()
 
     // auto x = TA_MUST_THROW(throw std::runtime_error("123"))("z={}",43);
     // x.CheckMessage("123").CheckMessage("1234");
+
+    TA_STOP;
+
+    TA_GENERATE(i, std::views::iota(10,20))
+    TA_GENERATE(i, {1,2,3})
+
+    TA_GENERATE_FUNC(i, [i = 0](bool &repeat) mutable {repeat = i < 3; return i++})
+    // Make sure this rejects ranged loops (you have parse for variable name anyway)
+
+
+    TA_FOR_TYPES(T, int, float, double) {...};
+    TA_FOR_TYPE_LIST(T, type_list<int, float, double>) {...};
+    TA_FOR_VALUES(T, 1, 1.f, 1.) {...};
+    TA_FOR_VALUE_LIST(T, value_list<1, 1.f, 1.>) {...};
+
+    if TA_VARIANT(foo) // expands more or less:  if (TA_GENERATE(foo, {true, false}))
+    // VARIANT also has a customized logging:
+    //     if we get a `true` variant, and
+    //     the preceding variant was just switched to false,
+    //     and we haven't seen this true variant on the previous run
+    //     // not needed: and if we're currently out of scope of the preceding varaint IF
+    //          // this would require expanding to like `(var; cond)`,
+    //          // and would prevent usage outside of conditions - should be do it regardless? I guess not?
+    // then the preceding variant is marked as non-printing as long as it remains false (aka the rest of its lifetime)
+    //     because it seems to be the sibling of the current variant
+
+    // ^ Now do we handle command-line overrides of variants and this sibling system?
+
+    // We will have to print an "otherwise" branch when running it (decide how to name it?)
+
+
+
+    for (int i : {1,2,3})
+    {
+        // T i = 1;
+        // T i = 2;
+        // T i = 3;
+    }
+
+
+    for (ta_test::RepeatTestFor<int> i = 1; i <= 3; i++)
+    {
+        // T i = 1;
+        // i = 2;
+        // i = 3;
+        //
+    }
+
     return true;
 }
+#endif
+
 TA_TEST(foo/bar)
 {
-    TA_CHECK($(std::string("1\n2")).size() > 0 && $(fof()))("y = {}", 43);
+    static int i = 0;
+    std::cout << "### " << i++ << '\n';
+
+    std::cout << TA_GENERATE_FUNC(blah, [i = 10](bool &repeat) mutable {if (i == 11) repeat = false; return i++;}) << '\n';
+
+    std::cout << TA_GENERATE_FUNC(blah, [i = 20](bool &repeat) mutable {if (i == 21) repeat = false; return i++;}) << '\n';
 }
+
+TA_TEST(foo/baz) {}
 
 int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
 
-// Review styles:
-//     string literals are ugly bright cyan
+// TA_GENERATE (non-_FUNC)
+// Overriding generator values?
+
+// TA_VARIANT
 
 // Throw away excessive use of `size_t`, switch to `int` or `ptrdiff_t`?
+
+// Quiet flag: --no-progress
+// Failing a test should print the values of generators? Or not?
 
 // Test without exceptions.
 // Test without RTTI. What about exception type names?
@@ -66,6 +125,7 @@ int main(int argc, char **argv)
 //     Do we force-open the console on Windows if there's none? That's when `GetFileType(GetStdHandle(STD_OUTPUT_HANDLE))` returns 0.
 //     Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
 //     Length cap on serialized values, configurable.
+//     Signal and SEH handling?
 
 // Maybe not?
 //     Soft TA_MUST_THROW?
@@ -88,7 +148,9 @@ int main(int argc, char **argv)
 //     `$(...)` could be useful to provide context, but what if the function returns void or non-printable type?
 
 // Selling points:
+//     "DESIGNING A SUPERIOR UNIT TEST FRAMEWORK"
 //     * Expression unwrapping
+//     * Sections that are not broken (can do a cross product)
 //     * First-class nested exceptions support out of the box
 //     * Lazy message evaluation
 //     * No comma weirdness
@@ -133,6 +195,12 @@ TA_CHECK:
     usable without (...) in fold expressions
     Gracefully fail the test if the lazy message throws?
     Error if outlives the test. Error if destroyed out of order?
+    ta_test::ExactString - control characters should be printed as unicode replacements
+
+--- TA_FAIL
+    With and without the message.
+
+--- TA_STOP
 
 --- TA_MUST_THROW:
     local variable capture actually works, and the values are correct
@@ -163,6 +231,22 @@ TA_CHECK:
     What happens if the lazy version throws? We should probably gracefully stop the test.
     Usable in fold expressions without parentheses.
     Error if it outlives the test.
+
+--- TA_GENERATE_FUNC
+    What if the generator throws? Advance the current generator, destroy the future ones?
+    Hard error when called outside of a test.
+    The return type, as documented.
+    The lambda shouldn't be evaluated at all (capturing might have side effects) when visited repeatedly.
+    The lambda should be destroyed at the end of the test, not earlier.
+    Catch non-deterministic use:
+        Reaching wrong TA_GENERATE
+        Reaching end of test without reaching a TA_GENERATE
+            But not when InterruptTestException was thrown
+            And not when the test fails
+            ... in those case we should remove the remaining generators, and advance the last one
+    Type requirements:
+        Absolutely no requirements (non-default-constructable, non-movable)
+
 
 --- All the macros nicely no-op when tests are disabled
     TA_CHECK validates the arguments (crash on call?)
@@ -237,6 +321,8 @@ Good test names:
     A run with all features, and --no-unicode, automatically test that no unicode crap is printed.
 
 --- Try to start the tests again while they are already running. Should crash with an error.
+
+Absolutely no `{}:{}` in the code, all error locations must use
 
 ---------------
 

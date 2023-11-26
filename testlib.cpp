@@ -51,6 +51,26 @@ void ta_test::HardError(std::string_view message, HardErrorKind kind)
     std::terminate();
 }
 
+std::string ta_test::string_conv::DefaultFallbackToStringTraits<char>::operator()(char value) const
+{
+    char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
+    text::EscapeString({&value, 1}, ret, false);
+    return ret;
+}
+
+std::string ta_test::string_conv::DefaultFallbackToStringTraits<std::string_view>::operator()(std::string_view value) const
+{
+    std::string ret;
+    ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
+    text::EscapeString(value, std::back_inserter(ret), true);
+    return ret;
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<std::type_index>::operator()(std::type_index value) const
+{
+    return text::Demangler{}(value.name());
+}
+
 ta_test::context::Context ta_test::context::CurrentContext()
 {
     auto &thread_state = detail::ThreadState();
@@ -858,6 +878,60 @@ void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<
     func({});
 }
 
+std::string ta_test::BasicModule::BasicGenerator::GetTypeName() const
+{
+    // This can return one of the two possible forms.
+    // For sufficiently simple types, we just return `[const] [volatile] Type [&[&]]`.
+    // But if the type looks complex, we instead replace the type with a placeholder ("T"),
+    // and follow up by `; T = ...` adding the full type name.
+
+    TypeFlags flags = GetTypeFlags();
+
+    std::string ret;
+
+    if (bool(flags & TypeFlags::const_))
+    {
+        if (!ret.empty()) ret += ' ';
+        ret += "const";
+    }
+    if (bool(flags & TypeFlags::volatile_))
+    {
+        if (!ret.empty()) ret += ' ';
+        ret += "volatile";
+    }
+
+    text::Demangler demangler;
+    std::string_view type_name = demangler(GetType().name());
+    bool use_short_form =
+        // Either this is one long template...
+        type_name.ends_with('>') ||
+        // Or one long type name, possibly qualified.
+        std::all_of(type_name.begin(), type_name.end(), [](char ch)
+        {
+            return text::chars::IsIdentifierChar(ch) || ch == ':';
+        });
+    std::string_view long_form_placeholder = "T";
+
+    if (!ret.empty()) ret += ' ';
+    ret += use_short_form ? type_name : long_form_placeholder;
+
+    if (bool(flags & TypeFlags::any_ref))
+    {
+        if (!ret.empty()) ret += ' ';
+        ret += bool(flags & TypeFlags::lvalue_ref) ? "&" : "&&";
+    }
+
+    if (!use_short_form)
+    {
+        ret += "; ";
+        ret += long_form_placeholder;
+        ret += " = ";
+        ret += type_name;
+    }
+
+    return ret;
+}
+
 void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
 {
     const BasicModule::BasicAssertionInfo *cur = ThreadState().current_assertion;
@@ -994,7 +1068,14 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
             BasicModule::SourceLoc old_loc = state.tests[it->second]->Location();
             BasicModule::SourceLoc new_loc = singleton->Location();
             if (new_loc != old_loc)
-                HardError(CFG_TA_FMT_NAMESPACE::format("Conflicting definitions for test `{}`. One at `{}:{}`, another at `{}:{}`.", name, old_loc.file, old_loc.line, new_loc.file, new_loc.line), HardErrorKind::user);
+            {
+                HardError(CFG_TA_FMT_NAMESPACE::format(
+                    "Conflicting definitions for test `{}`. "
+                    "One at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`, "
+                    "another at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`.",
+                    name, old_loc.file, old_loc.line, new_loc.file, new_loc.line
+                ), HardErrorKind::user);
+            }
             return; // Already registered.
         }
         else
@@ -1054,7 +1135,19 @@ ta_test::detail::BasicScopedLogGuard::~BasicScopedLogGuard()
     thread_state.scoped_log.pop_back();
 }
 
-std::string ta_test::DefaultToStringTraits<ta_test::ExceptionElem>::operator()(const ExceptionElem &value) const
+void ta_test::detail::RunOnGenerateCallbacks(bool post, const BasicModule::BasicGenerator &gen)
+{
+    auto &thread_state = ThreadState();
+    if (!thread_state.current_test)
+        HardError("No test is currently running, can't use a generator.");
+
+    if (post)
+        thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(gen);
+    else
+        thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreGenerate>(gen);
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<ta_test::ExceptionElem>::operator()(const ExceptionElem &value) const
 {
     switch (value)
     {
@@ -1068,7 +1161,7 @@ std::string ta_test::DefaultToStringTraits<ta_test::ExceptionElem>::operator()(c
     HardError("Invalid `ExceptionElem` enum.", HardErrorKind::user);
 }
 
-std::string ta_test::DefaultToStringTraits<ta_test::ExceptionElemVar>::operator()(const ExceptionElemVar &value) const
+std::string ta_test::string_conv::DefaultToStringTraits<ta_test::ExceptionElemVar>::operator()(const ExceptionElemVar &value) const
 {
     if (value.valueless_by_exception())
         HardError("Invalid `ExceptionElemVar` variant.");
@@ -1276,7 +1369,9 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
 
 int ta_test::Runner::Run()
 {
-    if (detail::ThreadState().current_test)
+    auto& thread_state = detail::ThreadState();
+
+    if (thread_state.current_test)
         HardError("This thread is already running a test.", HardErrorKind::user);
 
     ModuleLists module_lists(modules);
@@ -1304,56 +1399,79 @@ int ta_test::Runner::Run()
     results.num_tests_with_skipped = state.tests.size();
     module_lists.Call<&BasicModule::OnPreRunTests>(results);
 
+    // For every non-skipped test...
     for (std::size_t test_index : ordered_tests)
     {
         const detail::BasicTest *test = state.tests[test_index];
 
-        struct StateGuard
+        // This stores the generator stack between iterations.
+        std::vector<std::unique_ptr<const BasicModule::BasicGenerator>> next_generator_stack;
+
+        // Repeat to exhaust all generators...
+        do
         {
-            BasicModule::RunSingleTestResults state;
-            StateGuard() {detail::ThreadState().current_test = &state;}
-            ~StateGuard() {detail::ThreadState().current_test = nullptr;}
-        };
-        StateGuard guard;
-        guard.state.all_tests = &results;
-        guard.state.test = test;
+            struct StateGuard
+            {
+                BasicModule::RunSingleTestResults state;
+                StateGuard() {detail::ThreadState().current_test = &state;}
+                StateGuard(const StateGuard &) = delete;
+                StateGuard &operator=(const StateGuard &) = delete;
+                ~StateGuard() {detail::ThreadState().current_test = nullptr;}
+            };
+            StateGuard guard;
+            guard.state.all_tests = &results;
+            guard.state.test = test;
+            guard.state.generator_stack = std::move(next_generator_stack);
+            guard.state.is_first_generator_repetition = guard.state.generator_stack.empty();
 
-        module_lists.Call<&BasicModule::OnPreRunSingleTest>(guard.state);
+            module_lists.Call<&BasicModule::OnPreRunSingleTest>(guard.state);
 
-        bool should_catch = true;
-        module_lists.Call<&BasicModule::OnPreTryCatch>(should_catch);
+            bool should_catch = true;
+            module_lists.Call<&BasicModule::OnPreTryCatch>(should_catch);
 
-        auto lambda = [&]
-        {
-            test->Run();
-        };
+            auto lambda = [&]
+            {
+                test->Run();
+            };
 
-        if (should_catch)
-        {
-            try
+            if (should_catch)
+            {
+                try
+                {
+                    lambda();
+                }
+                catch (InterruptTestException) {}
+                catch (...)
+                {
+                    thread_state.FailCurrentTest();
+                    auto e = std::current_exception();
+                    module_lists.Call<&BasicModule::OnUncaughtException>(guard.state, nullptr, e);
+                }
+            }
+            else
             {
                 lambda();
             }
-            catch (InterruptTestException) {}
-            catch (...)
+
+            if (guard.state.failed)
+                results.failed_tests.push_back(test);
+
+            module_lists.Call<&BasicModule::OnPostRunSingleTest>(guard.state);
+
+            if (guard.state.should_break)
+                test->Breakpoint();
+
+            // Prune finished generators.
+            // This probably should stay before `OnPostRunSingleTest`, to allow it to detect the last run.
+            [&]() noexcept
             {
-                detail::ThreadState().FailCurrentTest();
-                auto e = std::current_exception();
-                module_lists.Call<&BasicModule::OnUncaughtException>(guard.state, nullptr, e);
-            }
+                while (!guard.state.generator_stack.empty() && guard.state.generator_stack.back()->IsLastValue())
+                    guard.state.generator_stack.pop_back();
+            }();
+
+            next_generator_stack = std::move(guard.state.generator_stack);
         }
-        else
-        {
-            lambda();
-        }
-
-        module_lists.Call<&BasicModule::OnPostRunSingleTest>(guard.state);
-
-        if (guard.state.failed)
-            results.failed_tests.push_back(test);
-
-        if (guard.state.should_break)
-            test->Breakpoint();
+        while (!next_generator_stack.empty());
     }
 
     module_lists.Call<&BasicModule::OnPostRunTests>(results);
@@ -1381,7 +1499,7 @@ ta_test::modules::BasicExceptionContentsPrinter::BasicExceptionContentsPrinter()
                     self.chars_type_suffix.c_str(),
                     st_message.data(),
                     self.chars_indent_message.c_str(),
-                    (ToString)(elem.message).c_str()
+                    string_conv::ToString(elem.message).c_str()
                 );
             }
             else
