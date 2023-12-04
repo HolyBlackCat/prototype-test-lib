@@ -41,11 +41,15 @@
 // The import/export macro we use on all non-inline functions.
 // Probably shouldn't define this directly, prefer setting `CFG_TA_SHARED`.
 #ifndef CFG_TA_API
-#if defined(_WIN32) && CFG_TA_SHARED
-#define CFG_TA_API __declspec(dllimport)
-#else
-#define CFG_TA_API
-#endif
+#  ifndef CFG_TA_SHARED
+#    define CFG_TA_API
+#  else
+#    ifdef _WIN32
+#      define CFG_TA_API __declspec(dllimport)
+#    else
+#      define CFG_TA_API __attribute__((__visibility__("default")))
+#    endif
+#  endif
 #endif
 
 // C++ standard release date.
@@ -429,11 +433,6 @@ namespace ta_test
         {
             CFG_TA_API std::string operator()(std::string_view value) const;
         };
-        template <> struct DefaultFallbackToStringTraits<std::string > : DefaultFallbackToStringTraits<std::string_view> {};
-        template <> struct DefaultFallbackToStringTraits<      char *> : DefaultFallbackToStringTraits<std::string_view> {};
-        template <> struct DefaultFallbackToStringTraits<const char *> : DefaultFallbackToStringTraits<std::string_view> {};
-        // Somehow this catches const arrays too.
-        template <std::size_t N> struct DefaultFallbackToStringTraits<char[N]> : DefaultFallbackToStringTraits<std::string_view> {};
 
         // Don't specialize this, specialize `ToStringTraits` defined below.
         // `ToStringTraits` inherits from this by default.
@@ -450,6 +449,14 @@ namespace ta_test
                     return DefaultFallbackToStringTraits<T>{}(value);
             }
         };
+        // libstdc++ 13 has a broken non-SFINAE-friendly `formatter<const char *>::set_debug_string()`, which causes issues.
+        // `std::string_view` formatter doesn't have this issue, so we just use it here instead.
+        // Bug: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=112832
+        template <> struct DefaultToStringTraits<std::string > : DefaultToStringTraits<std::string_view> {};
+        template <> struct DefaultToStringTraits<      char *> : DefaultToStringTraits<std::string_view> {};
+        template <> struct DefaultToStringTraits<const char *> : DefaultToStringTraits<std::string_view> {};
+        // Somehow this catches const arrays too.
+        template <std::size_t N> struct DefaultFallbackToStringTraits<char[N]> : DefaultFallbackToStringTraits<std::string_view> {};
 
         // `ToStringTraits` serializes this as is, without escaping or quotes.
         struct ExactString
@@ -997,10 +1004,8 @@ namespace ta_test
             // This is set to `generator_stack.empty()` when entering the test.
             bool is_first_generator_repetition = false;
         };
-        struct RunSingleTestResults : RunSingleTestInfo
+        struct RunSingleTestProgress : RunSingleTestInfo
         {
-            bool failed = false;
-
             // This is guaranteed to not contain any lazy log statements.
             std::vector<context::LogEntry> unscoped_log;
 
@@ -1012,22 +1017,38 @@ namespace ta_test
             // You can set this to true to break after the test.
             mutable bool should_break = false;
         };
+        struct RunSingleTestResults : RunSingleTestProgress
+        {
+            // Whether the current test has failed.
+            // When generators are involved, this refers only to the current repetition.
+            bool failed = false;
+
+            // True if we're about to leave the test for the last time.
+            // This should be equivalent to `generator_stack.empty()`. This is set right before leaving the test.
+            bool is_last_generator_repetition = false;
+        };
         // This is called before every single test runs.
         virtual void OnPreRunSingleTest(const RunSingleTestInfo &data) {(void)data;}
         // This is called after every single test runs.
         virtual void OnPostRunSingleTest(const RunSingleTestResults &data) {(void)data;}
 
+        struct GeneratorCallInfo
+        {
+            const RunSingleTestProgress *test = nullptr;
+            const BasicGenerator *generator = nullptr;
+        };
+
         // This is called before every `TA_GENERATE(...)`.
-        virtual void OnPreGenerate(const BasicGenerator &data) {(void)data;}
+        virtual void OnPreGenerate(const GeneratorCallInfo &data) {(void)data;}
         // This is called after every `TA_GENERATE(...)`.
-        virtual void OnPostGenerate(const BasicGenerator &data) {(void)data;}
+        virtual void OnPostGenerate(const GeneratorCallInfo &data) {(void)data;}
 
         // --- FAILING TESTS ---
 
         // This is called when a test fails for any reason, followed by a more specific callback (see below).
         // Note that the test can continue to run after this, if this is a delayed (soft) failure.
         // Note that this is called at most once per test, even if after a soft failure something else fails.
-        virtual void OnPreFailTest(const RunSingleTestResults &data) {(void)data;}
+        virtual void OnPreFailTest(const RunSingleTestProgress &data) {(void)data;}
 
         struct BasicAssertionExpr
         {
@@ -3024,9 +3045,6 @@ namespace ta_test
 
         // --- GENERATORS ---
 
-        // Runs the module callbacks before or after generation.
-        CFG_TA_API void RunOnGenerateCallbacks(bool post, const BasicModule::BasicGenerator &gen);
-
         template <ConstString Name, ConstString LocFile, int LocLine, int LocCounter, typename ReturnType, typename F>
         struct SpecificGenerator : BasicModule::BasicTypedGenerator<ReturnType>
         {
@@ -3054,8 +3072,6 @@ namespace ta_test
 
             void Generate() override
             {
-                RunOnGenerateCallbacks(false, *this);
-
                 // I hope this makes sense.
                 if constexpr (std::is_move_assignable_v<ReturnType>)
                     this->storage = func(this->repeat);
@@ -3063,10 +3079,15 @@ namespace ta_test
                     this->storage.emplace(func(this->repeat));
 
                 this->num_generated_values++;
-
-                RunOnGenerateCallbacks(true, *this);
             }
         };
+
+        // Using a concept instead of a `static_assert`, because I can't find where to put the `static_assert` to make Clangd report on it.
+        template <ConstString Name>
+        concept IsValidGeneratorName =
+            !Name.view().empty() && // Not empty.
+            !text::chars::IsDigit(Name.view().front()) && // Doesn't start with a digit.
+            std::all_of(Name.view().begin(), Name.view().end(), text::chars::IsIdentifierCharStrict); // Only valid characters.
 
         template <
             // Manually specified:
@@ -3074,16 +3095,17 @@ namespace ta_test
             // Deduced:
             typename F,
             // Computed:
-            typename InnerLambdaType = decltype(std::declval<F &&>()()),
-            typename ReturnType = decltype(std::declval<InnerLambdaType &>()(std::declval<bool &>()))
+            typename UserFuncType = decltype(std::declval<F &&>()()),
+            typename ReturnType = decltype(std::declval<UserFuncType &>()(std::declval<bool &>()))
         >
+        requires IsValidGeneratorName<Name>
         [[nodiscard]] const ReturnType &Generate(F &&func)
         {
             auto &thread_state = ThreadState();
             if (!thread_state.current_test)
                 HardError("Can't use `TA_GENERATE(...)` when no test is running.", HardErrorKind::user);
 
-            using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, ReturnType, InnerLambdaType>;
+            using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, ReturnType, UserFuncType>;
 
             GeneratorType *this_generator = nullptr;
 
@@ -3120,11 +3142,24 @@ namespace ta_test
                 thread_state.current_test->generator_stack.push_back(std::move(new_generator));
             }
 
-            thread_state.current_test->generator_index++;
-
             // Advance the generator if it's the last one in the stack.
-            if (thread_state.current_test->generator_index == thread_state.current_test->generator_stack.size())
+            if (thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size())
+            {
+                // Pre callback.
+                BasicModule::GeneratorCallInfo callback_data{
+                    .test = thread_state.current_test,
+                    .generator = this_generator,
+                };
+                thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreGenerate>(callback_data);
+
+                // Actually generate.
                 this_generator->Generate();
+
+                // Post callback.
+                thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
+            }
+
+            thread_state.current_test->generator_index++;
 
             return this_generator->GetValue();
         }
@@ -3754,12 +3789,34 @@ namespace ta_test
         {
             // This goes right before each test/group name.
             std::string chars_test_prefix;
-            // This is used when reentering a group after a failed test.
-            std::string chars_test_prefix_continuing_group;
+            // This is used when reentering a group/test after a failed test.
+            std::string chars_test_prefix_continuing;
             // The is used for indenting test names/groups.
             std::string chars_indentation;
+            // This is printed once before the indentation.
+            std::string chars_pre_indentation = " ";
             // This is printed after the test counter and before the test names/groups (and before their indentation guides).
             std::string chars_test_counter_separator;
+            // The prefix before the failed generator repetition counter, ir any.
+            std::string chars_failed_repetition_count_prefix = " [";
+            // The suffix after the failed generator repetition counter, ir any.
+            std::string chars_failed_repetition_count_suffix = "]";
+            // This is printed after the generator repetition counter, if any.
+            std::string chars_repetition_counter_separator;
+            // Same, but is used when we need to shift the separator one character to the right
+            std::string chars_repetition_counter_separator_diagonal;
+            // The prefix for the generated value index, which is per generator.
+            std::string chars_generator_index_prefix = "[";
+            // The suffix for the generated value index, which is per generator.
+            std::string chars_generator_index_suffix = "]";
+            // Separates the generated value (if any) from the generator name and the prefix.
+            std::string chars_generator_value_separator = " = ";
+            // The length limits on the printed generated values, before and after the ellipsis.
+            // If the value length is less than the sum of those two plus the length of the ellipsis, it's printed completely.
+            std::size_t max_generator_value_prefix_length = 120;
+            std::size_t max_generator_value_suffix_length = 40;
+            // The ellipsis in the long generated values.
+            std::string chars_generator_value_ellipsis = "<...>";
             // This is printed when a test fails, right before the test name.
             std::string chars_test_failed = "TEST FAILED: ";
             // This is printed before the details of a failed test. It's repeated to fill the required width.
@@ -3772,6 +3829,7 @@ namespace ta_test
             std::string chars_continuing_tests = "Continuing...";
             // This is printed at the end, before the list of failed tests.
             std::string chars_summary_tests_failed = "FOLLOWING TESTS FAILED:";
+            // A vertical bar after the test name in the summary and before the source location.
             std::string chars_summary_path_separator;
 
             // Width for `chars_test_failed_separator`.
@@ -3781,7 +3839,7 @@ namespace ta_test
             // Optional message at startup when some tests are skipped.
             TextStyle style_skipped_tests = {.color = TextColor::light_blue, .bold = true};
             // The message when a test starts.
-            TextStyle style_name = {.color = TextColor::light_white};
+            TextStyle style_name = {.color = TextColor::light_white, .bold = true};
             // The message when a test group starts.
             TextStyle style_group_name = {.color = TextColor::dark_white};
             // This is used to print a group name when reentering it after a failed test.
@@ -3789,15 +3847,39 @@ namespace ta_test
             // The indentation guides for nested test starts.
             TextStyle style_indentation_guide = {.color = TextColorGrayscale24(8)};
             // The test index.
-            TextStyle style_index = {.color = TextColor::light_white};
+            TextStyle style_index = {.color = TextColor::light_white, .bold = true};
+            // The test index, when printed repeatedly, such as when repeating a test because of a generator.
+            TextStyle style_index_repeated = {.color = TextColor::light_black, .bold = true};
             // The total test count printed after each test index.
             TextStyle style_total_count = {.color = TextColor::light_black};
             // The failed test counter.
-            TextStyle style_failed_count = {.color = TextColor::light_red};
+            TextStyle style_failed_count = {.color = TextColor::light_red, .bold = true};
             // Some decorations around the failed test counter.
-            TextStyle style_failed_count_decorations = {.color = TextColor::dark_red};
-            // The line that separates the test counter from the test names/groups.
+            TextStyle style_failed_count_decorations = {.color = TextColor::dark_magenta};
+            // The line that separates the test counter from the test names/groups (or from the repetition counter, if any).
             TextStyle style_gutter_border = {.color = TextColorGrayscale24(10)};
+            // The generator repetition counter of the specific test.
+            TextStyle style_repetition_total_count = {.color = TextColor::dark_cyan};
+            // The number of failed generator repetitions of the specific test.
+            TextStyle style_repetition_failed_count = {.color = TextColor::light_red, .bold = true};
+            // The brackets around that counter.
+            TextStyle style_repetition_failed_count_decorations = {.color = TextColor::dark_magenta};
+            // This line separate the repetition counters, if any, from the test names/groups.
+            TextStyle style_repetition_border = {.color = TextColorGrayscale24(10)};
+            // The prefix before the name of the generated variable.
+            TextStyle style_generator_prefix = {.color = TextColor::light_white, .bold = true};
+            // The name of the generated variable.
+            TextStyle style_generator_name = {.color = TextColor::light_white, .bold = true};
+            // The index of the generated variable.
+            TextStyle style_generator_index = {.color = TextColor::dark_white};
+            // The brackets around this index.
+            TextStyle style_generator_index_brackets = {.color = TextColor::dark_white};
+            // Separates the generated value from the generator name and index.
+            TextStyle style_generator_value_separator = {.color = TextColor::dark_white};
+            // The generated value, if printable.
+            TextStyle style_generator_value = {.color = TextColor::light_blue, .bold = true};
+            // The ellipsis in the generated value, if it's too long.
+            TextStyle style_generator_value_ellipsis = {.color = TextColor::light_black, .bold = true};
 
             // The name of a failed test, printed when it fails.
             TextStyle style_failed_name = {.color = TextColor::light_red, .bold = true};
@@ -3810,6 +3892,8 @@ namespace ta_test
             // Style for `chars_starting_tests` and `chars_continuing_tests`.
             TextStyle style_starting_or_continuing_tests = {.color = TextColor::light_black, .bold = true};
 
+            // TextStyle style_per_test_summary = {.color = TextColor::light_red, .bold = true};
+
             // The name of a failed test, printed at the end.
             TextStyle style_summary_failed_name = {.color = TextColor::light_red, .bold = true};
             // The name of a group of a failed test, printed at the end.
@@ -3819,16 +3903,52 @@ namespace ta_test
             // The source locations of the failed tests.
             TextStyle style_summary_path = {.color = TextColor::none};
 
-          private:
+          protected:
             struct State
             {
+                // How many characters are needed to represent the total test count.
+                int num_tests_width = 0;
+
                 std::size_t test_counter = 0;
                 std::vector<std::string_view> stack;
                 // A copy of the stack from the previous test, if it has failed.
                 // We use it to repeat the group names again, to show where we're restarting from.
                 std::vector<std::string_view> failed_test_stack;
+
+                struct PerTest
+                {
+                    // The generator repetition counter for the current test.
+                    std::size_t repetition_counter = 0;
+                    // How many repetitions have failed for the current test.
+                    std::size_t failed_repetition_counter = 0;
+
+                    // The last known character width for `repetition_counter` and `failed_repetition_counter` together.
+                    // This is reset to `-1` on a repetition failure, because we don't need to print the diagonal decoration after the bulky failure message.
+                    int last_repetition_counters_width = -1;
+
+                    struct PerRepetition
+                    {
+                        // Whether we already printed the `repetition_counter`.
+                        bool printed_counter = false;
+                    };
+                    PerRepetition per_repetition;
+                };
+                // Per-test state.
+                PerTest per_test;
             };
             State state;
+
+            // Takes a string, and if it's too long, decides which part of it to omit.
+            struct GeneratorValueShortener
+            {
+                bool is_short = true;
+
+                // If the value is long, this is the prefix and the suffix that we should print.
+                std::string_view long_prefix;
+                std::string_view long_suffix;
+
+                CFG_TA_API GeneratorValueShortener(std::string_view value, std::string_view ellipsis, std::size_t max_prefix, std::size_t max_suffix);
+            };
 
             // Splits `name` at every `/`, and calls `func` for every segment.
             // `func` is `(std::string_view segment, bool is_last_segment) -> void`.
@@ -3876,6 +3996,10 @@ namespace ta_test
                 });
             }
 
+            enum class TestCounterStyle {none, normal, repeated};
+            CFG_TA_API void PrintContextLinePrefix(TextStyle &cur_style, const RunTestsResults &all_tests, TestCounterStyle test_counter_style) const;
+            CFG_TA_API void PrintContextLineIndentation(TextStyle &cur_style, std::size_t depth, std::size_t skip_characters) const;
+
           public:
             CFG_TA_API ProgressPrinter();
 
@@ -3884,7 +4008,8 @@ namespace ta_test
             void OnPostRunTests(const RunTestsResults &data) override;
             void OnPreRunSingleTest(const RunSingleTestInfo &data) override;
             void OnPostRunSingleTest(const RunSingleTestResults &data) override;
-            void OnPreFailTest(const RunSingleTestResults &data) override;
+            void OnPostGenerate(const GeneratorCallInfo &data) override;
+            void OnPreFailTest(const RunSingleTestProgress &data) override;
         };
 
         // Prints the results of a run.

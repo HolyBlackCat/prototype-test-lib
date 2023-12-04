@@ -1135,18 +1135,6 @@ ta_test::detail::BasicScopedLogGuard::~BasicScopedLogGuard()
     thread_state.scoped_log.pop_back();
 }
 
-void ta_test::detail::RunOnGenerateCallbacks(bool post, const BasicModule::BasicGenerator &gen)
-{
-    auto &thread_state = ThreadState();
-    if (!thread_state.current_test)
-        HardError("No test is currently running, can't use a generator.");
-
-    if (post)
-        thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(gen);
-    else
-        thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreGenerate>(gen);
-}
-
 std::string ta_test::string_conv::DefaultToStringTraits<ta_test::ExceptionElem>::operator()(const ExceptionElem &value) const
 {
     switch (value)
@@ -1407,6 +1395,9 @@ int ta_test::Runner::Run()
         // This stores the generator stack between iterations.
         std::vector<std::unique_ptr<const BasicModule::BasicGenerator>> next_generator_stack;
 
+        // Whether any of the repetitions have failed.
+        bool any_repetition_failed = false;
+
         // Repeat to exhaust all generators...
         do
         {
@@ -1454,7 +1445,9 @@ int ta_test::Runner::Run()
             }
 
             if (guard.state.failed)
-                results.failed_tests.push_back(test);
+                any_repetition_failed = true;
+
+            guard.state.is_last_generator_repetition = std::all_of(guard.state.generator_stack.begin(), guard.state.generator_stack.end(), [](const auto &g){return g->IsLastValue();});
 
             module_lists.Call<&BasicModule::OnPostRunSingleTest>(guard.state);
 
@@ -1462,7 +1455,7 @@ int ta_test::Runner::Run()
                 test->Breakpoint();
 
             // Prune finished generators.
-            // This probably should stay before `OnPostRunSingleTest`, to allow it to detect the last run.
+            // We do this after `OnPostRunSingleTest` in case the modules want to observe the stack before pruning. Not sure how useful this is.
             [&]() noexcept
             {
                 while (!guard.state.generator_stack.empty() && guard.state.generator_stack.back()->IsLastValue())
@@ -1472,6 +1465,9 @@ int ta_test::Runner::Run()
             next_generator_stack = std::move(guard.state.generator_stack);
         }
         while (!next_generator_stack.empty());
+
+        if (any_repetition_failed)
+            results.failed_tests.push_back(test);
     }
 
     module_lists.Call<&BasicModule::OnPostRunTests>(results);
@@ -1696,6 +1692,149 @@ std::vector<ta_test::flags::BasicFlag *> ta_test::modules::PrintingConfigurator:
 
 // --- modules::ProgressPrinter ---
 
+ta_test::modules::ProgressPrinter::GeneratorValueShortener::GeneratorValueShortener(
+    std::string_view value, std::string_view ellipsis, std::size_t max_prefix, std::size_t max_suffix
+)
+{
+    // The number of unicode characters in `ellipsis`. This is initialized lazily.
+    std::size_t ellipsis_size = 0;
+
+    // Where the prefix ends, if the string is longer than `max_prefix`.
+    const char *prefix_end = nullptr;
+
+    // `prefix_end` plus the size of the `ellipsis`, if the string is longer than that.
+    const char *imaginary_ellipsis_end = nullptr;
+
+    // See if we're at least longer than `max_prefix` plus the size of the ellipsis.
+    std::size_t index = 0;
+    for (const char &ch : value)
+    {
+        if (text::uni::IsFirstByte(ch))
+        {
+            if (index == max_prefix)
+            {
+                ellipsis_size = text::uni::CountFirstBytes(ellipsis);
+                prefix_end = &ch;
+            }
+            else if (index == max_prefix + ellipsis_size)
+            {
+                imaginary_ellipsis_end = &ch;
+                break;
+            }
+
+            index++;
+        }
+    }
+
+    // Maybe we're long, iterate backwards to find the suffix start and whether we even have enough characters for a suffix.
+    if (imaginary_ellipsis_end)
+    {
+        const char *cur = value.data() + value.size();
+
+        index = 0;
+        while (cur != imaginary_ellipsis_end)
+        {
+            cur--;
+            index++;
+            if (index == max_suffix)
+            {
+                is_short = false;
+                long_prefix = {value.data(), prefix_end};
+                long_suffix = {cur, value.data() + value.size()};
+                return;
+            }
+        }
+    }
+
+    is_short = true;
+}
+
+void ta_test::modules::ProgressPrinter::PrintContextLinePrefix(TextStyle &cur_style, const RunTestsResults &all_tests, TestCounterStyle test_counter_style) const
+{
+    // Test index, if necessary.
+    if (test_counter_style != TestCounterStyle::none)
+    {
+        auto st_index = terminal.AnsiDeltaString(cur_style, test_counter_style == TestCounterStyle::repeated ? style_index_repeated : style_index);
+        auto st_total_count = terminal.AnsiDeltaString(cur_style, style_total_count);
+
+        terminal.Print("%s%*zu%s/%zu",
+            st_index.data(),
+            state.num_tests_width, state.test_counter + 1,
+            st_total_count.data(),
+            all_tests.num_tests
+        );
+
+        // Failed test count.
+        if (all_tests.failed_tests.size() > 0)
+        {
+            auto st_deco_l = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
+            auto st_num_failed = terminal.AnsiDeltaString(cur_style, style_failed_count);
+            auto st_deco_r = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
+
+            terminal.Print(" %s[%s%zu%s]",
+                st_deco_l.data(),
+                st_num_failed.data(),
+                all_tests.failed_tests.size(),
+                st_deco_r.data()
+            );
+        }
+    }
+    else
+    {
+        // No test index, just a gap.
+
+        int gap_width = state.num_tests_width * 2 + 1;
+
+        if (all_tests.failed_tests.size() > 0)
+            gap_width += std::snprintf(nullptr, 0, "%zu", all_tests.failed_tests.size()) + 3;
+
+        terminal.Print("%*s", gap_width, "");
+    }
+
+    // The gutter border.
+    terminal.Print("%s%s",
+        terminal.AnsiDeltaString(cur_style, style_gutter_border).data(),
+        chars_test_counter_separator.c_str()
+    );
+}
+
+void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(TextStyle &cur_style, std::size_t depth, std::size_t skip_characters) const
+{
+    // Indentation prefix.
+    terminal.Print("%s%s",
+        terminal.AnsiDeltaString(cur_style, style_indentation_guide).data(),
+        chars_pre_indentation.c_str()
+    );
+
+    std::size_t single_indentation_width = text::uni::CountFirstBytes(chars_indentation);
+
+    if (skip_characters > single_indentation_width * depth)
+        return; // Everything is skipped.
+
+    depth -= (skip_characters + single_indentation_width - 1) / single_indentation_width;
+
+    // Print the first incomplete indentation guide, if partially skipped.
+    if (std::size_t skipped_part = skip_characters % single_indentation_width; skipped_part > 0)
+    {
+        std::size_t i = 0;
+        for (const char &ch : chars_indentation)
+        {
+            if (text::uni::IsFirstByte(ch))
+                i++;
+
+            if (i > skipped_part)
+            {
+                terminal.Print("%s", &ch);
+                break;
+            }
+        }
+    }
+
+    // The indentation.
+    for (std::size_t i = 0; i < depth; i++)
+        terminal.Print("%s", chars_indentation.c_str());
+}
+
 ta_test::modules::ProgressPrinter::ProgressPrinter()
 {
     EnableUnicode(true);
@@ -1706,9 +1845,11 @@ void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
     if (enable)
     {
         chars_test_prefix = "\xE2\x97\x8F "; // BLACK CIRCLE, then a space.
-        chars_test_prefix_continuing_group = "\xE2\x97\x8B "; // WHITE CIRCLE, then a space.
+        chars_test_prefix_continuing = "\xE2\x97\x8B "; // WHITE CIRCLE, then a space.
         chars_indentation = "\xC2\xB7   "; // MIDDLE DOT, then a space.
-        chars_test_counter_separator = " \xE2\x94\x82  "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
+        chars_test_counter_separator = " \xE2\x94\x82 "; // BOX DRAWINGS LIGHT VERTICAL, with spaces around it.
+        chars_repetition_counter_separator = " \xE2\x94\x82"; // BOX DRAWINGS LIGHT VERTICAL, with a space to the left.
+        chars_repetition_counter_separator_diagonal = "\xE2\x95\xB0\xE2\x95\xAE"; // BOX DRAWINGS LIGHT ARC UP AND RIGHT, then BOX DRAWINGS LIGHT ARC DOWN AND LEFT
         chars_test_failed_separator = "\xE2\x94\x81"; // BOX DRAWINGS HEAVY HORIZONTAL
         chars_test_failed_ending_separator = "\xE2\x94\x80"; // BOX DRAWINGS LIGHT HORIZONTAL
         chars_summary_path_separator = "      \xE2\x94\x82 "; // BOX DRAWINGS LIGHT VERTICAL, with some spaces around it.
@@ -1716,9 +1857,11 @@ void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
     else
     {
         chars_test_prefix = "* ";
-        chars_test_prefix_continuing_group = ". ";
+        chars_test_prefix_continuing = "+ ";
         chars_indentation = "    ";
-        chars_test_counter_separator = " |  ";
+        chars_test_counter_separator = " | ";
+        chars_repetition_counter_separator = " |";
+        chars_repetition_counter_separator_diagonal = " \\";
         chars_test_failed_separator = "#";
         chars_test_failed_ending_separator = "-";
         chars_summary_path_separator = "      | ";
@@ -1728,6 +1871,8 @@ void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
 void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
 {
     state = {};
+
+    state.num_tests_width = std::snprintf(nullptr, 0, "%zu", data.num_tests);
 
     // Print a message when some tests are skipped.
     if (data.num_tests < data.num_tests_with_skipped)
@@ -1832,80 +1977,31 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
 
 void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data)
 {
+    if (data.is_first_generator_repetition)
+        state.per_test = {};
+    else
+        state.per_test.per_repetition = {};
+
     { // Print the message when first starting tests, or when resuming from a failure.
-        if (state.test_counter == 0 || !state.failed_test_stack.empty())
+        bool is_first_test_first_repetition = state.test_counter == 0 && state.per_test.repetition_counter == 0;
+
+        if (is_first_test_first_repetition || !state.failed_test_stack.empty())
         {
             terminal.Print("%s\n%s%s%s\n",
                 terminal.AnsiResetString().data(),
                 terminal.AnsiDeltaString({}, style_starting_or_continuing_tests).data(),
-                (state.test_counter == 0 ? chars_starting_tests : chars_continuing_tests).c_str(),
+                (is_first_test_first_repetition ? chars_starting_tests : chars_continuing_tests).c_str(),
                 terminal.AnsiResetString().data()
             );
         }
     }
 
-    // How much characters in the total test count.
-    const int num_tests_width = std::snprintf(nullptr, 0, "%zu", data.all_tests->num_tests);
-
     ProduceTree(state.stack, data.test->Name(), [&](std::size_t segment_index, std::string_view segment, bool is_last_segment)
     {
         TextStyle cur_style;
 
-        // Test index (if this is the last segment).
-        if (is_last_segment)
-        {
-            auto st_index = terminal.AnsiDeltaString(cur_style, style_index);
-            auto st_total_count = terminal.AnsiDeltaString(cur_style, style_total_count);
-
-            terminal.Print("%s%*zu%s/%zu",
-                st_index.data(),
-                num_tests_width, state.test_counter + 1,
-                st_total_count.data(),
-                data.all_tests->num_tests
-            );
-
-            // Failed test count.
-            if (data.all_tests->failed_tests.size() > 0)
-            {
-                auto st_deco_l = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
-                auto st_num_failed = terminal.AnsiDeltaString(cur_style, style_failed_count);
-                auto st_deco_r = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
-
-                terminal.Print(" %s[%s%zu%s]",
-                    st_deco_l.data(),
-                    st_num_failed.data(),
-                    data.all_tests->failed_tests.size(),
-                    st_deco_r.data()
-                );
-            }
-        }
-        else
-        {
-            // No test index, just a gap.
-
-            int gap_width = num_tests_width * 2 + 1;
-
-            if (data.all_tests->failed_tests.size() > 0)
-                gap_width += std::snprintf(nullptr, 0, "%zu", data.all_tests->failed_tests.size()) + 3;
-
-            terminal.Print("%*s", gap_width, "");
-        }
-
-        // The gutter border.
-        terminal.Print("%s%s",
-            terminal.AnsiDeltaString(cur_style, style_gutter_border).data(),
-            chars_test_counter_separator.c_str()
-        );
-
-        // The indentation.
-        if (!state.stack.empty())
-        {
-            // Switch to the indentation guide color.
-            terminal.Print("%s", terminal.AnsiDeltaString(cur_style, style_indentation_guide).data());
-            // Print the required number of guides.
-            for (std::size_t repeat = 0; repeat < state.stack.size(); repeat++)
-                terminal.Print("%s", chars_indentation.c_str());
-        }
+        PrintContextLinePrefix(cur_style, *data.all_tests, is_last_segment ? TestCounterStyle::normal : TestCounterStyle::none);
+        PrintContextLineIndentation(cur_style, state.stack.size(), 0);
 
         // Whether we're reentering this group after a failed test.
         bool is_continued = segment_index < state.failed_test_stack.size() && state.failed_test_stack[segment_index] == segment;
@@ -1913,7 +2009,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestIn
         // Print the test name.
         terminal.Print("%s%s%.*s%s%s\n",
             terminal.AnsiDeltaString(cur_style, is_continued ? style_continuing_group : is_last_segment ? style_name : style_group_name).data(),
-            is_continued ? chars_test_prefix_continuing_group.c_str() : chars_test_prefix.c_str(),
+            is_continued ? chars_test_prefix_continuing.c_str() : chars_test_prefix.c_str(),
             int(segment.size()), segment.data(),
             is_last_segment ? "" : "/",
             terminal.AnsiResetString().data()
@@ -1951,11 +2047,147 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
         state.failed_test_stack.clear();
     }
 
-    state.test_counter++;
+    state.per_test.repetition_counter++;
+    if (data.failed)
+        state.per_test.failed_repetition_counter++;
+
+    // Reset per-test state after the last repetition.
+    if (data.is_last_generator_repetition)
+    {
+        state.test_counter++;
+
+        // We also do this in `OnPreRunSingleTest()`, so this isn't strictly necessary.
+        state.per_test = {};
+    }
+    else
+    {
+        // We also do this in `OnPreRunSingleTest()`, so this isn't strictly necessary.
+        state.per_test.per_repetition = {};
+    }
 }
 
-void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestResults &data)
+void ta_test::modules::ProgressPrinter::OnPostGenerate(const GeneratorCallInfo &data)
 {
+    TextStyle cur_style;
+
+    PrintContextLinePrefix(cur_style, *data.test->all_tests, state.per_test.per_repetition.printed_counter ? TestCounterStyle::none : TestCounterStyle::repeated);
+
+    int repetition_counters_width = std::snprintf(nullptr, 0, "%zu", state.per_test.repetition_counter + 1);
+    if (state.per_test.failed_repetition_counter > 0)
+    {
+        repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_prefix);
+        repetition_counters_width += std::snprintf(nullptr, 0, "%zu", state.per_test.failed_repetition_counter);
+        repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_suffix);
+    }
+
+    // Print the repetition counter, or nothing if already printed during this repetition.
+    if (!state.per_test.per_repetition.printed_counter)
+    {
+        // The actual repetition count.
+
+        state.per_test.per_repetition.printed_counter = true;
+
+        terminal.Print("%s%zu",
+            terminal.AnsiDeltaString(cur_style, style_repetition_total_count).data(),
+            state.per_test.repetition_counter + 1
+        );
+
+        // Failed repetition count, if any.
+        if (state.per_test.failed_repetition_counter > 0)
+        {
+            terminal.Print("%s%s%s%zu%s%s",
+                terminal.AnsiDeltaString(cur_style, style_repetition_failed_count_decorations).data(),
+                chars_failed_repetition_count_prefix.data(),
+                terminal.AnsiDeltaString(cur_style, style_repetition_failed_count).data(),
+                state.per_test.failed_repetition_counter,
+                terminal.AnsiDeltaString(cur_style, style_repetition_failed_count_decorations).data(),
+                chars_failed_repetition_count_suffix.data()
+            );
+        }
+    }
+    else
+    {
+        // Empty spacing.
+        terminal.Print("%*s", repetition_counters_width, "");
+    }
+
+    // The ending border after the repetition counter.
+    const std::string &repetition_border_string =
+        state.per_test.last_repetition_counters_width < 0 || repetition_counters_width <= state.per_test.last_repetition_counters_width
+        ? chars_repetition_counter_separator
+        : chars_repetition_counter_separator_diagonal;
+    terminal.Print("%s%s",
+        terminal.AnsiDeltaString(cur_style, style_repetition_border).data(),
+        repetition_border_string.c_str()
+    );
+    state.per_test.last_repetition_counters_width = repetition_counters_width;
+
+    // Indentation.
+    std::size_t num_chars_removed_from_indentation = std::min(std::size_t(repetition_counters_width) + text::uni::CountFirstBytes(repetition_border_string), text::uni::CountFirstBytes(chars_indentation) * state.stack.size());
+    PrintContextLineIndentation(cur_style, state.stack.size() + data.test->generator_index, num_chars_removed_from_indentation);
+
+    // The generator name and the value index.
+    terminal.Print("%s%s%s%.*s%s%s%s%d%s%s",
+        // The bullet point.
+        terminal.AnsiDeltaString(cur_style, style_generator_prefix).data(),
+        chars_test_prefix.c_str(),
+        // Generator name.
+        terminal.AnsiDeltaString(cur_style, style_generator_name).data(),
+        int(data.generator->GetName().size()), data.generator->GetName().data(),
+        // Opening bracket.
+        terminal.AnsiDeltaString(cur_style, style_generator_index_brackets).data(),
+        chars_generator_index_prefix.c_str(),
+        // The index.
+        terminal.AnsiDeltaString(cur_style, style_generator_index).data(),
+        data.generator->NumGeneratedValues(),
+        // Closing bracket.
+        terminal.AnsiDeltaString(cur_style, style_generator_index_brackets).data(),
+        chars_generator_index_suffix.c_str()
+    );
+
+    // The value as a string.
+    if (data.generator->ValueSupportsToString())
+    {
+        // The equals sign.
+        terminal.Print("%s%s%s",
+            terminal.AnsiDeltaString(cur_style, style_generator_value_separator).data(),
+            chars_generator_value_separator.c_str(),
+            terminal.AnsiDeltaString(cur_style, style_generator_value).data()
+        );
+
+        // The value itself.
+
+        std::string value = data.generator->ValueToString();
+        GeneratorValueShortener shortener(value, chars_generator_value_ellipsis, max_generator_value_prefix_length, max_generator_value_suffix_length);
+
+        if (shortener.is_short)
+        {
+            // The value is short enough to be printed completely.
+            terminal.Print("%s", value.c_str());
+        }
+        else
+        {
+            // The value is too long.
+            terminal.Print("%.*s%s%s%s%.*s",
+                int(shortener.long_prefix.size()), shortener.long_prefix.data(),
+                terminal.AnsiDeltaString(cur_style, style_generator_value_ellipsis).data(),
+                chars_generator_value_ellipsis.c_str(),
+                terminal.AnsiDeltaString(cur_style, style_generator_value).data(),
+                int(shortener.long_suffix.size()), shortener.long_suffix.data()
+            );
+        }
+    }
+
+    terminal.Print("%s\n",
+        terminal.AnsiResetString().data()
+    );
+}
+
+void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgress &data)
+{
+    // Avoid printing the diagnoal separator on the next progress line. It's unnecessary after a bulky failure message.
+    state.per_test.last_repetition_counters_width = -1;
+
     TextStyle cur_style;
 
     auto st_path = terminal.AnsiDeltaString(cur_style, common_data.style_path);
