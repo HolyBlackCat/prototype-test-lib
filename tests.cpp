@@ -3,8 +3,6 @@
 
 #include "testlib.h"
 
-// Reprint existing generators after a failure, in dark gray.
-// Think more about the generator progress styling.
 // Print summary after all repetitions finish.
 
 // #error 2. Handle interruptions (failed test or IntteruptException = prune remaining generators, otherwise complain about non-determinism)
@@ -116,12 +114,29 @@ TA_TEST(foof/1)
 
 }
 
-TA_TEST(foo/baz) {}
+TA_TEST(foo/baz)
+{
+    auto e = TA_MUST_THROW(
+        try
+        {
+            throw std::runtime_error("Hello!");
+        }
+        catch (...)
+        {
+            std::throw_with_nested(std::runtime_error("Nested!"));
+        }
+    );
+
+    // e.CheckMessage("Hello!");
+    TA_CHECK(R"123(foof)123" && false);
+}
 
 int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
+
+//
 
 // Roundtrip check when printing a reproduction string.
 
@@ -129,7 +144,7 @@ int main(int argc, char **argv)
 
 // Report failed values in test summary? (this one only during the run?) And also how many repetitions per test failed/passed/total.
 
-// Different global summary style:
+// Different global summary style: (3 columns? tests, repetitions(?), asserts)
 //     Skipped: 42
 //     Passed:  42
 //     FAILED:  42
@@ -157,6 +172,8 @@ int main(int argc, char **argv)
 
 // Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
 // Sort declarations, then sort definitions.
+
+// Check that paths are clickable in Visual Studio
 
 // Later:
 //     Somehow don't evaluate the message if the assertion passes? Perhaps change the syntax to `CHECK(cond, LOG("{}", 42))`, reusing one of the log macros?
@@ -197,6 +214,7 @@ int main(int argc, char **argv)
 //     * Lazy message evaluation
 //         * Point out that you can't do proper lazyness with <<, because operands are still evaluated.
 //     * No comma weirdness
+//     * Clickthrough everywhere (i.e. file paths everywhere, that should be clickable in an IDE)
 
 
 /* Pending tests:
@@ -327,6 +345,7 @@ TA_CHECK:
     Printing the counter should neatly expand the right border when the number of digits increases.
         But not after a failure!
     Partial trimming of the indentation (but only the part that belongs to the test name, not to the generators themselves - test the cutoff)
+    Reentering a test after a failure shoulnd't print the test index in bright color.
 
 --- All the macros nicely no-op when tests are disabled
     TA_CHECK validates the arguments (crash on call?)

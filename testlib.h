@@ -137,16 +137,16 @@
 // Whether to use libfmt instead of `std::format`.
 // If you manually override the formatting function using other macros below, this will be ignored.
 #ifndef CFG_TA_USE_LIBFMT
-#ifdef __cpp_lib_format
-#define CFG_TA_USE_LIBFMT 0
-#elif __has_include(<fmt/format.h>)
-#define CFG_TA_USE_LIBFMT 1
-#else
-#error ta_test needs a compiler supporting `#include <format>`, or installed libfmt, or a custom formatting library to be specified.
-#endif
+#  ifdef __cpp_lib_format
+#    define CFG_TA_USE_LIBFMT 0
+#  elif __has_include(<fmt/format.h>)
+#    define CFG_TA_USE_LIBFMT 1
+#  else
+#    error ta_test needs a compiler supporting `#include <format>`, or installed libfmt, or a custom formatting library to be specified.
+#  endif
 #endif
 
-// The namespace of the formatting function. We'll use `CFG_TA_FMT_NAMESPACE::format()` and `CFG_TA_FMT_NAMESPACE::format_string`.
+// The namespace of the formatting library.
 #ifndef CFG_TA_FMT_NAMESPACE
 #if CFG_TA_USE_LIBFMT
 #include <fmt/format.h>
@@ -155,6 +155,20 @@
 #include <format>
 #define CFG_TA_FMT_NAMESPACE ::std
 #endif
+#endif
+
+// Whether the formatting library has a `vprint(FILE *, ...)`. If it's not there, we format to a temporary buffer first.
+// 0 = none, 1 = `vprint_[non]unicode`, 2 = `vprint`.
+#ifndef CFG_TA_FMT_HAS_FILE_VPRINT
+#  if CFG_TA_USE_LIBFMT
+#    define CFG_TA_FMT_HAS_FILE_VPRINT 2
+#  else
+#    ifdef __cpp_lib_print
+#      define CFG_TA_FMT_HAS_FILE_VPRINT 1
+#    else
+#      define CFG_TA_FMT_HAS_FILE_VPRINT 0
+#    endif
+#  endif
 #endif
 
 // Whether we should try to detect the debugger and break on failed assertions, on platforms where we know how to do so.
@@ -854,10 +868,11 @@ namespace ta_test
             // The total number of known tests, including the skipped ones.
             std::size_t num_tests_with_skipped = 0;
         };
-        struct RunTestsResults : RunTestsInfo
+        struct RunTestsProgress : RunTestsInfo
         {
             std::vector<const BasicTestInfo *> failed_tests;
         };
+        struct RunTestsResults : RunTestsProgress {};
         // This is called first, before any tests run.
         virtual void OnPreRunTests(const RunTestsInfo &data) {(void)data;}
         // This is called after all tests run.
@@ -990,7 +1005,7 @@ namespace ta_test
 
         struct RunSingleTestInfo
         {
-            const RunTestsResults *all_tests = nullptr;
+            const RunTestsProgress *all_tests = nullptr;
             const BasicTestInfo *test = nullptr;
 
             // The generator stack.
@@ -1036,6 +1051,9 @@ namespace ta_test
         {
             const RunSingleTestProgress *test = nullptr;
             const BasicGenerator *generator = nullptr;
+
+            // Whether we're generating a new value, or just reusing the existing one.
+            bool geneating_new_value = false;
         };
 
         // This is called before every `TA_GENERATE(...)`.
@@ -1501,18 +1519,45 @@ namespace ta_test
 
         // The characters are written to this `std::vprintf`-style callback.
         // Defaults to `SetFileOutput(stdout)`.
-        std::function<void(const char *format, std::va_list args)> output_func;
+        std::function<void(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args)> output_func;
 
         CFG_TA_API Terminal();
 
         // Sets `output_func` to print to `stream`.
         CFG_TA_API void SetFileOutput(FILE *stream);
 
-        // Prints a message using `output_func`.
-        #ifdef __GNUC__
-        __attribute__((__format__(__printf__, 2, 3)))
-        #endif
-        CFG_TA_API void Print(const char *format, ...) const;
+        // Prints a message using `output_func`. Unlike `Print`, doesn't accept `TextStyle`s directly.
+        // Prefer `Print()`.
+        CFG_TA_API void PrintLow(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) const;
+
+        // Resets the text style when constructed and when destructed.
+        // Can't be constructed manually, use `MakeStyleGuard()`.
+        class StyleGuard
+        {
+            friend Terminal;
+
+            Terminal &terminal;
+            int exception_counter = 0;
+            TextStyle cur_style;
+
+            CFG_TA_API StyleGuard(Terminal &terminal);
+
+          public:
+            StyleGuard(const StyleGuard &) = delete;
+            StyleGuard &operator=(const StyleGuard &) = delete;
+
+            CFG_TA_API ~StyleGuard();
+
+            // Pokes the terminal to reset the style, usually before and after running user code.
+            CFG_TA_API void ResetStyle();
+        };
+
+        [[nodiscard]] StyleGuard MakeStyleGuard()
+        {
+            return StyleGuard(*this);
+        }
+
+        // --- MANUAL ANSI ESCAPE SEQUENCE API ---
 
         // Printing this string resets the text styles. It's always null-terminated.
         [[nodiscard]] CFG_TA_API std::string_view AnsiResetString() const;
@@ -1522,14 +1567,58 @@ namespace ta_test
 
         // Produces a string to switch between text styles, from `prev` to `cur`.
         // If the styles are the same, does nothing.
-        [[nodiscard]] CFG_TA_API AnsiDeltaStringBuffer AnsiDeltaString(const TextStyle &&cur, const TextStyle &next) const;
+        //
+        [[nodiscard]] CFG_TA_API AnsiDeltaStringBuffer AnsiDeltaString(const StyleGuard &&cur, const TextStyle &next) const;
 
         // This overload additionally performs `cur = next`.
-        [[nodiscard]] AnsiDeltaStringBuffer AnsiDeltaString(TextStyle &cur, const TextStyle &next) const
+        [[nodiscard]] AnsiDeltaStringBuffer AnsiDeltaString(StyleGuard &cur, const TextStyle &next) const
         {
             AnsiDeltaStringBuffer ret = AnsiDeltaString(std::move(cur), next);
-            cur = next;
+            cur.cur_style = next;
             return ret;
+        }
+
+        // --- HIGH-LEVEL PRINTING ---
+
+        // Prints all arguments using `output_func`. This overload doesn't support text styles.
+        template <typename ...P>
+        void Print(CFG_TA_FMT_NAMESPACE::format_string<P...> fmt, P &&... args) const
+        {
+            PrintLow(fmt.get(), CFG_TA_FMT_NAMESPACE::make_format_args(args...)); // It seems we don't need to forward `args...`.
+        }
+
+        // For internal use! Not `private` only because we need to write a formatter for it.
+        // This is generated internally by `Print`, and is fed to `std::format()`.
+        // When printed, it prints the delta between `cur_style` and `new_style`, then does `cur_style = new_style`.
+        struct PrintableAnsiDelta
+        {
+            const Terminal &terminal;
+            Terminal::StyleGuard &cur_style;
+            TextStyle new_style;
+        };
+
+      private:
+        // Replaces `TextStyle` with `PrintableAnsiDelta` for the template arguments of `std::format_string<...>`.
+        template <typename T>
+        using WrapStyleTypeForFormatString = std::conditional_t<std::is_same_v<std::remove_cvref_t<T>, TextStyle>, PrintableAnsiDelta, T>;
+
+        // Replaces objects of type `TextStyle` with `PrintableAnsiDelta` for `std::format(...)`.
+        template <typename T>
+        static decltype(auto) WrapStyleForFormatString(const Terminal &terminal, StyleGuard &cur_style, T &&target)
+        {
+            if constexpr (std::is_same_v<std::remove_cvref_t<T>, TextStyle>)
+                return PrintableAnsiDelta{.terminal = terminal, .cur_style = cur_style, .new_style = target};
+            else
+                return std::forward<T>(target);
+        }
+
+      public:
+        // Prints all arguments using `output_func`. This overload supports text styles.
+        template <typename ...P>
+        void Print(StyleGuard &cur_style, CFG_TA_FMT_NAMESPACE::format_string<WrapStyleTypeForFormatString<P>...> fmt, P &&... args) const
+        {
+            // It seems we don't need to forward `args...`.
+            PrintLow(fmt.get(), CFG_TA_FMT_NAMESPACE::make_format_args(WrapStyleForFormatString(*this, cur_style, args)...));
         }
     };
 
@@ -2261,53 +2350,8 @@ namespace ta_test
 
             [[nodiscard]] const CommonData *GetCommonData() const {return data;}
 
-            // Prints the canvas to a callback `func`, which is `(std::string_view string) -> void`.
-            template <typename F>
-            void PrintToCallback(const Terminal &terminal, F &&func) const
-            {
-                TextStyle cur_style;
-
-                std::string buffer;
-
-                for (const Line &line : lines)
-                {
-                    std::size_t segment_start = 0;
-
-                    auto FlushSegment = [&](std::size_t end_pos)
-                    {
-                        if (segment_start == end_pos)
-                            return;
-
-                        uni::Encode(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
-                        func(std::string_view(buffer));
-                        segment_start = end_pos;
-                    };
-
-                    if (terminal.enable_color)
-                    {
-                        for (std::size_t i = 0; i < line.text.size(); i++)
-                        {
-                            if (line.text[i] == ' ')
-                                continue;
-
-                            FlushSegment(i);
-                            func(std::string_view(terminal.AnsiDeltaString(cur_style, line.info[i].style).data()));
-                        }
-                    }
-
-                    FlushSegment(line.text.size());
-
-                    // Reset the style after the last line.
-                    // Must do it before the line feed, otherwise the "core dumped" message also gets colored.
-                    if (terminal.enable_color && &line == &lines.back() && cur_style != TextStyle{})
-                        func(terminal.AnsiResetString());
-
-                    func(std::string_view("\n"));
-                }
-            }
-
             // Prints to a `terminal` stream.
-            CFG_TA_API void Print(const Terminal &terminal) const;
+            CFG_TA_API void Print(const Terminal &terminal, Terminal::StyleGuard &cur_style) const;
 
             // The number of lines.
             [[nodiscard]] CFG_TA_API std::size_t NumLines() const;
@@ -2421,13 +2465,13 @@ namespace ta_test
 
         // Uses the current modules to print the context stack. See `namespace context` above.
         // If `skip_last_frame` is specified and is the last frame, that frame is not printed.
-        CFG_TA_API void PrintContext(const context::BasicFrame *skip_last_frame = nullptr, context::Context con = context::CurrentContext());
+        CFG_TA_API void PrintContext(Terminal::StyleGuard &cur_style, const context::BasicFrame *skip_last_frame = nullptr, context::Context con = context::CurrentContext());
         // Same, but only prints a single context frame.
-        CFG_TA_API void PrintContextFrame(const context::BasicFrame &frame);
+        CFG_TA_API void PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame);
 
         // Prints the current log, using the current modules.
         // Returns true if at least one module has printed something.
-        CFG_TA_API void PrintLog();
+        CFG_TA_API void PrintLog(Terminal::StyleGuard &cur_style);
     }
 
     // The base for modules that print stuff.
@@ -2454,15 +2498,15 @@ namespace ta_test
         // This is called whenever the context information needs to be printed.
         // Return true if this type of context frame is known to you and you handled it, then the other modules won't receive this call.
         // Do nothing and return false if you don't know this context frame type.
-        virtual bool PrintContextFrame(const context::BasicFrame &frame) {(void)frame; return false;}
+        virtual bool PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) {(void)cur_style; (void)frame; return false;}
         // This is called to print the log.
         // Return true to prevent other modules from receiving this call.
         // `unscoped_log` can alternatively be obtained from `BasicModule::RunSingleTestResults`.
         // `scoped_log` can alternatively be obtained from `context::CurrentScopedLog()`.
-        virtual bool PrintLogEntries(std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) {(void)unscoped_log; (void)scoped_log; return false;}
+        virtual bool PrintLogEntries(Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) {(void)cur_style; (void)unscoped_log; (void)scoped_log; return false;}
 
       protected:
-        CFG_TA_API void PrintNote(std::string_view text) const;
+        CFG_TA_API void PrintNote(Terminal::StyleGuard &cur_style, std::string_view text) const;
     };
 
 
@@ -3142,22 +3186,22 @@ namespace ta_test
                 thread_state.current_test->generator_stack.push_back(std::move(new_generator));
             }
 
-            // Advance the generator if it's the last one in the stack.
-            if (thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size())
-            {
-                // Pre callback.
-                BasicModule::GeneratorCallInfo callback_data{
-                    .test = thread_state.current_test,
-                    .generator = this_generator,
-                };
-                thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreGenerate>(callback_data);
+            const bool next_value = thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size();
 
-                // Actually generate.
+            // Pre callback.
+            BasicModule::GeneratorCallInfo callback_data{
+                .test = thread_state.current_test,
+                .generator = this_generator,
+                .geneating_new_value = next_value,
+            };
+            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreGenerate>(callback_data);
+
+            // Advance the generator if needed.
+            if (next_value)
                 this_generator->Generate();
 
-                // Post callback.
-                thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
-            }
+            // Post callback.
+            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
 
             thread_state.current_test->generator_index++;
 
@@ -3725,11 +3769,11 @@ namespace ta_test
             std::string chars_indent_message = "        ";
             std::string chars_type_suffix = ": ";
 
-            std::function<void(const BasicExceptionContentsPrinter &self, const Terminal &terminal, const std::exception_ptr &e)> print_callback;
+            std::function<void(const BasicExceptionContentsPrinter &self, const Terminal &terminal, Terminal::StyleGuard &cur_style, const std::exception_ptr &e)> print_callback;
 
           protected:
             CFG_TA_API BasicExceptionContentsPrinter();
-            CFG_TA_API void PrintException(const Terminal &terminal, const std::exception_ptr &e) const;
+            CFG_TA_API void PrintException(const Terminal &terminal, Terminal::StyleGuard &cur_style, const std::exception_ptr &e) const;
         };
 
         // --- MODULES ---
@@ -3797,6 +3841,10 @@ namespace ta_test
             std::string chars_pre_indentation = " ";
             // This is printed after the test counter and before the test names/groups (and before their indentation guides).
             std::string chars_test_counter_separator;
+            // The prefix before the failed test counter, ir any.
+            std::string chars_failed_test_count_prefix = " [";
+            // The suffix after the failed test counter, ir any.
+            std::string chars_failed_test_count_suffix = "]";
             // The prefix before the failed generator repetition counter, ir any.
             std::string chars_failed_repetition_count_prefix = " [";
             // The suffix after the failed generator repetition counter, ir any.
@@ -3838,6 +3886,10 @@ namespace ta_test
 
             // Optional message at startup when some tests are skipped.
             TextStyle style_skipped_tests = {.color = TextColor::light_blue, .bold = true};
+            // The prefix before the name of the starting test.
+            TextStyle style_prefix = {.color = TextColor::dark_green};
+            // Same, but when reentering a group after a failure.
+            TextStyle style_prefix_continuing = {.color = TextColor::light_black};
             // The message when a test starts.
             TextStyle style_name = {.color = TextColor::light_white, .bold = true};
             // The message when a test group starts.
@@ -3866,20 +3918,35 @@ namespace ta_test
             TextStyle style_repetition_failed_count_decorations = {.color = TextColor::dark_magenta};
             // This line separate the repetition counters, if any, from the test names/groups.
             TextStyle style_repetition_border = {.color = TextColorGrayscale24(10)};
-            // The prefix before the name of the generated variable.
-            TextStyle style_generator_prefix = {.color = TextColor::light_white, .bold = true};
-            // The name of the generated variable.
-            TextStyle style_generator_name = {.color = TextColor::light_white, .bold = true};
-            // The index of the generated variable.
-            TextStyle style_generator_index = {.color = TextColor::dark_white};
-            // The brackets around this index.
-            TextStyle style_generator_index_brackets = {.color = TextColor::dark_white};
-            // Separates the generated value from the generator name and index.
-            TextStyle style_generator_value_separator = {.color = TextColor::dark_white};
-            // The generated value, if printable.
-            TextStyle style_generator_value = {.color = TextColor::light_blue, .bold = true};
-            // The ellipsis in the generated value, if it's too long.
-            TextStyle style_generator_value_ellipsis = {.color = TextColor::light_black, .bold = true};
+            struct StyleGenerator
+            {
+                // The prefix before the name of the generated variable.
+                TextStyle prefix = {.color = TextColor::light_blue};
+                // The name of the generated variable.
+                TextStyle name = {.color = TextColor::dark_white};
+                // The index of the generated variable.
+                TextStyle index = {.color = TextColor::light_white, .bold = true};
+                // The brackets around this index.
+                TextStyle index_brackets = {.color = TextColor::light_black};
+                // Separates the generated value from the generator name and index.
+                TextStyle value_separator = {.color = TextColor::dark_white};
+                // The generated value, if printable.
+                TextStyle value = {.color = TextColor::light_blue, .bold = true};
+                // The ellipsis in the generated value, if it's too long.
+                TextStyle value_ellipsis = {.color = TextColor::light_black, .bold = true};
+            };
+            // The normal run of a generator.
+            StyleGenerator style_generator{};
+            // Re-printing the value of a generator after a failure.
+            StyleGenerator style_generator_repeated = {
+                .prefix = {.color = TextColor::light_black},
+                .name = {.color = TextColor::light_black, .bold = true},
+                .index = {.color = TextColor::light_black, .bold = true},
+                .index_brackets = {.color = TextColor::light_black},
+                .value_separator = {.color = TextColor::light_black},
+                .value = {.color = TextColor::light_black, .bold = true},
+                .value_ellipsis = {.color = TextColor::light_black},
+            };
 
             // The name of a failed test, printed when it fails.
             TextStyle style_failed_name = {.color = TextColor::light_red, .bold = true};
@@ -3889,8 +3956,10 @@ namespace ta_test
             TextStyle style_test_failed_separator = {.color = TextColor::dark_red};
             // This line is printed after all details on the test failure.
             TextStyle style_test_failed_ending_separator = {.color = TextColorGrayscale24(10)};
-            // Style for `chars_starting_tests` and `chars_continuing_tests`.
-            TextStyle style_starting_or_continuing_tests = {.color = TextColor::light_black, .bold = true};
+            // Style for `chars_starting_tests`.
+            TextStyle style_starting_tests = {.color = TextColor::light_black, .bold = true};
+            // Style for `chars_continuing_tests`.
+            TextStyle style_continuing_tests = {.color = TextColor::dark_yellow};
 
             // TextStyle style_per_test_summary = {.color = TextColor::light_red, .bold = true};
 
@@ -3930,6 +3999,9 @@ namespace ta_test
                     {
                         // Whether we already printed the `repetition_counter`.
                         bool printed_counter = false;
+
+                        // Whether the previous test/repetition has failed.
+                        bool prev_failed = false;
                     };
                     PerRepetition per_repetition;
                 };
@@ -3997,8 +4069,13 @@ namespace ta_test
             }
 
             enum class TestCounterStyle {none, normal, repeated};
-            CFG_TA_API void PrintContextLinePrefix(TextStyle &cur_style, const RunTestsResults &all_tests, TestCounterStyle test_counter_style) const;
-            CFG_TA_API void PrintContextLineIndentation(TextStyle &cur_style, std::size_t depth, std::size_t skip_characters) const;
+            CFG_TA_API void PrintContextLinePrefix(Terminal::StyleGuard &cur_style, const RunTestsProgress &all_tests, TestCounterStyle test_counter_style) const;
+            CFG_TA_API void PrintContextLineIndentation(Terminal::StyleGuard &cur_style, std::size_t depth, std::size_t skip_characters) const;
+
+            // Prints the entire line describing a generator.
+            // `repeating_info == true` means that we're printing this not because a new value got generated,
+            // but because we're providing the context again after an error.
+            CFG_TA_API void PrintGeneratorInfo(Terminal::StyleGuard &cur_style, const RunSingleTestProgress &test, const BasicGenerator &generator, bool repeating_info);
 
           public:
             CFG_TA_API ProgressPrinter();
@@ -4073,9 +4150,9 @@ namespace ta_test
             std::u32string chars_in_this_subexpr_inexact = U"in here?";
 
             void OnAssertionFailed(const BasicAssertionInfo &data) override;
-            bool PrintContextFrame(const context::BasicFrame &frame) override;
+            bool PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
 
-            CFG_TA_API void PrintAssertionFrameLow(const BasicAssertionInfo &data, bool is_most_nested) const;
+            CFG_TA_API void PrintAssertionFrameLow(Terminal::StyleGuard &cur_style, const BasicAssertionInfo &data, bool is_most_nested) const;
         };
 
         // Responds to `text::PrintLog()` to print the current log.
@@ -4092,7 +4169,7 @@ namespace ta_test
 
             void OnPreRunSingleTest(const RunSingleTestInfo &data) override;
             void OnPostRunSingleTest(const RunSingleTestResults &data) override;
-            bool PrintLogEntries(std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) override;
+            bool PrintLogEntries(Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) override;
         };
 
         // A generic module to analyze exceptions.
@@ -4149,9 +4226,10 @@ namespace ta_test
             std::string chars_throw_location = "Thrown here:";
 
             void OnMissingException(const MustThrowInfo &data, bool &should_break) override;
-            bool PrintContextFrame(const context::BasicFrame &frame) override;
+            bool PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
 
             CFG_TA_API void PrintFrame(
+                Terminal::StyleGuard &cur_style,
                 const BasicModule::MustThrowStaticInfo &static_info,
                 const BasicModule::MustThrowDynamicInfo *dynamic_info, // Optional.
                 const BasicModule::CaughtExceptionInfo *caught, // Optional. If set, we're analyzing a caught exception. If null, we're looking at a macro call.
@@ -4164,7 +4242,7 @@ namespace ta_test
         {
             std::u32string chars_func_name_prefix = U"In function: ";
 
-            bool PrintContextFrame(const context::BasicFrame &frame) override;
+            bool PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
         };
 
         // Detects whether the debugger is attached in a platform-specific way.
@@ -4198,3 +4276,18 @@ namespace ta_test
         };
     }
 }
+
+template <>
+struct CFG_TA_FMT_NAMESPACE::formatter<ta_test::Terminal::PrintableAnsiDelta, char>
+{
+    constexpr auto parse(std::basic_format_parse_context<char> &parse_ctx)
+    {
+        return parse_ctx.begin();
+    }
+
+    template <typename OutputIt>
+    constexpr auto format(const ta_test::Terminal::PrintableAnsiDelta &arg, std::basic_format_context<OutputIt, char> &format_ctx) const
+    {
+        return CFG_TA_FMT_NAMESPACE::format_to(format_ctx.out(), "{}", arg.terminal.AnsiDeltaString(arg.cur_style, arg.new_style).data());
+    }
+};

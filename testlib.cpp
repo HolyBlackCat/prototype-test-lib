@@ -205,65 +205,79 @@ ta_test::Terminal::Terminal()
 
 void ta_test::Terminal::SetFileOutput(FILE *stream)
 {
-    output_func = [stream](const char *format, std::va_list args)
-    {
-        std::vfprintf(stream, format, args);
-    };
-}
-
-void ta_test::Terminal::Print(const char *format, ...) const
-{
-    std::va_list list;
-    va_start(list, format);
-    struct Guard
-    {
-        std::va_list *list = nullptr;
-        ~Guard()
-        {
-            // Ok, here's the thing. We formally need to call this even if the callback throws,
-            //   but formally it must be called by the same function that called `va_start()`.
-            // Also it seems that on modern implementations it's a no-op.
-            // Adding a `catch(...)` just for this would interfere with crash dumps, so I'm not doing that.
-            // Simply ignoring exceptions doesn't sound right.
-            // Calling it from a scope guard, while formally undefined, at least has the same behavior regardless of exceptions.
-            // And if we even find ourselves on a platform where we can't call it from a scope guard, we'll know about it immediately,
-            //   without testing throwing exceptions.
-            va_end(*list);
-        }
-    };
-    Guard guard{.list = &list};
-    output_func(format, list);
-}
-
-static void ConfigureTerminalIfNeeded()
-{
-    #ifdef _WIN32
-    if (ta_test::platform::IsTerminalAttached() )
-    {
-        SetConsoleOutputCP(CP_UTF8);
-
-        auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
-        DWORD current_mode{};
-        GetConsoleMode(handle, &current_mode);
-        SetConsoleMode(handle, current_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-    }
+    output_func = [stream
+    #if CFG_TA_FMT_HAS_FILE_PRINT == 0 && defined(_WIN32)
+    , need_init = stream == stdout || stream == stderr
     #endif
+    ](std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) mutable
+    {
+        #if CFG_TA_FMT_HAS_FILE_PRINT == 2
+        CFG_TA_FMT_NAMESPACE::vprint_unicode(stream, fmt, args);
+        #elif CFG_TA_FMT_HAS_FILE_PRINT == 1
+        CFG_TA_FMT_NAMESPACE::vprint(stream, fmt, args);
+        #elif CFG_TA_FMT_HAS_FILE_PRINT == 0
+
+        #ifdef _WIN32
+        if (need_init)
+        {
+            need_init = false;
+            if (ta_test::platform::IsTerminalAttached())
+            {
+                SetConsoleOutputCP(CP_UTF8);
+
+                auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
+                DWORD current_mode{};
+                GetConsoleMode(handle, &current_mode);
+                SetConsoleMode(handle, current_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+        }
+        #endif
+
+        std::string buffer = CFG_TA_FMT_NAMESPACE::vformat(fmt, args);
+        std::fwrite(buffer.c_str(), buffer.size(), 1, stream);
+        #else
+        #error Invalid value of `CFG_TA_FMT_HAS_FILE_PRINT`.
+        #endif
+    };
+}
+
+void ta_test::Terminal::PrintLow(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) const
+{
+    if (output_func)
+        output_func(fmt, args);
+}
+
+ta_test::Terminal::StyleGuard::StyleGuard(Terminal &terminal)
+    : terminal(terminal)
+{
+    if (terminal.enable_color)
+    {
+        ResetStyle();
+        exception_counter = std::uncaught_exceptions(); // Don't need this without color.
+    }
+}
+
+ta_test::Terminal::StyleGuard::~StyleGuard()
+{
+    if (terminal.enable_color && exception_counter == std::uncaught_exceptions())
+        ResetStyle();
+}
+
+void ta_test::Terminal::StyleGuard::ResetStyle()
+{
+    if (terminal.enable_color)
+        terminal.Print("{}", terminal.AnsiResetString().data());
 }
 
 std::string_view ta_test::Terminal::AnsiResetString() const
 {
     if (enable_color)
-    {
-        ConfigureTerminalIfNeeded();
         return "\033[0m";
-    }
     else
-    {
         return "";
-    }
 }
 
-ta_test::Terminal::AnsiDeltaStringBuffer ta_test::Terminal::AnsiDeltaString(const TextStyle &&cur, const TextStyle &next) const
+ta_test::Terminal::AnsiDeltaStringBuffer ta_test::Terminal::AnsiDeltaString(const StyleGuard &&cur, const TextStyle &next) const
 {
     AnsiDeltaStringBuffer ret;
     ret[0] = '\0';
@@ -273,25 +287,25 @@ ta_test::Terminal::AnsiDeltaStringBuffer ta_test::Terminal::AnsiDeltaString(cons
 
     std::strcpy(ret.data(), "\033[");
     char *ptr = ret.data() + 2;
-    if (next.color != cur.color)
+    if (next.color != cur.cur_style.color)
     {
         if (next.color >= TextColor::extended && next.color < TextColor::extended_end)
             ptr += std::sprintf(ptr, "38;5;%d;", int(next.color) - int(TextColor::extended));
         else
             ptr += std::sprintf(ptr, "%d;", int(next.color));
     }
-    if (next.bg_color != cur.bg_color)
+    if (next.bg_color != cur.cur_style.bg_color)
     {
         if (next.bg_color >= TextColor::extended && next.bg_color < TextColor::extended_end)
             ptr += std::sprintf(ptr, "48;5;%d;", int(next.bg_color) - int(TextColor::extended));
         else
             ptr += std::sprintf(ptr, "%d;", int(next.bg_color) + 10);
     }
-    if (next.bold != cur.bold)
+    if (next.bold != cur.cur_style.bold)
         ptr += std::sprintf(ptr, "%s;", next.bold ? "1" : "22"); // Bold text is a little weird.
-    if (next.italic != cur.italic)
+    if (next.italic != cur.cur_style.italic)
         ptr += std::sprintf(ptr, "%s3;", next.italic ? "" : "2");
-    if (next.underline != cur.underline)
+    if (next.underline != cur.cur_style.underline)
         ptr += std::sprintf(ptr, "%s4;", next.underline ? "" : "2");
 
     if (ptr != ret.data() + 2)
@@ -299,7 +313,6 @@ ta_test::Terminal::AnsiDeltaStringBuffer ta_test::Terminal::AnsiDeltaString(cons
         // `sprintf` automatically null-terminates the buffer.
         ptr[-1] = 'm';
 
-        ConfigureTerminalIfNeeded();
         return ret;
     }
 
@@ -331,9 +344,40 @@ const char *ta_test::text::Demangler::operator()(const char *name)
     #endif
 }
 
-void ta_test::text::TextCanvas::Print(const Terminal &terminal) const
+void ta_test::text::TextCanvas::Print(const Terminal &terminal, Terminal::StyleGuard &cur_style) const
 {
-    PrintToCallback(terminal, [&](std::string_view string){terminal.Print("%.*s", int(string.size()), string.data());});
+    std::string buffer;
+
+    for (const Line &line : lines)
+    {
+        std::size_t segment_start = 0;
+
+        auto FlushSegment = [&](std::size_t end_pos)
+        {
+            if (segment_start == end_pos)
+                return;
+
+            uni::Encode(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
+            terminal.Print("{}", std::string_view(buffer));
+            segment_start = end_pos;
+        };
+
+        if (terminal.enable_color)
+        {
+            for (std::size_t i = 0; i < line.text.size(); i++)
+            {
+                if (line.text[i] == ' ')
+                    continue;
+
+                FlushSegment(i);
+                terminal.Print("{}", terminal.AnsiDeltaString(cur_style, line.info[i].style).data());
+            }
+        }
+
+        FlushSegment(line.text.size());
+
+        terminal.Print("\n");
+    }
 }
 
 std::size_t ta_test::text::TextCanvas::NumLines() const
@@ -782,7 +826,7 @@ std::size_t ta_test::text::expr::DrawToCanvas(TextCanvas &canvas, std::size_t li
     return expr.size();
 }
 
-void ta_test::text::PrintContext(const context::BasicFrame *skip_last_frame, context::Context con)
+void ta_test::text::PrintContext(Terminal::StyleGuard &cur_style, const context::BasicFrame *skip_last_frame, context::Context con)
 {
     bool first = true;
     for (auto it = con.end(); it != con.begin();)
@@ -792,11 +836,11 @@ void ta_test::text::PrintContext(const context::BasicFrame *skip_last_frame, con
             continue;
 
         first = false;
-        ta_test::text::PrintContextFrame(**it);
+        ta_test::text::PrintContextFrame(cur_style, **it);
     }
 }
 
-void ta_test::text::PrintContextFrame(const context::BasicFrame &frame)
+void ta_test::text::PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
 {
     auto &thread_state = detail::ThreadState();
     if (!thread_state.current_test)
@@ -806,13 +850,13 @@ void ta_test::text::PrintContextFrame(const context::BasicFrame &frame)
     {
         if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
         {
-            if (base->PrintContextFrame(frame))
+            if (base->PrintContextFrame(cur_style, frame))
                 break;
         }
     }
 }
 
-void ta_test::text::PrintLog()
+void ta_test::text::PrintLog(Terminal::StyleGuard &cur_style)
 {
     auto &thread_state = detail::ThreadState();
     if (!thread_state.current_test)
@@ -826,21 +870,22 @@ void ta_test::text::PrintLog()
     {
         if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
         {
-            if (base->PrintLogEntries(thread_state.current_test->unscoped_log, context::CurrentScopedLog()))
+            if (base->PrintLogEntries(cur_style, thread_state.current_test->unscoped_log, context::CurrentScopedLog()))
                 break;
         }
     }
 }
 
-void ta_test::BasicPrintingModule::PrintNote(std::string_view text) const
+void ta_test::BasicPrintingModule::PrintNote(Terminal::StyleGuard &cur_style, std::string_view text) const
 {
-    terminal.Print("%s%s%s%.*s%s\n",
-        terminal.AnsiResetString().data(),
-        terminal.AnsiDeltaString({}, common_data.style_note).data(),
-        common_data.note_prefix.c_str(),
-        int(text.size()), text.data(),
-        terminal.AnsiResetString().data()
+    // Resetting the style before and after just in case.
+    cur_style.ResetStyle();
+    terminal.Print(cur_style, "{}{}{}\n",
+        common_data.style_note,
+        common_data.note_prefix,
+        text
     );
+    cur_style.ResetStyle();
 }
 
 void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<void(SingleException elem)> &func)
@@ -1478,43 +1523,37 @@ int ta_test::Runner::Run()
 // --- modules::BasicExceptionContentsPrinter ---
 
 ta_test::modules::BasicExceptionContentsPrinter::BasicExceptionContentsPrinter()
-    : print_callback([](const BasicExceptionContentsPrinter &self, const Terminal &terminal, const std::exception_ptr &e)
+    : print_callback([](const BasicExceptionContentsPrinter &self, const Terminal &terminal, Terminal::StyleGuard &cur_style, const std::exception_ptr &e)
     {
-        TextStyle cur_style;
-
         AnalyzeException(e, [&](const SingleException &elem)
         {
             if (elem.IsTypeKnown())
             {
-                auto st_type = terminal.AnsiDeltaString(cur_style, self.style_exception_type);
-                auto st_message = terminal.AnsiDeltaString(cur_style, self.style_exception_message);
-                terminal.Print("%s%s%s%s\n%s%s%s\n",
-                    st_type.data(),
-                    self.chars_indent_type.c_str(),
-                    elem.GetTypeName().c_str(),
-                    self.chars_type_suffix.c_str(),
-                    st_message.data(),
-                    self.chars_indent_message.c_str(),
-                    string_conv::ToString(elem.message).c_str()
+                terminal.Print(cur_style, "{}{}{}{}\n{}{}{}\n",
+                    self.style_exception_type,
+                    self.chars_indent_type,
+                    elem.GetTypeName(),
+                    self.chars_type_suffix,
+                    self.style_exception_message,
+                    self.chars_indent_message,
+                    string_conv::ToString(elem.message)
                 );
             }
             else
             {
-                terminal.Print("%s%s%s\n",
-                    terminal.AnsiDeltaString(cur_style, self.style_exception_type).data(),
-                    self.chars_indent_type.c_str(),
-                    self.chars_unknown_exception.c_str()
+                terminal.Print(cur_style, "{}{}{}\n",
+                    self.style_exception_type,
+                    self.chars_indent_type,
+                    self.chars_unknown_exception
                 );
             }
         });
-
-        terminal.Print("%s", terminal.AnsiResetString().data());
     })
 {}
 
-void ta_test::modules::BasicExceptionContentsPrinter::PrintException(const Terminal &terminal, const std::exception_ptr &e) const
+void ta_test::modules::BasicExceptionContentsPrinter::PrintException(const Terminal &terminal, Terminal::StyleGuard &cur_style, const std::exception_ptr &e) const
 {
-    print_callback(*this, terminal, e);
+    print_callback(*this, terminal, cur_style, e);
 }
 
 // --- modules::HelpPrinter ---
@@ -1535,7 +1574,7 @@ ta_test::modules::HelpPrinter::HelpPrinter()
 
         self.terminal.Print("This is a test runner based on ta_test.\nAvailable options:\n");
         for (flags::BasicFlag *flag : flags)
-            self.terminal.Print("  %-*s - %s\n", self.expected_flag_width, flag->HelpFlagSpelling().c_str(), flag->help_desc.c_str());
+            self.terminal.Print("  {:<{}} - {}\n", self.expected_flag_width, flag->HelpFlagSpelling(), flag->help_desc);
 
         std::exit(0);
     })
@@ -1549,7 +1588,7 @@ std::vector<ta_test::flags::BasicFlag *> ta_test::modules::HelpPrinter::GetFlags
 void ta_test::modules::HelpPrinter::OnUnknownFlag(std::string_view flag, bool &abort)
 {
     (void)abort;
-    terminal.Print("Unknown flag `%.*s`, run with `%s` for usage.\n", int(flag.size()), flag.data(), help_flag.HelpFlagSpelling().c_str());
+    terminal.Print("Unknown flag `{}`, run with `{}` for usage.\n", flag, help_flag.HelpFlagSpelling());
     // Don't exit, rely on `abort`.
 }
 
@@ -1557,7 +1596,7 @@ void ta_test::modules::HelpPrinter::OnMissingFlagArgument(std::string_view flag,
 {
     (void)flag_obj;
     (void)abort;
-    terminal.Print("Flag `%.*s` wasn't given enough arguments, run with `%s` for usage.\n", int(flag.size()), flag.data(), help_flag.HelpFlagSpelling().c_str());
+    terminal.Print("Flag `{}` wasn't given enough arguments, run with `{}` for usage.\n", flag, help_flag.HelpFlagSpelling());
     // Don't exit, rely on `abort`.
 }
 
@@ -1749,33 +1788,28 @@ ta_test::modules::ProgressPrinter::GeneratorValueShortener::GeneratorValueShorte
     is_short = true;
 }
 
-void ta_test::modules::ProgressPrinter::PrintContextLinePrefix(TextStyle &cur_style, const RunTestsResults &all_tests, TestCounterStyle test_counter_style) const
+void ta_test::modules::ProgressPrinter::PrintContextLinePrefix(Terminal::StyleGuard &cur_style, const RunTestsProgress &all_tests, TestCounterStyle test_counter_style) const
 {
     // Test index, if necessary.
     if (test_counter_style != TestCounterStyle::none)
     {
-        auto st_index = terminal.AnsiDeltaString(cur_style, test_counter_style == TestCounterStyle::repeated ? style_index_repeated : style_index);
-        auto st_total_count = terminal.AnsiDeltaString(cur_style, style_total_count);
-
-        terminal.Print("%s%*zu%s/%zu",
-            st_index.data(),
-            state.num_tests_width, state.test_counter + 1,
-            st_total_count.data(),
+        terminal.Print(cur_style, "{}{:{}}{}/{}",
+            test_counter_style == TestCounterStyle::repeated ? style_index_repeated : style_index,
+            state.test_counter + 1, state.num_tests_width,
+            style_total_count,
             all_tests.num_tests
         );
 
         // Failed test count.
         if (all_tests.failed_tests.size() > 0)
         {
-            auto st_deco_l = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
-            auto st_num_failed = terminal.AnsiDeltaString(cur_style, style_failed_count);
-            auto st_deco_r = terminal.AnsiDeltaString(cur_style, style_failed_count_decorations);
-
-            terminal.Print(" %s[%s%zu%s]",
-                st_deco_l.data(),
-                st_num_failed.data(),
+            terminal.Print(cur_style, "{}{}{}{}{}{}",
+                style_failed_count_decorations,
+                chars_failed_test_count_prefix,
+                style_failed_count,
                 all_tests.failed_tests.size(),
-                st_deco_r.data()
+                style_failed_count_decorations,
+                chars_failed_test_count_suffix
             );
         }
     }
@@ -1788,22 +1822,22 @@ void ta_test::modules::ProgressPrinter::PrintContextLinePrefix(TextStyle &cur_st
         if (all_tests.failed_tests.size() > 0)
             gap_width += std::snprintf(nullptr, 0, "%zu", all_tests.failed_tests.size()) + 3;
 
-        terminal.Print("%*s", gap_width, "");
+        terminal.Print("{:{}}", "", gap_width);
     }
 
     // The gutter border.
-    terminal.Print("%s%s",
-        terminal.AnsiDeltaString(cur_style, style_gutter_border).data(),
-        chars_test_counter_separator.c_str()
+    terminal.Print(cur_style, "{}{}",
+        style_gutter_border,
+        chars_test_counter_separator
     );
 }
 
-void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(TextStyle &cur_style, std::size_t depth, std::size_t skip_characters) const
+void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(Terminal::StyleGuard &cur_style, std::size_t depth, std::size_t skip_characters) const
 {
     // Indentation prefix.
-    terminal.Print("%s%s",
-        terminal.AnsiDeltaString(cur_style, style_indentation_guide).data(),
-        chars_pre_indentation.c_str()
+    terminal.Print(cur_style, "{}{}",
+        style_indentation_guide,
+        chars_pre_indentation
     );
 
     std::size_t single_indentation_width = text::uni::CountFirstBytes(chars_indentation);
@@ -1824,7 +1858,7 @@ void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(TextStyle &c
 
             if (i > skipped_part)
             {
-                terminal.Print("%s", &ch);
+                terminal.Print("{}", &ch);
                 break;
             }
         }
@@ -1832,7 +1866,122 @@ void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(TextStyle &c
 
     // The indentation.
     for (std::size_t i = 0; i < depth; i++)
-        terminal.Print("%s", chars_indentation.c_str());
+        terminal.Print("{}", chars_indentation);
+}
+
+void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(Terminal::StyleGuard &cur_style, const RunSingleTestProgress &test, const BasicGenerator &generator, bool repeating_info)
+{
+    PrintContextLinePrefix(cur_style, *test.all_tests, state.per_test.per_repetition.printed_counter ? TestCounterStyle::none : TestCounterStyle::repeated);
+
+    int repetition_counters_width = std::snprintf(nullptr, 0, "%zu", state.per_test.repetition_counter + 1);
+    if (state.per_test.failed_repetition_counter > 0)
+    {
+        repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_prefix);
+        repetition_counters_width += std::snprintf(nullptr, 0, "%zu", state.per_test.failed_repetition_counter);
+        repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_suffix);
+    }
+
+    // Print the repetition counter, or nothing if already printed during this repetition.
+    if (!state.per_test.per_repetition.printed_counter)
+    {
+        // The actual repetition count.
+
+        state.per_test.per_repetition.printed_counter = true;
+
+        terminal.Print(cur_style, "{}{}",
+            style_repetition_total_count,
+            state.per_test.repetition_counter + 1
+        );
+
+        // Failed repetition count, if any.
+        if (state.per_test.failed_repetition_counter > 0)
+        {
+            terminal.Print(cur_style, "{}{}{}{}{}{}",
+                style_repetition_failed_count_decorations,
+                chars_failed_repetition_count_prefix,
+                style_repetition_failed_count,
+                state.per_test.failed_repetition_counter,
+                style_repetition_failed_count_decorations,
+                chars_failed_repetition_count_suffix
+            );
+        }
+    }
+    else
+    {
+        // Empty spacing.
+        terminal.Print("{:{}}", "", repetition_counters_width);
+    }
+
+    // The ending border after the repetition counter.
+    const std::string &repetition_border_string =
+        state.per_test.last_repetition_counters_width < 0 || repetition_counters_width <= state.per_test.last_repetition_counters_width
+        ? chars_repetition_counter_separator
+        : chars_repetition_counter_separator_diagonal;
+    terminal.Print(cur_style, "{}{}",
+        style_repetition_border,
+        repetition_border_string
+    );
+    state.per_test.last_repetition_counters_width = repetition_counters_width;
+
+    // Indentation.
+    std::size_t num_chars_removed_from_indentation = std::min(std::size_t(repetition_counters_width) + text::uni::CountFirstBytes(repetition_border_string), text::uni::CountFirstBytes(chars_indentation) * state.stack.size());
+    PrintContextLineIndentation(cur_style, state.stack.size() + test.generator_index, num_chars_removed_from_indentation);
+
+    const auto &st_gen = repeating_info ? style_generator_repeated : style_generator;
+
+    // The generator name and the value index.
+    terminal.Print(cur_style, "{}{}{}{}{}{}{}{}{}{}",
+        // The bullet point.
+        st_gen.prefix,
+        repeating_info ? chars_test_prefix_continuing : chars_test_prefix,
+        // Generator name.
+        st_gen.name,
+        generator.GetName(),
+        // Opening bracket.
+        st_gen.index_brackets,
+        chars_generator_index_prefix,
+        // The index.
+        st_gen.index,
+        generator.NumGeneratedValues(),
+        // Closing bracket.
+        st_gen.index_brackets,
+        chars_generator_index_suffix
+    );
+
+    // The value as a string.
+    if (generator.ValueSupportsToString())
+    {
+        // The equals sign.
+        terminal.Print(cur_style, "{}{}{}",
+            st_gen.value_separator,
+            chars_generator_value_separator,
+            st_gen.value
+        );
+
+        // The value itself.
+
+        std::string value = generator.ValueToString();
+        GeneratorValueShortener shortener(value, chars_generator_value_ellipsis, max_generator_value_prefix_length, max_generator_value_suffix_length);
+
+        if (shortener.is_short)
+        {
+            // The value is short enough to be printed completely.
+            terminal.Print("{}", value);
+        }
+        else
+        {
+            // The value is too long.
+            terminal.Print(cur_style, "{}{}{}{}{}",
+                shortener.long_prefix,
+                st_gen.value_ellipsis,
+                chars_generator_value_ellipsis,
+                st_gen.value,
+                shortener.long_suffix
+            );
+        }
+    }
+
+    terminal.Print("\n");
 }
 
 ta_test::modules::ProgressPrinter::ProgressPrinter()
@@ -1879,15 +2028,15 @@ void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
     {
         std::size_t num_skipped = data.num_tests_with_skipped - data.num_tests;
 
-        terminal.Print("%s%sSkipping %zu test%s, will run %zu/%zu test%s.%s\n",
-            terminal.AnsiResetString().data(),
-            terminal.AnsiDeltaString({}, style_skipped_tests).data(),
+        auto cur_style = terminal.MakeStyleGuard();
+
+        terminal.Print(cur_style, "{}Skipping {} test{}, will run {}/{} test{}.\n",
+            style_skipped_tests,
             num_skipped,
             num_skipped != 1 ? "s" : "",
             data.num_tests,
             data.num_tests_with_skipped,
-            data.num_tests != 1 ? "s" : "",
-            terminal.AnsiResetString().data()
+            data.num_tests != 1 ? "s" : ""
         );
     }
 }
@@ -1896,11 +2045,10 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
 {
     if (!data.failed_tests.empty())
     {
-        TextStyle cur_style;
-        terminal.Print("%s\n%s%s\n\n",
-            terminal.AnsiResetString().data(),
-            terminal.AnsiDeltaString(cur_style, common_data.style_error).data(),
-            chars_summary_tests_failed.c_str()
+        auto cur_style = terminal.MakeStyleGuard();
+        terminal.Print(cur_style, "\n{}{}\n\n",
+            common_data.style_error,
+            chars_summary_tests_failed
         );
 
         std::size_t max_test_name_width = 0;
@@ -1935,41 +2083,37 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
                 if (!stack.empty())
                 {
                     // Switch to the indentation guide color.
-                    terminal.Print("%s", terminal.AnsiDeltaString(cur_style, style_indentation_guide).data());
+                    terminal.Print("{}", terminal.AnsiDeltaString(cur_style, style_indentation_guide).data());
                     // Print the required number of guides.
                     for (std::size_t repeat = 0; repeat < stack.size(); repeat++)
-                        terminal.Print("%s", chars_indentation.c_str());
+                        terminal.Print("{}", chars_indentation);
                 }
 
                 std::size_t gap_to_separator = max_test_name_width - (stack.size() * indentation_width + prefix_width + (is_last_segment ? 0 : 1/*for the slash*/) + segment.size());
 
                 // Print the test name.
-                auto st_name = terminal.AnsiDeltaString(cur_style, is_last_segment ? style_summary_failed_name : style_summary_failed_group_name);
-                auto st_separator = terminal.AnsiDeltaString(cur_style, style_summary_path_separator);
-                terminal.Print("%s%s%.*s%s%*s%s%s",
-                    st_name.data(),
-                    chars_test_prefix.c_str(),
-                    int(segment.size()), segment.data(),
+                terminal.Print(cur_style, "{}{}{}{}{:{}}{}{}",
+                    is_last_segment ? style_summary_failed_name : style_summary_failed_group_name,
+                    chars_test_prefix,
+                    segment,
                     is_last_segment ? "" : "/",
-                    int(gap_to_separator), "",
-                    st_separator.data(),
-                    chars_summary_path_separator.c_str()
+                    "", int(gap_to_separator),
+                    style_summary_path_separator,
+                    chars_summary_path_separator
                 );
 
                 // Print the file path for the last segment.
                 if (is_last_segment)
                 {
-                    terminal.Print("%s%s",
-                        terminal.AnsiDeltaString(cur_style, style_summary_path).data(),
-                        common_data.LocationToString(test->Location()).data()
+                    terminal.Print(cur_style, "{}{}",
+                        style_summary_path,
+                        common_data.LocationToString(test->Location())
                     );
                 }
 
                 terminal.Print("\n");
             });
         }
-
-        terminal.Print("%s", terminal.AnsiResetString().data());
     }
 
     state = {};
@@ -1982,43 +2126,51 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestIn
     else
         state.per_test.per_repetition = {};
 
+    state.per_test.per_repetition.prev_failed = !state.failed_test_stack.empty();
+
+    auto cur_style = terminal.MakeStyleGuard();
+
     { // Print the message when first starting tests, or when resuming from a failure.
         bool is_first_test_first_repetition = state.test_counter == 0 && state.per_test.repetition_counter == 0;
 
-        if (is_first_test_first_repetition || !state.failed_test_stack.empty())
+        if (is_first_test_first_repetition || state.per_test.per_repetition.prev_failed)
         {
-            terminal.Print("%s\n%s%s%s\n",
-                terminal.AnsiResetString().data(),
-                terminal.AnsiDeltaString({}, style_starting_or_continuing_tests).data(),
-                (is_first_test_first_repetition ? chars_starting_tests : chars_continuing_tests).c_str(),
-                terminal.AnsiResetString().data()
+            terminal.Print(cur_style, "\n{}{}\n",
+                is_first_test_first_repetition ? style_starting_tests : style_continuing_tests,
+                is_first_test_first_repetition ? chars_starting_tests : chars_continuing_tests
             );
         }
     }
 
+    // Print the current test name (and groups, if any).
     ProduceTree(state.stack, data.test->Name(), [&](std::size_t segment_index, std::string_view segment, bool is_last_segment)
     {
-        TextStyle cur_style;
-
-        PrintContextLinePrefix(cur_style, *data.all_tests, is_last_segment ? TestCounterStyle::normal : TestCounterStyle::none);
-        PrintContextLineIndentation(cur_style, state.stack.size(), 0);
 
         // Whether we're reentering this group after a failed test.
         bool is_continued = segment_index < state.failed_test_stack.size() && state.failed_test_stack[segment_index] == segment;
 
+        PrintContextLinePrefix(cur_style, *data.all_tests,
+            !is_last_segment ? TestCounterStyle::none :
+            is_continued     ? TestCounterStyle::repeated :
+                               TestCounterStyle::normal
+        );
+        PrintContextLineIndentation(cur_style, state.stack.size(), 0);
+
         // Print the test name.
-        terminal.Print("%s%s%.*s%s%s\n",
-            terminal.AnsiDeltaString(cur_style, is_continued ? style_continuing_group : is_last_segment ? style_name : style_group_name).data(),
-            is_continued ? chars_test_prefix_continuing.c_str() : chars_test_prefix.c_str(),
-            int(segment.size()), segment.data(),
-            is_last_segment ? "" : "/",
-            terminal.AnsiResetString().data()
+        terminal.Print(cur_style, "{}{}{}{}{}\n",
+            is_continued ? style_prefix_continuing : style_prefix,
+            is_continued ? chars_test_prefix_continuing : chars_test_prefix,
+            is_continued ? style_continuing_group : is_last_segment ? style_name : style_group_name,
+            segment,
+            is_last_segment ? "" : "/"
         );
     });
 }
 
 void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestResults &data)
 {
+    auto cur_style = terminal.MakeStyleGuard();
+
     // Print the ending separator.
     if (data.failed)
     {
@@ -2028,11 +2180,9 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
             separator += chars_test_failed_ending_separator;
 
         // The test failure message, and a separator after that.
-        terminal.Print("%s%s%s%s\n",
-            terminal.AnsiResetString().data(),
-            terminal.AnsiDeltaString({}, style_test_failed_ending_separator).data(),
-            separator.c_str(),
-            terminal.AnsiResetString().data()
+        terminal.Print(cur_style, "{}{}\n",
+            style_test_failed_ending_separator,
+            separator
         );
     }
 
@@ -2068,133 +2218,15 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
 
 void ta_test::modules::ProgressPrinter::OnPostGenerate(const GeneratorCallInfo &data)
 {
-    TextStyle cur_style;
-
-    PrintContextLinePrefix(cur_style, *data.test->all_tests, state.per_test.per_repetition.printed_counter ? TestCounterStyle::none : TestCounterStyle::repeated);
-
-    int repetition_counters_width = std::snprintf(nullptr, 0, "%zu", state.per_test.repetition_counter + 1);
-    if (state.per_test.failed_repetition_counter > 0)
-    {
-        repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_prefix);
-        repetition_counters_width += std::snprintf(nullptr, 0, "%zu", state.per_test.failed_repetition_counter);
-        repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_suffix);
-    }
-
-    // Print the repetition counter, or nothing if already printed during this repetition.
-    if (!state.per_test.per_repetition.printed_counter)
-    {
-        // The actual repetition count.
-
-        state.per_test.per_repetition.printed_counter = true;
-
-        terminal.Print("%s%zu",
-            terminal.AnsiDeltaString(cur_style, style_repetition_total_count).data(),
-            state.per_test.repetition_counter + 1
-        );
-
-        // Failed repetition count, if any.
-        if (state.per_test.failed_repetition_counter > 0)
-        {
-            terminal.Print("%s%s%s%zu%s%s",
-                terminal.AnsiDeltaString(cur_style, style_repetition_failed_count_decorations).data(),
-                chars_failed_repetition_count_prefix.data(),
-                terminal.AnsiDeltaString(cur_style, style_repetition_failed_count).data(),
-                state.per_test.failed_repetition_counter,
-                terminal.AnsiDeltaString(cur_style, style_repetition_failed_count_decorations).data(),
-                chars_failed_repetition_count_suffix.data()
-            );
-        }
-    }
-    else
-    {
-        // Empty spacing.
-        terminal.Print("%*s", repetition_counters_width, "");
-    }
-
-    // The ending border after the repetition counter.
-    const std::string &repetition_border_string =
-        state.per_test.last_repetition_counters_width < 0 || repetition_counters_width <= state.per_test.last_repetition_counters_width
-        ? chars_repetition_counter_separator
-        : chars_repetition_counter_separator_diagonal;
-    terminal.Print("%s%s",
-        terminal.AnsiDeltaString(cur_style, style_repetition_border).data(),
-        repetition_border_string.c_str()
-    );
-    state.per_test.last_repetition_counters_width = repetition_counters_width;
-
-    // Indentation.
-    std::size_t num_chars_removed_from_indentation = std::min(std::size_t(repetition_counters_width) + text::uni::CountFirstBytes(repetition_border_string), text::uni::CountFirstBytes(chars_indentation) * state.stack.size());
-    PrintContextLineIndentation(cur_style, state.stack.size() + data.test->generator_index, num_chars_removed_from_indentation);
-
-    // The generator name and the value index.
-    terminal.Print("%s%s%s%.*s%s%s%s%d%s%s",
-        // The bullet point.
-        terminal.AnsiDeltaString(cur_style, style_generator_prefix).data(),
-        chars_test_prefix.c_str(),
-        // Generator name.
-        terminal.AnsiDeltaString(cur_style, style_generator_name).data(),
-        int(data.generator->GetName().size()), data.generator->GetName().data(),
-        // Opening bracket.
-        terminal.AnsiDeltaString(cur_style, style_generator_index_brackets).data(),
-        chars_generator_index_prefix.c_str(),
-        // The index.
-        terminal.AnsiDeltaString(cur_style, style_generator_index).data(),
-        data.generator->NumGeneratedValues(),
-        // Closing bracket.
-        terminal.AnsiDeltaString(cur_style, style_generator_index_brackets).data(),
-        chars_generator_index_suffix.c_str()
-    );
-
-    // The value as a string.
-    if (data.generator->ValueSupportsToString())
-    {
-        // The equals sign.
-        terminal.Print("%s%s%s",
-            terminal.AnsiDeltaString(cur_style, style_generator_value_separator).data(),
-            chars_generator_value_separator.c_str(),
-            terminal.AnsiDeltaString(cur_style, style_generator_value).data()
-        );
-
-        // The value itself.
-
-        std::string value = data.generator->ValueToString();
-        GeneratorValueShortener shortener(value, chars_generator_value_ellipsis, max_generator_value_prefix_length, max_generator_value_suffix_length);
-
-        if (shortener.is_short)
-        {
-            // The value is short enough to be printed completely.
-            terminal.Print("%s", value.c_str());
-        }
-        else
-        {
-            // The value is too long.
-            terminal.Print("%.*s%s%s%s%.*s",
-                int(shortener.long_prefix.size()), shortener.long_prefix.data(),
-                terminal.AnsiDeltaString(cur_style, style_generator_value_ellipsis).data(),
-                chars_generator_value_ellipsis.c_str(),
-                terminal.AnsiDeltaString(cur_style, style_generator_value).data(),
-                int(shortener.long_suffix.size()), shortener.long_suffix.data()
-            );
-        }
-    }
-
-    terminal.Print("%s\n",
-        terminal.AnsiResetString().data()
-    );
+    auto cur_style = terminal.MakeStyleGuard();
+    if (data.geneating_new_value || state.per_test.per_repetition.prev_failed)
+        PrintGeneratorInfo(cur_style, *data.test, *data.generator, !data.geneating_new_value);
 }
 
 void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgress &data)
 {
     // Avoid printing the diagnoal separator on the next progress line. It's unnecessary after a bulky failure message.
     state.per_test.last_repetition_counters_width = -1;
-
-    TextStyle cur_style;
-
-    auto st_path = terminal.AnsiDeltaString(cur_style, common_data.style_path);
-    auto st_message = terminal.AnsiDeltaString(cur_style, common_data.style_error);
-    auto st_group = terminal.AnsiDeltaString(cur_style, style_failed_group_name);
-    auto st_name = terminal.AnsiDeltaString(cur_style, style_failed_name);
-    auto st_separator = terminal.AnsiDeltaString(cur_style, style_test_failed_separator);
 
     std::string_view group;
     std::string_view name = data.test->Name();
@@ -2211,20 +2243,20 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
     for (std::size_t i = 0; i + separator_segment_width - 1 < separator_needed_width; i += separator_segment_width)
         separator += chars_test_failed_separator;
 
+    auto cur_style = terminal.MakeStyleGuard();
+
     // The test failure message, and a separator after that.
-    terminal.Print("\n%s%s%s:\n%s%s%s%.*s%s%.*s %s%s%s\n\n",
-        terminal.AnsiResetString().data(),
-        st_path.data(),
-        common_data.LocationToString(data.test->Location()).c_str(),
-        st_message.data(),
-        chars_test_failed.c_str(),
-        st_group.data(),
-        int(group.size()), group.data(),
-        st_name.data(),
-        int(name.size()), name.data(),
-        st_separator.data(),
-        separator.c_str(),
-        terminal.AnsiResetString().data()
+    terminal.Print(cur_style, "\n{}{}:\n{}{}{}{}{}{} {}{}\n\n",
+        common_data.style_path,
+        common_data.LocationToString(data.test->Location()),
+        common_data.style_error,
+        chars_test_failed,
+        style_failed_group_name,
+        group,
+        style_failed_name,
+        name,
+        style_test_failed_separator,
+        separator
     );
 }
 
@@ -2232,8 +2264,9 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
 
 void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &data)
 {
-    // Reset color.
-    terminal.Print("%s\n", terminal.AnsiResetString().data());
+    auto cur_style = terminal.MakeStyleGuard();
+
+    terminal.Print("\n");
 
     std::size_t num_passed = data.num_tests - data.failed_tests.size();
     std::size_t num_skipped = data.num_tests_with_skipped - data.num_tests;
@@ -2241,32 +2274,29 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
     // The number of skipped tests.
     if (num_skipped > 0 && data.num_tests > 0)
     {
-        terminal.Print("%s%zu test%s skipped%s\n",
-            terminal.AnsiDeltaString({}, style_num_skipped).data(),
+        terminal.Print(cur_style, "{}{} test{} skipped\n",
+            style_num_skipped,
             num_skipped,
-            num_skipped != 1 ? "s" : "",
-            terminal.AnsiResetString().data()
+            num_skipped != 1 ? "s" : ""
         );
     }
 
     if (data.num_tests == 0)
     {
         // No tests to run.
-        terminal.Print("%sNO TESTS TO RUN%s\n",
-            terminal.AnsiDeltaString({}, style_no_tests).data(),
-            terminal.AnsiResetString().data()
+        terminal.Print(cur_style, "{}NO TESTS TO RUN\n",
+            style_no_tests
         );
     }
     else if (data.failed_tests.size() == 0)
     {
         // All passed.
 
-        terminal.Print("%s%s%zu TEST%s PASSED%s\n",
-            terminal.AnsiDeltaString({}, style_all_passed).data(),
+        terminal.Print(cur_style, "{}{}{} TEST{} PASSED\n",
+            style_all_passed,
             num_passed > 1 ? "ALL " : "",
             num_passed,
-            num_passed != 1 ? "S" : "",
-            terminal.AnsiResetString().data()
+            num_passed != 1 ? "S" : ""
         );
     }
     else
@@ -2276,21 +2306,19 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
         // Passed tests, if any.
         if (num_passed > 0)
         {
-            terminal.Print("%s%zu test%s passed%s\n",
-                terminal.AnsiDeltaString({}, style_num_passed).data(),
+            terminal.Print(cur_style, "{}{} test{} passed\n",
+                style_num_passed,
                 num_passed,
-                num_passed != 1 ? "s" : "",
-                terminal.AnsiResetString().data()
+                num_passed != 1 ? "s" : ""
             );
         }
 
         // Failed tests.
-        terminal.Print("%s%s%zu TEST%s FAILED%s\n",
-            terminal.AnsiDeltaString({}, style_num_failed).data(),
+        terminal.Print(cur_style, "{}{}{} TEST{} FAILED\n",
+            style_num_failed,
             num_passed == 0 && data.failed_tests.size() > 1 ? "ALL " : "",
             data.failed_tests.size(),
-            data.failed_tests.size() == 1 ? "" : "S",
-            terminal.AnsiResetString().data()
+            data.failed_tests.size() == 1 ? "" : "S"
         );
     }
 }
@@ -2299,23 +2327,24 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 
 void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data)
 {
-    text::PrintLog();
-    PrintAssertionFrameLow(data, true);
-    text::PrintContext(&data);
+    auto cur_style = terminal.MakeStyleGuard();
+    text::PrintLog(cur_style);
+    PrintAssertionFrameLow(cur_style, data, true);
+    text::PrintContext(cur_style, &data);
 }
 
-bool ta_test::modules::AssertionPrinter::PrintContextFrame(const context::BasicFrame &frame)
+bool ta_test::modules::AssertionPrinter::PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
 {
     if (auto assertion_frame = dynamic_cast<const BasicAssertionInfo *>(&frame))
     {
-        PrintAssertionFrameLow(*assertion_frame, false);
+        PrintAssertionFrameLow(cur_style, *assertion_frame, false);
         return true;
     }
 
     return false;
 }
 
-void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAssertionInfo &data, bool is_most_nested) const
+void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(Terminal::StyleGuard &cur_style, const BasicAssertionInfo &data, bool is_most_nested) const
 {
     text::TextCanvas canvas(&common_data);
     std::size_t line_counter = 0;
@@ -2516,7 +2545,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(const BasicAsser
     }
 
     canvas.InsertLineBefore(canvas.NumLines());
-    canvas.Print(terminal);
+    canvas.Print(terminal, cur_style);
 }
 
 // --- modules::LogPrinter
@@ -2534,7 +2563,7 @@ void ta_test::modules::LogPrinter::OnPostRunSingleTest(const RunSingleTestResult
     unscoped_log_pos = 0;
 }
 
-bool ta_test::modules::LogPrinter::PrintLogEntries(std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log)
+bool ta_test::modules::LogPrinter::PrintLogEntries(Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log)
 {
     if (unscoped_log_pos > unscoped_log.size())
         HardError("Less entires in the unscoped log than expected.");
@@ -2564,13 +2593,13 @@ bool ta_test::modules::LogPrinter::PrintLogEntries(std::span<const context::LogE
                 scoped_log = scoped_log.last(scoped_log.size() - 1);
 
             // We reset the style every time in case the `Message()` is lazy and ends up throwing.
-            terminal.Print("%s%s%s%*s%s\n",
-                terminal.AnsiResetString().data(),
-                terminal.AnsiDeltaString({}, style_message).data(),
-                chars_message_prefix.c_str(),
-                int(message.size()), message.data(),
-                terminal.AnsiResetString().data()
+            cur_style.ResetStyle();
+            terminal.Print(cur_style, "{}{}{}\n",
+                style_message,
+                chars_message_prefix,
+                message
             );
+            cur_style.ResetStyle();
         }
         while (!unscoped_log.empty() || !scoped_log.empty());
 
@@ -2587,19 +2616,19 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
     (void)test;
     (void)assertion;
 
-    text::PrintLog();
+    auto cur_style = terminal.MakeStyleGuard();
 
-    terminal.Print("%s%s%s%s\n",
-        terminal.AnsiResetString().data(),
-        terminal.AnsiDeltaString({}, common_data.style_error).data(),
-        chars_error.c_str(),
-        terminal.AnsiResetString().data()
+    text::PrintLog(cur_style);
+
+    terminal.Print(cur_style, "{}{}\n",
+        common_data.style_error,
+        chars_error
     );
 
-    PrintException(terminal, e);
+    PrintException(terminal, cur_style, e);
     terminal.Print("\n");
 
-    text::PrintContext();
+    text::PrintContext(cur_style);
 }
 
 // --- modules::MustThrowPrinter ---
@@ -2607,21 +2636,24 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data, bool &should_break)
 {
     (void)should_break;
-    text::PrintLog();
-    PrintFrame(*data.static_info, data.dynamic_info, nullptr, true);
-    text::PrintContext(&data);
+
+    auto cur_style = terminal.MakeStyleGuard();
+
+    text::PrintLog(cur_style);
+    PrintFrame(cur_style, *data.static_info, data.dynamic_info, nullptr, true);
+    text::PrintContext(cur_style, &data);
 }
 
-bool ta_test::modules::MustThrowPrinter::PrintContextFrame(const context::BasicFrame &frame)
+bool ta_test::modules::MustThrowPrinter::PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
 {
     if (auto ptr = dynamic_cast<const BasicModule::MustThrowInfo *>(&frame))
     {
-        PrintFrame(*ptr->static_info, ptr->dynamic_info, nullptr, false);
+        PrintFrame(cur_style, *ptr->static_info, ptr->dynamic_info, nullptr, false);
         return true;
     }
     if (auto ptr = dynamic_cast<const BasicModule::CaughtExceptionInfo *>(&frame))
     {
-        PrintFrame(*ptr->static_info, ptr->dynamic_info.lock().get(), ptr, false);
+        PrintFrame(cur_style, *ptr->static_info, ptr->dynamic_info.lock().get(), ptr, false);
         return true;
     }
 
@@ -2629,6 +2661,7 @@ bool ta_test::modules::MustThrowPrinter::PrintContextFrame(const context::BasicF
 }
 
 void ta_test::modules::MustThrowPrinter::PrintFrame(
+    Terminal::StyleGuard &cur_style,
     const BasicModule::MustThrowStaticInfo &static_info,
     const BasicModule::MustThrowDynamicInfo *dynamic_info,
     const BasicModule::CaughtExceptionInfo *caught,
@@ -2639,13 +2672,12 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
     if (caught)
     {
         error_message = &chars_throw_location;
-        terminal.Print("%s%s%s%s\n",
-            terminal.AnsiResetString().data(),
-            terminal.AnsiDeltaString({}, common_data.style_stack_frame).data(),
-            chars_exception_contents.c_str(),
-            terminal.AnsiResetString().data()
+
+        terminal.Print(cur_style, "{}{}\n",
+            common_data.style_stack_frame,
+            chars_exception_contents
         );
-        PrintException(terminal, caught->elems.empty() ? nullptr : caught->elems.front().exception);
+        PrintException(terminal, cur_style, caught->elems.empty() ? nullptr : caught->elems.front().exception);
         terminal.Print("\n");
     }
     else if (is_most_nested)
@@ -2657,31 +2689,23 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
         error_message = &chars_while_expecting_exception;
     }
 
-    TextStyle cur_style;
-
-    auto st_path = terminal.AnsiDeltaString(cur_style, common_data.style_path);
-    auto st_error_message = terminal.AnsiDeltaString(cur_style, is_most_nested && !caught ? common_data.style_error : common_data.style_stack_frame);
-
-    terminal.Print("%s%s%s:\n%s%s",
-        terminal.AnsiResetString().data(),
-        st_path.data(),
-        common_data.LocationToString(static_info.loc).c_str(),
-        st_error_message.data(),
-        error_message->c_str()
+    terminal.Print(cur_style, "{}{}:\n{}{}",
+        common_data.style_path,
+        common_data.LocationToString(static_info.loc),
+        is_most_nested && !caught ? common_data.style_error : common_data.style_stack_frame,
+        *error_message
     );
     if (dynamic_info)
     {
         if (auto message = dynamic_info->GetUserMessage())
         {
-            terminal.Print(" %s%*s",
-                terminal.AnsiDeltaString(cur_style, common_data.style_user_message).data(),
-                int(message->size()), message->data()
+            terminal.Print(cur_style, " {}{}",
+                common_data.style_user_message,
+                *message
             );
         }
     }
-    terminal.Print("%s\n\n",
-        terminal.AnsiResetString().data()
-    );
+    terminal.Print("\n\n");
 
     text::TextCanvas canvas(&common_data);
     std::size_t column = common_data.code_indentation;
@@ -2692,12 +2716,12 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
     column += common_data.spaces_in_macro_call_parentheses;
     column += canvas.DrawString(0, column, ")", {.style = common_data.style_failed_macro, .important = true});
     canvas.InsertLineBefore(canvas.NumLines());
-    canvas.Print(terminal);
+    canvas.Print(terminal, cur_style);
 }
 
 // --- modules::TracePrinter ---
 
-bool ta_test::modules::TracePrinter::PrintContextFrame(const context::BasicFrame &frame)
+bool ta_test::modules::TracePrinter::PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
 {
     if (auto ptr = dynamic_cast<const BasicTrace *>(&frame))
     {
@@ -2754,7 +2778,7 @@ bool ta_test::modules::TracePrinter::PrintContextFrame(const context::BasicFrame
         text::expr::DrawToCanvas(canvas, 1, column, expr);
 
         canvas.InsertLineBefore(canvas.NumLines());
-        canvas.Print(terminal);
+        canvas.Print(terminal, cur_style);
 
         return true;
     }
@@ -2848,15 +2872,17 @@ void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const RunTestsInfo &d
 {
     data.modules->FindModule<DebuggerDetector>([this](DebuggerDetector &detector)
     {
+        auto cur_style = terminal.MakeStyleGuard();
+
         if (detector.break_on_failure && *detector.break_on_failure)
-            PrintNote("Will break on failure.");
+            PrintNote(cur_style, "Will break on failure.");
         else if (!detector.break_on_failure && detector.IsDebuggerAttached())
-            PrintNote("Will break on failure (because a debugger is attached, `--catch` to override).");
+            PrintNote(cur_style, "Will break on failure (because a debugger is attached, `--catch` to override).");
 
         if (detector.catch_exceptions && !*detector.catch_exceptions)
-            PrintNote("Will not catch exceptions.");
+            PrintNote(cur_style, "Will not catch exceptions.");
         else if (!detector.catch_exceptions && detector.IsDebuggerAttached())
-            PrintNote("Will not catch exceptions (because a debugger is attached, `--no-break` to override).");
+            PrintNote(cur_style, "Will not catch exceptions (because a debugger is attached, `--no-break` to override).");
         return true;
     });
 }
