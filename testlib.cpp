@@ -43,7 +43,11 @@ void ta_test::HardError(std::string_view message, HardErrorKind kind)
     if (!once)
         std::terminate(); // We've already been there.
 
-    std::fprintf(stderr, "ta_test: %s: %.*s\n", kind == HardErrorKind::internal ? "Internal error" : "Error", int(message.size()), message.data());
+    std::fprintf(stderr, "%sta_test: %s: %.*s\n",
+        Terminal(stderr).AnsiResetString().data(),
+        kind == HardErrorKind::internal ? "Internal error" : "Error",
+        int(message.size()), message.data()
+    );
 
     // Stop.
     // Don't need to check whether the debugger is attached, a crash is fine.
@@ -183,27 +187,29 @@ bool ta_test::platform::IsDebuggerAttached()
     #endif
 }
 
-bool ta_test::platform::IsTerminalAttached()
+bool ta_test::platform::IsTerminalAttached(bool stderr)
 {
     // We cache the return value.
-    static bool ret = []{
-        #if defined(_WIN32)
-        return GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
-        #elif defined(DETAIL_TA_USE_ISATTY)
-        return isatty(STDOUT_FILENO) == 1;
-        #else
-        return false;
-        #endif
-    }();
-    return ret;
+    auto lambda = []<bool IsStderr>
+    {
+        static bool ret = []{
+            #if defined(_WIN32)
+            return GetFileType(GetStdHandle(IsStderr ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
+            #elif defined(DETAIL_TA_USE_ISATTY)
+            return isatty(IsStderr ? STDERR_FILENO : STDOUT_FILENO) == 1;
+            #else
+            return false;
+            #endif
+        }();
+        return ret;
+    };
+    if (stderr)
+        return lambda.operator()<true>();
+    else
+        return lambda.operator()<false>();
 }
 
-ta_test::Terminal::Terminal()
-{
-    SetFileOutput(stdout);
-}
-
-void ta_test::Terminal::SetFileOutput(FILE *stream)
+ta_test::Terminal::Terminal(FILE *stream)
 {
     output_func = [stream
     #if CFG_TA_FMT_HAS_FILE_PRINT == 0 && defined(_WIN32)
@@ -239,6 +245,10 @@ void ta_test::Terminal::SetFileOutput(FILE *stream)
         #error Invalid value of `CFG_TA_FMT_HAS_FILE_PRINT`.
         #endif
     };
+
+    enable_color =
+        stream == stdout ? platform::IsTerminalAttached(false) :
+        stream == stderr ? platform::IsTerminalAttached(true) : false;
 }
 
 void ta_test::Terminal::PrintLow(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) const
@@ -876,6 +886,18 @@ void ta_test::text::PrintLog(Terminal::StyleGuard &cur_style)
     }
 }
 
+void ta_test::BasicPrintingModule::PrintWarning(Terminal::StyleGuard &cur_style, std::string_view text) const
+{
+    // Resetting the style before and after just in case.
+    cur_style.ResetStyle();
+    terminal.Print(cur_style, "{}{}{}\n",
+        common_data.style_warning,
+        common_data.warning_prefix,
+        text
+    );
+    cur_style.ResetStyle();
+}
+
 void ta_test::BasicPrintingModule::PrintNote(Terminal::StyleGuard &cur_style, std::string_view text) const
 {
     // Resetting the style before and after just in case.
@@ -1494,6 +1516,23 @@ int ta_test::Runner::Run()
 
             guard.state.is_last_generator_repetition = std::all_of(guard.state.generator_stack.begin(), guard.state.generator_stack.end(), [](const auto &g){return g->IsLastValue();});
 
+            // Check for non-deterministic use of generators.
+            // This is one of the two determinism checks, the second one is in generator's `Generate()` to make sure we're not visiting generators out of order.
+            if (!guard.state.failed && guard.state.generator_index < guard.state.generator_stack.size())
+            {
+                // We only emit a hard error if the test didn't fail.
+                // If it did fail, we print a non-determinism warning elsewhere.
+
+                const auto &loc = guard.state.generator_stack[guard.state.generator_index]->GetLocation();
+
+                HardError(CFG_TA_FMT_NAMESPACE::format(
+                    "Invalid non-deterministic use of generators. "
+                    "Was expecting to reach the generator at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`, "
+                    "but instead reached the end of the test.",
+                    loc.file, loc.line
+                ), HardErrorKind::user);
+            }
+
             module_lists.Call<&BasicModule::OnPostRunSingleTest>(guard.state);
 
             if (guard.state.should_break)
@@ -1503,6 +1542,9 @@ int ta_test::Runner::Run()
             // We do this after `OnPostRunSingleTest` in case the modules want to observe the stack before pruning. Not sure how useful this is.
             [&]() noexcept
             {
+                // Remove unvisited generators. Note that we show a warning/error for this condition above.
+                guard.state.generator_stack.resize(guard.state.generator_index);
+
                 while (!guard.state.generator_stack.empty() && guard.state.generator_stack.back()->IsLastValue())
                     guard.state.generator_stack.pop_back();
             }();
@@ -1817,10 +1859,10 @@ void ta_test::modules::ProgressPrinter::PrintContextLinePrefix(Terminal::StyleGu
     {
         // No test index, just a gap.
 
-        int gap_width = state.num_tests_width * 2 + 1;
+        std::size_t gap_width = state.num_tests_width * 2 + 1;
 
         if (all_tests.failed_tests.size() > 0)
-            gap_width += std::snprintf(nullptr, 0, "%zu", all_tests.failed_tests.size()) + 3;
+            gap_width += CFG_TA_FMT_NAMESPACE::formatted_size("{}", all_tests.failed_tests.size()) + 3;
 
         terminal.Print("{:{}}", "", gap_width);
     }
@@ -1873,11 +1915,11 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(Terminal::StyleGuard 
 {
     PrintContextLinePrefix(cur_style, *test.all_tests, state.per_test.per_repetition.printed_counter ? TestCounterStyle::none : TestCounterStyle::repeated);
 
-    int repetition_counters_width = std::snprintf(nullptr, 0, "%zu", state.per_test.repetition_counter + 1);
-    if (state.per_test.failed_repetition_counter > 0)
+    std::size_t repetition_counters_width = CFG_TA_FMT_NAMESPACE::formatted_size("{}", state.per_test.repetition_counter + 1);
+    if (state.per_test.failed_generator_stacks.size() > 0)
     {
         repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_prefix);
-        repetition_counters_width += std::snprintf(nullptr, 0, "%zu", state.per_test.failed_repetition_counter);
+        repetition_counters_width += CFG_TA_FMT_NAMESPACE::formatted_size("{}", state.per_test.failed_generator_stacks.size());
         repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_suffix);
     }
 
@@ -1894,13 +1936,13 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(Terminal::StyleGuard 
         );
 
         // Failed repetition count, if any.
-        if (state.per_test.failed_repetition_counter > 0)
+        if (!state.per_test.failed_generator_stacks.empty())
         {
             terminal.Print(cur_style, "{}{}{}{}{}{}",
                 style_repetition_failed_count_decorations,
                 chars_failed_repetition_count_prefix,
                 style_repetition_failed_count,
-                state.per_test.failed_repetition_counter,
+                state.per_test.failed_generator_stacks.size(),
                 style_repetition_failed_count_decorations,
                 chars_failed_repetition_count_suffix
             );
@@ -1914,7 +1956,7 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(Terminal::StyleGuard 
 
     // The ending border after the repetition counter.
     const std::string &repetition_border_string =
-        state.per_test.last_repetition_counters_width < 0 || repetition_counters_width <= state.per_test.last_repetition_counters_width
+        repetition_counters_width <= state.per_test.last_repetition_counters_width
         ? chars_repetition_counter_separator
         : chars_repetition_counter_separator_diagonal;
     terminal.Print(cur_style, "{}{}",
@@ -2021,7 +2063,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
 {
     state = {};
 
-    state.num_tests_width = std::snprintf(nullptr, 0, "%zu", data.num_tests);
+    state.num_tests_width = CFG_TA_FMT_NAMESPACE::formatted_size("{}", data.num_tests);
 
     // Print a message when some tests are skipped.
     if (data.num_tests < data.num_tests_with_skipped)
@@ -2121,19 +2163,26 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
 
 void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data)
 {
+    // Reset the state.
     if (data.is_first_generator_repetition)
+    {
+        bool prev_test_failed = state.per_test.prev_failed;
         state.per_test = {};
+        state.per_test.prev_failed = prev_test_failed;
+    }
     else
+    {
         state.per_test.per_repetition = {};
+    }
 
-    state.per_test.per_repetition.prev_failed = !state.failed_test_stack.empty();
+    state.per_test.per_repetition.prev_rep_failed = !state.failed_test_stack.empty();
 
     auto cur_style = terminal.MakeStyleGuard();
 
     { // Print the message when first starting tests, or when resuming from a failure.
         bool is_first_test_first_repetition = state.test_counter == 0 && state.per_test.repetition_counter == 0;
 
-        if (is_first_test_first_repetition || state.per_test.per_repetition.prev_failed)
+        if (is_first_test_first_repetition || state.per_test.prev_failed || state.per_test.per_repetition.prev_rep_failed)
         {
             terminal.Print(cur_style, "\n{}{}\n",
                 is_first_test_first_repetition ? style_starting_tests : style_continuing_tests,
@@ -2199,19 +2248,127 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
 
     state.per_test.repetition_counter++;
     if (data.failed)
-        state.per_test.failed_repetition_counter++;
+    {
+        // Remember the failed generator stack.
+        std::vector<State::PerTest::FailedGenerator> failed_generator_stack;
+        failed_generator_stack.reserve(data.generator_stack.size());
+        for (const auto &gen : data.generator_stack)
+        {
+            failed_generator_stack.push_back({
+                .name = std::string(gen->GetName()),
+                .index = gen->NumGeneratedValues(),
+                .value = gen->ValueSupportsToString() ? std::optional(gen->ValueToString()) : std::nullopt,
+                .location = gen->GetLocation(),
+            });
+        }
+        state.per_test.failed_generator_stacks.push_back(std::move(failed_generator_stack));
+    }
+
+    // Print failed repetitions summary.
+    // Note the weird `!<..>.front().empty()` check. This avoid the message when there was only one repetition without any generators visited.
+    if (data.is_last_generator_repetition && !state.per_test.failed_generator_stacks.empty() && !state.per_test.failed_generator_stacks.front().empty())
+    {
+        std::string_view test_group;
+        std::string_view test_name = data.test->Name();
+        auto sep = test_name.find_last_of('/');
+        if (sep != std::string_view::npos)
+        {
+            test_group = test_name.substr(0, sep + 1);
+            test_name = test_name.substr(sep + 1);
+        }
+
+        // Intentionally always using plural "VARIANTS" here, because seeing "1/N VARIANT" is confusing, because it looks kinda like "first variant".
+        terminal.Print(cur_style, "\n{}IN TEST {}{}{}{}{}, {}{}{}/{}{} VARIANTS FAILED:\n\n",
+            common_data.style_error,
+            style_failed_group_name,
+            test_group,
+            style_failed_name,
+            test_name,
+            common_data.style_error,
+            style_repetitions_summary_failed_count,
+            state.per_test.failed_generator_stacks.size(),
+            style_repetitions_summary_total_count,
+            state.per_test.repetition_counter,
+            common_data.style_error
+        );
+
+        std::vector<const State::PerTest::FailedGenerator *> cur_stack;
+
+        for (const auto &failed_stack : state.per_test.failed_generator_stacks)
+        {
+            for (std::size_t i = 0; i < failed_stack.size(); i++)
+            {
+                const auto &elem = failed_stack[i];
+
+                if (i < cur_stack.size() && *cur_stack[i] == elem)
+                    continue;
+                cur_stack.resize(i);
+                cur_stack.push_back(&elem);
+
+                // Indent.
+                for (std::size_t j = 0; j < i; j++)
+                    terminal.Print(cur_style, "{}{}", style_indentation_guide, chars_indentation);
+
+                // Generator name and index.
+                terminal.Print(cur_style, "{}{}{}{}{}{}{}{}{}{}",
+                    style_generator_failed.prefix,
+                    chars_test_prefix,
+                    style_generator_failed.name,
+                    elem.name,
+                    style_generator_failed.index_brackets,
+                    chars_generator_index_prefix,
+                    style_generator_failed.index,
+                    elem.index,
+                    style_generator_failed.index_brackets,
+                    chars_generator_index_suffix
+                );
+
+                // Generator value, if any.
+                if (elem.value)
+                {
+                    // Equals sign.
+                    terminal.Print(cur_style, "{}{}{}",
+                        style_generator_failed.value_separator,
+                        chars_generator_value_separator,
+                        style_generator_failed.value
+                    );
+
+                    GeneratorValueShortener shortener(*elem.value, chars_generator_value_ellipsis, max_generator_value_prefix_length, max_generator_value_suffix_length);
+
+                    // The value, possibly shortened.
+                    if (shortener.is_short)
+                    {
+                        terminal.Print("{}", *elem.value);
+                    }
+                    else
+                    {
+                        terminal.Print(cur_style, "{}{}{}{}{}",
+                            shortener.long_prefix,
+                            style_generator_failed.value_ellipsis,
+                            chars_generator_value_ellipsis,
+                            style_generator_failed.value,
+                            shortener.long_suffix
+                        );
+                    }
+                }
+
+                terminal.Print("\n");
+            }
+        }
+    }
 
     // Reset per-test state after the last repetition.
+    // We also do this in `OnPreRunSingleTest()`, so this isn't strictly necessary.
     if (data.is_last_generator_repetition)
     {
         state.test_counter++;
 
-        // We also do this in `OnPreRunSingleTest()`, so this isn't strictly necessary.
+        bool prev_test_failed = !state.per_test.failed_generator_stacks.empty();
         state.per_test = {};
+        state.per_test.prev_failed = prev_test_failed;
     }
     else
     {
-        // We also do this in `OnPreRunSingleTest()`, so this isn't strictly necessary.
         state.per_test.per_repetition = {};
     }
 }
@@ -2219,14 +2376,14 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
 void ta_test::modules::ProgressPrinter::OnPostGenerate(const GeneratorCallInfo &data)
 {
     auto cur_style = terminal.MakeStyleGuard();
-    if (data.geneating_new_value || state.per_test.per_repetition.prev_failed)
+    if (data.geneating_new_value || state.per_test.per_repetition.prev_rep_failed)
         PrintGeneratorInfo(cur_style, *data.test, *data.generator, !data.geneating_new_value);
 }
 
 void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgress &data)
 {
     // Avoid printing the diagnoal separator on the next progress line. It's unnecessary after a bulky failure message.
-    state.per_test.last_repetition_counters_width = -1;
+    state.per_test.last_repetition_counters_width = std::size_t(-1);
 
     std::string_view group;
     std::string_view name = data.test->Name();
@@ -2246,7 +2403,7 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
     auto cur_style = terminal.MakeStyleGuard();
 
     // The test failure message, and a separator after that.
-    terminal.Print(cur_style, "\n{}{}:\n{}{}{}{}{}{} {}{}\n\n",
+    terminal.Print(cur_style, "\n{}{}:\n{}{}{}{}{}{} {}{}\n",
         common_data.style_path,
         common_data.LocationToString(data.test->Location()),
         common_data.style_error,
@@ -2258,6 +2415,12 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
         style_test_failed_separator,
         separator
     );
+
+    // Print the generator determinism warning, if needed.
+    if (data.generator_index < data.generator_stack.size())
+        PrintWarning(cur_style, "Non-deterministic failure. Previous runs didn't fail here with the same generated values. Some generators will be pruned.");
+
+    terminal.Print("\n");
 }
 
 // --- modules::ResultsPrinter ---

@@ -1026,7 +1026,7 @@ namespace ta_test
 
             // Which generator in `RunSingleTestInfo::generator_stack` we expect to hit next, or `generator_stack.size()` if none.
             // This starts at `0` every time the test is entered.
-            // When exiting a test normally, this should be at `generator_stack.size()`.
+            // When exiting a test normally, this should be at `generator_stack.size()`, otherwise you have a non-deterministic failure in your tests.
             std::size_t generator_index = 0;
 
             // You can set this to true to break after the test.
@@ -1447,8 +1447,8 @@ namespace ta_test
         // `false` if unknown or disabled with `CFG_TA_DETECT_DEBUGGER`
         CFG_TA_API bool IsDebuggerAttached();
 
-        // Whether stdout is attached to a terminal.
-        CFG_TA_API bool IsTerminalAttached();
+        // Whether stdout (or stderr, depending on the argument) is attached to a terminal.
+        CFG_TA_API bool IsTerminalAttached(bool stderr);
     }
 
 
@@ -1515,16 +1515,17 @@ namespace ta_test
     // Configuration for printing text.
     struct Terminal
     {
-        bool enable_color = platform::IsTerminalAttached();
+        bool enable_color = false;
 
         // The characters are written to this `std::vprintf`-style callback.
         // Defaults to `SetFileOutput(stdout)`.
         std::function<void(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args)> output_func;
 
-        CFG_TA_API Terminal();
+        Terminal() : Terminal(stdout) {}
 
         // Sets `output_func` to print to `stream`.
-        CFG_TA_API void SetFileOutput(FILE *stream);
+        // Also guesses `enable_color` (always false when `stream` is neither `stdout` nor `stderr`).
+        CFG_TA_API Terminal(FILE *stream);
 
         // Prints a message using `output_func`. Unlike `Print`, doesn't accept `TextStyle`s directly.
         // Prefer `Print()`.
@@ -1989,6 +1990,8 @@ namespace ta_test
             TextStyle style_error = {.color = TextColor::light_red, .bold = true};
             // "While doing X" messages
             TextStyle style_stack_frame = {.color = TextColor::light_magenta, .bold = true};
+            // "Warning" messages.
+            TextStyle style_warning = {.color = TextColor::light_magenta, .bold = true};
             // "Note" messages.
             TextStyle style_note = {.color = TextColor::light_blue, .bold = true};
             // File paths.
@@ -2002,6 +2005,7 @@ namespace ta_test
 
             // Characters:
 
+            std::string warning_prefix = "WARNING: ";
             std::string note_prefix = "NOTE: ";
 
             // When printing a path, separates it from the line number.
@@ -2506,6 +2510,7 @@ namespace ta_test
         virtual bool PrintLogEntries(Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) {(void)cur_style; (void)unscoped_log; (void)scoped_log; return false;}
 
       protected:
+        CFG_TA_API void PrintWarning(Terminal::StyleGuard &cur_style, std::string_view text) const;
         CFG_TA_API void PrintNote(Terminal::StyleGuard &cur_style, std::string_view text) const;
     };
 
@@ -3162,6 +3167,7 @@ namespace ta_test
 
                 // Make sure this is the right generator.
                 // Since the location is a part of the type, this nicely checks for the location equality.
+                // This is one of the two determinism checks, the second one is in runner's `Run()` to make sure we visited all generators.
                 if (!this_generator)
                 {
                     // Theoretically we can have two different generators at the same line, but I think this message is ok even in that case.
@@ -3701,11 +3707,12 @@ namespace ta_test
         }
 
         // Configures every `BasicPrintingModule` to print to `stream`.
+        // Also automatically enables/disables color.
         void SetOutputStream(FILE *stream) const
         {
             SetTerminalSettings([&](Terminal &terminal)
             {
-                terminal.SetFileOutput(stream);
+                terminal = Terminal(stream);
             });
         }
 
@@ -3929,7 +3936,7 @@ namespace ta_test
                 // The brackets around this index.
                 TextStyle index_brackets = {.color = TextColor::light_black};
                 // Separates the generated value from the generator name and index.
-                TextStyle value_separator = {.color = TextColor::dark_white};
+                TextStyle value_separator = {.color = TextColor::light_black};
                 // The generated value, if printable.
                 TextStyle value = {.color = TextColor::light_blue, .bold = true};
                 // The ellipsis in the generated value, if it's too long.
@@ -3937,7 +3944,7 @@ namespace ta_test
             };
             // The normal run of a generator.
             StyleGenerator style_generator{};
-            // Re-printing the value of a generator after a failure.
+            // Re-printing the existing value of a generator after a failure.
             StyleGenerator style_generator_repeated = {
                 .prefix = {.color = TextColor::light_black},
                 .name = {.color = TextColor::light_black, .bold = true},
@@ -3947,11 +3954,25 @@ namespace ta_test
                 .value = {.color = TextColor::light_black, .bold = true},
                 .value_ellipsis = {.color = TextColor::light_black},
             };
+            // Printing a list of failed generators.
+            StyleGenerator style_generator_failed = {
+                .prefix = {.color = TextColor::dark_red},
+                .name = {.color = TextColor::light_red},
+                .index = {.color = TextColor::light_red, .bold = true},
+                .index_brackets = {.color = TextColor::dark_red},
+                .value_separator = {.color = TextColor::dark_red},
+                .value = {.color = TextColor::light_red, .bold = true},
+                .value_ellipsis = {.color = TextColor::light_black, .bold = true},
+            };
+            // When printing a per-test summary of failed generators, this is the number of failed repetitions.
+            TextStyle style_repetitions_summary_failed_count = {.color = TextColor::light_red, .bold = true};
+            // When printing a per-test summary of failed generators, this is the total number of repetitions.
+            TextStyle style_repetitions_summary_total_count = {.color = TextColor::dark_red};
 
             // The name of a failed test, printed when it fails.
-            TextStyle style_failed_name = {.color = TextColor::light_red, .bold = true};
+            TextStyle style_failed_name = {.color = TextColor::light_yellow, .bold = true};
             // The name of a group of a failed test, printed when the test fails.
-            TextStyle style_failed_group_name = {.color = TextColor::dark_red};
+            TextStyle style_failed_group_name = {.color = TextColor::light_yellow};
             // The style for a horizontal line that's printed after a test failure message, before any details.
             TextStyle style_test_failed_separator = {.color = TextColor::dark_red};
             // This line is printed after all details on the test failure.
@@ -3960,8 +3981,6 @@ namespace ta_test
             TextStyle style_starting_tests = {.color = TextColor::light_black, .bold = true};
             // Style for `chars_continuing_tests`.
             TextStyle style_continuing_tests = {.color = TextColor::dark_yellow};
-
-            // TextStyle style_per_test_summary = {.color = TextColor::light_red, .bold = true};
 
             // The name of a failed test, printed at the end.
             TextStyle style_summary_failed_name = {.color = TextColor::light_red, .bold = true};
@@ -3976,7 +3995,7 @@ namespace ta_test
             struct State
             {
                 // How many characters are needed to represent the total test count.
-                int num_tests_width = 0;
+                std::size_t num_tests_width = 0;
 
                 std::size_t test_counter = 0;
                 std::vector<std::string_view> stack;
@@ -3988,20 +4007,39 @@ namespace ta_test
                 {
                     // The generator repetition counter for the current test.
                     std::size_t repetition_counter = 0;
-                    // How many repetitions have failed for the current test.
-                    std::size_t failed_repetition_counter = 0;
 
-                    // The last known character width for `repetition_counter` and `failed_repetition_counter` together.
+                    struct FailedGenerator
+                    {
+                        std::string name;
+                        int index = 0; // 1-based
+                        std::optional<std::string> value;
+                        SourceLocWithCounter location;
+
+                        // This should be unique enough.
+                        [[nodiscard]] friend bool operator==(const FailedGenerator &a, const FailedGenerator &b)
+                        {
+                            return a.location == b.location && a.index == b.index;
+                        }
+
+                        // Could add more information here, but don't currently need it.
+                    };
+                    // A list of failed generator stacks.
+                    std::vector<std::vector<FailedGenerator>> failed_generator_stacks;
+
+                    // The last known character width for `repetition_counter` and `failed_generator_stacks.size()` together.
                     // This is reset to `-1` on a repetition failure, because we don't need to print the diagonal decoration after the bulky failure message.
-                    int last_repetition_counters_width = -1;
+                    std::size_t last_repetition_counters_width = std::size_t(-1);
+
+                    // Whether the previous test has failed.
+                    bool prev_failed = false;
 
                     struct PerRepetition
                     {
                         // Whether we already printed the `repetition_counter`.
                         bool printed_counter = false;
 
-                        // Whether the previous test/repetition has failed.
-                        bool prev_failed = false;
+                        // Whether the previous repetition of this test has failed.
+                        bool prev_rep_failed = false;
                     };
                     PerRepetition per_repetition;
                 };

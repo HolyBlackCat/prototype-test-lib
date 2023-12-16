@@ -3,15 +3,16 @@
 
 #include "testlib.h"
 
-// Print summary after all repetitions finish.
-
-// #error 2. Handle interruptions (failed test or IntteruptException = prune remaining generators, otherwise complain about non-determinism)
-
-
 #if 0
 foo=42,bar[2],baz=56
     |      |      |
    [1]     42    [3]
+
+foo#1,bar=2,baz#3..5
+foo{#1,=2}
+foo={1,2}
+foo#{1,3-5,7}
+foo{#{1,3..5,7},=42}
 
 foo=42
 foo={42,43,44}
@@ -97,19 +98,24 @@ bool fof()
 }
 #endif
 
-TA_TEST(foof/1)
+TA_TEST(foof/generators)
 {
     // static int i = 0;
     // std::cout << "### " << i++ << '\n';
 
-    [[maybe_unused]] auto a = TA_GENERATE_FUNC(foo, [i = 0](bool &repeat) mutable {if (i == 20) repeat = false; return std::string(std::size_t(i++), 'f');});
+    [[maybe_unused]] auto a = TA_GENERATE_FUNC(foo, [i = 0](bool &repeat) mutable {if (i == 3) repeat = false; return i++;});
     // std::cout << a << '\n';
 
-    [[maybe_unused]] auto b = TA_GENERATE_FUNC(blahh, [i = 20](bool &repeat) mutable {if (i == 21) repeat = false; return i++;});
+    [[maybe_unused]] auto b = TA_GENERATE_FUNC(blahh, [i = 20](bool &repeat) mutable {if (i == 23) repeat = false; return i++;});
     // std::cout << b << '\n';
 
-    if (a.size() == 5)
+    static int i = 0;
+    if (i++ == 10)
         TA_FAIL;
+
+    [[maybe_unused]] auto c = TA_GENERATE_FUNC(blahh, [i = 30](bool &repeat) mutable {if (i == 33) repeat = false; return i++;});
+
+
 
 
 }
@@ -151,7 +157,12 @@ int main(int argc, char **argv)
 
 // Overriding generator values?
 
-// TA_VARIANT
+// TA_VARIANT (should be scoped?)
+
+// Better CaughtException interface?
+//     single function to check combined message
+//     or
+//     THIS: expand ForEach to allow "any" elem to be checked; expand context to allow pointing to element
 
 // Throw away excessive use of `size_t`, switch to `int` or `ptrdiff_t`?
 
@@ -329,11 +340,10 @@ TA_CHECK:
     The lambda shouldn't be evaluated at all (capturing might have side effects) when visited repeatedly.
     The lambda should be destroyed at the end of the test, not earlier.
     Catch non-deterministic use:
-        Reaching wrong TA_GENERATE
+        Reaching wrong TA_GENERATE - hard error
         Reaching end of test without reaching a TA_GENERATE
-            But not when InterruptTestException was thrown
-            And not when the test fails
-            ... in those case we should remove the remaining generators, and advance the last one
+            Normally - a hard reror
+            But not when the test failed - that's a warning - check that we correctly prune the generators and advance the last one.
     Type requirements:
         Absolutely no requirements (non-default-constructable, non-movable)
     Sanity check:
@@ -346,6 +356,9 @@ TA_CHECK:
         But not after a failure!
     Partial trimming of the indentation (but only the part that belongs to the test name, not to the generators themselves - test the cutoff)
     Reentering a test after a failure shoulnd't print the test index in bright color.
+    Summary after all repetitions
+        Check that we're not printing more than N repetitions.
+    Overall try two scenarios: failing last repetition and failing some other ones. Make sure everything prints sanely.
 
 --- All the macros nicely no-op when tests are disabled
     TA_CHECK validates the arguments (crash on call?)
