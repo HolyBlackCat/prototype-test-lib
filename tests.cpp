@@ -113,11 +113,7 @@ TA_TEST(foof/generators)
     if (i++ == 10)
         TA_FAIL;
 
-    [[maybe_unused]] auto c = TA_GENERATE_FUNC(blahh, [i = 30](bool &repeat) mutable {if (i == 33) repeat = false; return i++;});
-
-
-
-
+    [[maybe_unused]] int &c = TA_GENERATE(hah, {1,2,3,4});
 }
 
 TA_TEST(foo/baz)
@@ -245,16 +241,16 @@ int main(int argc, char **argv)
 
 ta_test::text::CommonData common;
 ta_test::text::TextCanvas canv(&common);
-ta_test::text::expr::DrawToCanvas(canv, 1, 3, "foo(42, .5f,.5f, 5.f, 5.4f, 42_lit, 42lit, 42_foo42_bar, +42,-42, 123'456'789, 0x123'456, 0123'456)");
-ta_test::text::expr::DrawToCanvas(canv, 2, 3, "foo(12e5,12e+5,12e-5,12.3e5,12.3e+5,12.3e-5,0x1p2,0x1p+2,0x1p-2,0x12.34p2)");
-ta_test::text::expr::DrawToCanvas(canv, 5, 3, "1+1"); // `+` must not be highlighted as a number
-ta_test::text::expr::DrawToCanvas(canv, 3, 3, "foo(\"meow\",foo42foo\"meow\"bar42bar,\"meow\"_bar42bar,\"foo\\\"bar\")");
-ta_test::text::expr::DrawToCanvas(canv, 4, 3, "foo('a','\\n','meow',foo42foo'meow'bar42bar,'meow'_bar42bar,'foo\\'bar')");
-ta_test::text::expr::DrawToCanvas(canv, 5, 3, "foo(R\"(meow)\",foo42fooR\"(meow)\"bar42bar,u8R\"(meow)\"_bar42bar,R\"(foo\"bar)\",R\"ab(foo\"f)\"g)a\"bar)ab\")");
+ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(42, .5f,.5f, 5.f, 5.4f, 42_lit, 42lit, 42_foo42_bar, +42,-42, 123'456'789, 0x123'456, 0123'456)");
+ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(12e5,12e+5,12e-5,12.3e5,12.3e+5,12.3e-5,0x1p2,0x1p+2,0x1p-2,0x12.34p2)");
+ta_test::text::expr::DrawToCanvas(canv, line++, 3, "1+1"); // `+` must not be highlighted as a number
+ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(\"meow\",foo42foo\"meow\"bar42bar,\"meow\"_bar42bar,\"foo\\\"bar\")");
+ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo('a','\\n','meow',foo42foo'meow'bar42bar,'meow'_bar42bar,'foo\\'bar')");
+ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(R\"(meow)\",foo42fooR\"(meow)\"bar42bar,u8R\"(meow)\"_bar42bar,R\"(foo\"bar)\",R\"ab(foo\"f)\"g)a\"bar)ab\")");
 // Different identifier/keyword categories:
-ta_test::text::expr::DrawToCanvas(canv, 6, 3, "($ ( foo42bar bitand static_cast<int>(0) && __COUNTER__ ) && $(foo()) && $(false))");
+ta_test::text::expr::DrawToCanvas(canv, line++, 3, "($ ( foo42bar bitand static_cast<int>(0) && __COUNTER__ ) && $(foo()) && $(false))");
 // Unicode: (make sure unicode chars are not highlighted as punctuation)
-ta_test::text::expr::DrawToCanvas(canv, 7, 3, "[мур] int");
+ta_test::text::expr::DrawToCanvas(canv, line++, 3, "[мур] int");
 canv.Print(ta_test::Terminal{});
 
 --- Colors
@@ -359,6 +355,19 @@ TA_CHECK:
     Summary after all repetitions
         Check that we're not printing more than N repetitions.
     Overall try two scenarios: failing last repetition and failing some other ones. Make sure everything prints sanely.
+
+--- TA_GENERATE
+    Braced lists:
+        lvalue
+        rvalue
+        mixed
+        empty = build error
+    C arrays
+        lvalue and rvalue, both const and non-const
+    Some dumb ranges: non-default-constructible, non-movable, of non-movable elements
+    Empty range handling
+        hard error by default
+        interrupt-test-exception with the flag
 
 --- All the macros nicely no-op when tests are disabled
     TA_CHECK validates the arguments (crash on call?)

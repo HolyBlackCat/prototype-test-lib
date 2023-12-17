@@ -247,8 +247,10 @@
 
 // Repeats the test for all values in the range `...`. (Either a `{...}` list or a C++20 range.)
 // `name` is the name for logging purposes, it must be a valid identifier.
-// You can't use any local variables in `...`, that's a compilation error. Use `TA_GENERATE_FUNC` if you need more flexibility.
-// #define TA_GENERATE
+// You can't use any local variables in `...`, that's a compilation error.
+//   Use `TA_GENERATE_FUNC(...)` with `ta_test::RangeToGeneratorFunc(...)` to do that.
+// Accepts a second optional parameter, of type `ta_test::GeneratorFlags`, like `RangeToGeneratorFunc()`.
+#define TA_GENERATE(name, ...) DETAIL_TA_GENERATE(name, __VA_ARGS__)
 
 // Repeats the test for all values returned by the lambda.
 // Usage: `T x = TA_GENERATE_FUNC(name, lambda);`.
@@ -321,6 +323,9 @@
     ::ta_test::detail::ScopedLogGuard DETAIL_TA_CAT(_ta_context,__COUNTER__)(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
 #define DETAIL_TA_CONTEXT_LAZY(...) \
     ::ta_test::detail::ScopedLogGuardLazy DETAIL_TA_CAT(_ta_context,__COUNTER__)([&]{return CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__);})
+
+#define DETAIL_TA_GENERATE(name, ...) \
+    ::ta_test::detail::Generate<#name, __FILE__, __LINE__, __COUNTER__>([/*non-capturing*/]{return ::ta_test::RangeToGeneratorFunc(__VA_ARGS__);})
 
 #define DETAIL_TA_GENERATE_FUNC(name, ...) \
     ::ta_test::detail::Generate<#name, __FILE__, __LINE__, __COUNTER__>([&]{return __VA_ARGS__;})
@@ -3099,7 +3104,8 @@ namespace ta_test
         {
             F func;
 
-            SpecificGenerator(F &&func) : func(std::move(func)) {}
+            template <typename G>
+            SpecificGenerator(G &&make_func) : func(std::forward<G>(make_func)()) {}
 
             static constexpr BasicModule::SourceLocWithCounter location = {
                 BasicModule::SourceLoc{
@@ -3121,11 +3127,9 @@ namespace ta_test
 
             void Generate() override
             {
-                // I hope this makes sense.
-                if constexpr (std::is_move_assignable_v<ReturnType>)
-                    this->storage = func(this->repeat);
-                else
-                    this->storage.emplace(func(this->repeat));
+                // We could try to somehow conditionally assign here if possible.
+                // I tried, got some weird build error in some edge case, and decided not to bother.
+                this->storage.emplace(func(this->repeat));
 
                 this->num_generated_values++;
             }
@@ -3187,7 +3191,7 @@ namespace ta_test
                 if (thread_state.current_test->generator_index != thread_state.current_test->generator_stack.size())
                     HardError("Something is wrong with the generator index."); // This should never happen.
 
-                auto new_generator = std::make_unique<GeneratorType>(std::forward<F>(func)());
+                auto new_generator = std::make_unique<GeneratorType>(std::forward<F>(func));
                 this_generator = new_generator.get();
                 thread_state.current_test->generator_stack.push_back(std::move(new_generator));
             }
@@ -3213,6 +3217,68 @@ namespace ta_test
 
             return this_generator->GetValue();
         }
+    }
+
+    enum class GeneratorFlags
+    {
+        // Don't emit a hard error if the range is empty, instead throw `InterruptTestException` to abort the test.
+        // Has no effect when exceptions are disabled.
+        allow_empty_range = 1 << 0,
+    };
+    DETAIL_TA_FLAG_OPERATORS(GeneratorFlags)
+    using enum GeneratorFlags;
+
+    // Converts a C++20 range to a functor usable with `TA_GENERATE_FUNC(...)`.
+    // `TA_GENERATE(...)` calls it internally. But you might want to call it manually,
+    // because `TA_GENERATE(...)` prevents you from using any local variables, for safety.
+    template <std::ranges::input_range T>
+    [[nodiscard]] auto RangeToGeneratorFunc(T &&range, GeneratorFlags flags = {})
+    {
+        class Functor
+        {
+            std::remove_cvref_t<T> range;
+            std::ranges::iterator_t<std::remove_cvref_t<T>> iter;
+
+          public:
+            explicit Functor(T &&range, GeneratorFlags flags)
+                : range(std::forward<T>(range)), iter(this->range.begin())
+            {
+                if (iter == this->range.end())
+                {
+                    if (bool(flags & GeneratorFlags::allow_empty_range))
+                        throw InterruptTestException{};
+                    else
+                        HardError("Empty generator range.", HardErrorKind::user);
+                }
+            }
+
+            // `iter` would go stale on copy.
+            Functor(const Functor &) = delete;
+            Functor &operator=(const Functor &) = delete;
+
+            decltype(auto) operator()(bool &repeat)
+            {
+                decltype(auto) ret = *iter;
+                repeat = ++iter != range.end();
+                if constexpr (std::is_reference_v<decltype(ret)>)
+                    return decltype(ret)(ret);
+                else
+                    return ret;
+            }
+        };
+        return Functor(std::forward<T>(range), flags);
+    }
+    // Those overload accept `{...}` initializer lists. They also conveniently add support for C arrays.
+    // Note the lvalue overload being non-const, this way it can accept both const and non-const arrays, same as `std::to_array`.
+    template <typename T, std::size_t N> requires(N > 0)
+    [[nodiscard]] auto RangeToGeneratorFunc(T (&range)[N], GeneratorFlags flags = {})
+    {
+        return (RangeToGeneratorFunc)(std::to_array(range), flags);
+    }
+    template <typename T, std::size_t N> requires(N > 0)
+    [[nodiscard]] auto RangeToGeneratorFunc(T (&&range)[N], GeneratorFlags flags = {})
+    {
+        return (RangeToGeneratorFunc)(std::to_array(std::move(range)), flags);
     }
 
 

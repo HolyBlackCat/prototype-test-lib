@@ -2278,7 +2278,9 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
         }
 
         // Intentionally always using plural "VARIANTS" here, because seeing "1/N VARIANT" is confusing, because it looks kinda like "first variant".
-        terminal.Print(cur_style, "\n{}IN TEST {}{}{}{}{}, {}{}{}/{}{} VARIANTS FAILED:\n\n",
+        terminal.Print(cur_style, "\n{}{}:\n{}IN TEST {}{}{}{}{}, {}{}{}/{}{} VARIANTS FAILED:\n\n",
+            common_data.style_path,
+            common_data.LocationToString(data.test->Location()),
             common_data.style_error,
             style_failed_group_name,
             test_group,
