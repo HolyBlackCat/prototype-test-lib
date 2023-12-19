@@ -3,6 +3,18 @@
 
 #include "testlib.h"
 
+namespace ta_test::text
+{
+
+}
+
+namespace ta_test::string_conv
+{
+    // --- FROM STRING ---
+
+
+}
+
 #if 0
 foo=42,bar[2],baz=56
     |      |      |
@@ -135,17 +147,26 @@ TA_TEST(foo/baz)
 
 int main(int argc, char **argv)
 {
-    return ta_test::RunSimple(argc, argv);
-}
+    std::cout << ta_test::string_conv::ToString(std::vector{1,2,3}) << '\n';
+    std::cout << ta_test::string_conv::ToString(std::set{1,2,3}) << '\n';
+    std::cout << ta_test::string_conv::ToString(std::map<int, int>{{1,2},{3,4}}) << '\n';
+    std::cout << ta_test::string_conv::ToString(std::tuple{1, "foo", 2.3}) << '\n';
 
-//
+    const char *str = R"((  10  ,  "foo"  ))", *old_str = str;
+    std::string error;
+    auto opt = ta_test::string_conv::FromString<std::tuple<int, std::string>>(str, error);
+    if (opt)
+    {
+        std::cout << "success: " << ta_test::string_conv::ToString(*opt) << "\n";
+    }
+    else
+        std::cout << "error: " << error << "\n" << old_str << "\n" << std::string(std::size_t(str - old_str), ' ') << "^\n";
+    // return ta_test::RunSimple(argc, argv);
+}
 
 // Roundtrip check when printing a reproduction string.
 
-// TA_GENERATE (non-_FUNC)
-
-// Report failed values in test summary? (this one only during the run?) And also how many repetitions per test failed/passed/total.
-
+// Report how many repetitions per test failed/passed/total.
 // Different global summary style: (3 columns? tests, repetitions(?), asserts)
 //     Skipped: 42
 //     Passed:  42
@@ -232,10 +253,30 @@ int main(int argc, char **argv)
     std::string_view
     std::string
     char
-    ??? wchar_t, char16_t, char32_t
+    ??? wchar_t, wstring, wstring_view? See what libfmt does, but probably later.
+    ?????? char16_t, char32_t
     int, short, long, float, double, long double
-    std::vector<int>
-    std::set<int>, std::map<int, int> - format will differ in old `std::format`?
+    std::vector<int> std::set<int>, std::map<int, int>
+    tuple (including empty), pair
+
+--- FromString
+    Same types as in ToString
+    Reject duplicate keys in sets and maps
+    Reject spaces before and after:
+        scalars
+        strings
+        containers
+    Containers:
+        empty containers
+        allow spaces everywhere (except before and after)
+    tuples
+        empty tuples
+    Unescaping strings - ugh
+        how many chars we consume in the escape sequences
+        reject large escapes (note that \0xx and \x should not produce multibyte chars?)
+        uppercase and lowercase hex
+        `char` should reject multibyte characters. And even characters with codes > 0x7f.
+        `char` should reject empty literals: ''.
 
 --- Expression colorizer
 
@@ -432,7 +473,7 @@ Good test names:
 
 --- Control characters are replaced with their symbolic representations in:
     Stringified arguments
-    User assertion messages
+    User assertion messages (in all macros)
 
 --- Test name width for the results is calculated correctly.
     In particular, group names can be longer than (test names + indentation), so try with a really long group name.

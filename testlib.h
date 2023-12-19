@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <compare>
 #include <concepts>
 #include <cstdarg>
@@ -23,6 +24,7 @@
 #include <span>
 #include <string_view>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <typeindex>
 #include <typeinfo>
@@ -41,14 +43,14 @@
 // The import/export macro we use on all non-inline functions.
 // Probably shouldn't define this directly, prefer setting `CFG_TA_SHARED`.
 #ifndef CFG_TA_API
-#  ifndef CFG_TA_SHARED
-#    define CFG_TA_API
-#  else
+#  if CFG_TA_SHARED
 #    ifdef _WIN32
 #      define CFG_TA_API __declspec(dllimport)
 #    else
 #      define CFG_TA_API __attribute__((__visibility__("default")))
 #    endif
+#  else
+#    define CFG_TA_API
 #  endif
 #endif
 
@@ -150,6 +152,7 @@
 #ifndef CFG_TA_FMT_NAMESPACE
 #if CFG_TA_USE_LIBFMT
 #include <fmt/format.h>
+#include <fmt/ranges.h> // At least for `fmt::range_format_kind`.
 #define CFG_TA_FMT_NAMESPACE ::fmt
 #else
 #include <format>
@@ -167,6 +170,19 @@
 #      define CFG_TA_FMT_HAS_FILE_VPRINT 1
 #    else
 #      define CFG_TA_FMT_HAS_FILE_VPRINT 0
+#    endif
+#  endif
+#endif
+// Whether the formatting library can classify and format ranges.
+// 0 = none, 1 = `format_kind` variable, 2 = `range_format_kind` trait class.
+#ifndef CFG_TA_FMT_HAS_RANGE_FORMAT
+#  if CFG_TA_USE_LIBFMT
+#    define CFG_TA_FMT_HAS_RANGE_FORMAT 2
+#  else
+#    ifdef __cpp_lib_format_ranges
+#      define CFG_TA_FMT_HAS_RANGE_FORMAT 1
+#    else
+#      define CFG_TA_FMT_HAS_RANGE_FORMAT 0
 #    endif
 #  endif
 #endif
@@ -277,17 +293,17 @@
 #define DETAIL_TA_CAT_(x, y) x##y
 
 #define DETAIL_TA_TEST(name) \
-    inline void _ta_test_func(::ta_test::ConstStringTag<#name>); \
-    constexpr auto _ta_registration_helper(::ta_test::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
+    inline void _ta_test_func(::ta_test::meta::ConstStringTag<#name>); \
+    constexpr auto _ta_registration_helper(::ta_test::meta::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
         const std::nullptr_t *, &::ta_test::detail::register_test_helper<\
             ::ta_test::detail::SpecificTest<static_cast<void(*)(\
-                ::ta_test::ConstStringTag<#name>\
+                ::ta_test::meta::ConstStringTag<#name>\
             )>(_ta_test_func),\
             []{CFG_TA_BREAKPOINT(); ::std::terminate();},\
             #name, __FILE__, __LINE__>\
         >\
     >{})) {} \
-    inline void _ta_test_func(::ta_test::ConstStringTag<#name>)
+    inline void _ta_test_func(::ta_test::meta::ConstStringTag<#name>)
 
 #define DETAIL_TA_CHECK(macro_name_, str_, ...) \
     /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
@@ -373,62 +389,799 @@ namespace ta_test
     // You could throw this manually, but I don't see why you'd want to.
     struct InterruptTestException {};
 
-    // A compile-time string.
-    template <std::size_t N>
-    struct ConstString
+    // Metaprogramming helpers.
+    namespace meta
     {
-        char str[N]{};
-
-        static constexpr std::size_t size = N - 1;
-
-        consteval ConstString() {}
-        consteval ConstString(const char (&new_str)[N])
+        // A compile-time string.
+        template <std::size_t N>
+        struct ConstString
         {
-            if (new_str[N-1] != '\0')
-                HardError("The input string must be null-terminated.");
-            std::copy_n(new_str, size, str);
+            char str[N]{};
+
+            static constexpr std::size_t size = N - 1;
+
+            consteval ConstString() {}
+            consteval ConstString(const char (&new_str)[N])
+            {
+                if (new_str[N-1] != '\0')
+                    HardError("The input string must be null-terminated.");
+                std::copy_n(new_str, size, str);
+            }
+
+            [[nodiscard]] consteval std::string_view view() const &
+            {
+                return {str, str + size};
+            }
+            [[nodiscard]] consteval std::string_view view() const && = delete;
+        };
+        template <std::size_t A, std::size_t B>
+        [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const ConstString<B> &b)
+        {
+            ConstString<A + B - 1> ret;
+            std::copy_n(a.str, a.size, ret.str);
+            std::copy_n(b.str, b.size, ret.str + a.size);
+            return ret;
+        }
+        template <std::size_t A, std::size_t B>
+        [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const char (&b)[B])
+        {
+            return a + ConstString<B>(b);
+        }
+        template <std::size_t A, std::size_t B>
+        [[nodiscard]] consteval ConstString<A + B - 1> operator+(const char (&a)[A], const ConstString<B> &b)
+        {
+            return ConstString<A>(a) + b;
+        }
+        template <ConstString X>
+        struct ConstStringTag
+        {
+            static constexpr auto value = X;
+        };
+
+        // The lambda overloader.
+        template <typename ...P>
+        struct Overload : P... {using P::operator()...;};
+        template <typename ...P>
+        Overload(P...) -> Overload<P...>;
+
+        // Always returns `false`.
+        template <typename, typename...>
+        struct AlwaysFalse : std::false_type {};
+
+        // Tag dispatch helper.
+        template <auto>
+        struct ValueTag {};
+
+        // Extracts the class type from a member pointer type.
+        template <typename T>
+        struct MemberPointerClass {};
+        template <typename T, typename C>
+        struct MemberPointerClass<T C::*> {using type = C;};
+
+        // Returns true if `X` and `Y` have the same type and are equal.
+        template <auto X, auto Y>
+        struct ValuesAreEqual : std::false_type {};
+        template <auto X>
+        struct ValuesAreEqual<X, X> : std::true_type {};
+    }
+
+    namespace text
+    {
+        // Character classification functions.
+        namespace chars
+        {
+            [[nodiscard]] constexpr bool IsWhitespace(char ch)
+            {
+                return ch == ' ' || ch == '\t';
+            }
+            [[nodiscard]] constexpr bool IsAlphaLowercase(char ch)
+            {
+                return ch >= 'a' && ch <= 'z';
+            }
+            [[nodiscard]] constexpr bool IsAlphaUppercase(char ch)
+            {
+                return ch >= 'A' && ch <= 'Z';
+            }
+            [[nodiscard]] constexpr bool IsAlpha(char ch)
+            {
+                return IsAlphaLowercase(ch) || IsAlphaUppercase(ch);
+            }
+            // Whether `ch` is a letter or an other non-digit identifier character.
+            [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
+            {
+                return ch == '_' || IsAlpha(ch);
+            }
+            [[nodiscard]] constexpr bool IsDigit(char ch)
+            {
+                return ch >= '0' && ch <= '9';
+            }
+            // Whether `ch` can be a part of an identifier.
+            [[nodiscard]] constexpr bool IsIdentifierCharStrict(char ch)
+            {
+                return IsNonDigitIdentifierChar(ch) || IsDigit(ch);
+            }
+            // Same, but also allows `$`, which we use in our macro.
+            [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
+            {
+                if (ch == '$')
+                    return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
+                return IsIdentifierCharStrict(ch);
+            }
+            // Whether `ch` is a punctuation character.
+            // Unlike the standard function, we don't reject invisible characters here. Importantly, we do reject unicode.
+            [[nodiscard]] constexpr bool IsPunct(char ch)
+            {
+                return ch >= 0 && ch <= 127 && !IsIdentifierChar(ch);
+            }
+            // Returns true if `name` is `"TA_ARG"` or one of its aliases.
+            [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
+            {
+                for (std::string_view alias : std::initializer_list<std::string_view>{
+                    "TA_ARG",
+                    #if CFG_TA_USE_DOLLAR
+                    "$"
+                    #endif
+                    CFG_TA_EXTRA_ARG_MACROS
+                })
+                {
+                    if (alias == name)
+                        return true;
+                }
+
+                return false;
+            }
+
+            // Skips whitespace characters, if any.
+            constexpr void SkipWhitespace(const char *&ch)
+            {
+                while (IsWhitespace(*ch))
+                    ch++;
+            }
         }
 
-        [[nodiscard]] consteval std::string_view view() const &
+        // A mini unicode library.
+        namespace uni
         {
-            return {str, str + size};
+            // A placeholder value for invalid characters.
+            constexpr char32_t default_char = 0xfffd;
+            // The largest valid character.
+            constexpr char32_t max_char_value = 0x10ffff;
+
+            // Max bytes per character.
+            constexpr std::size_t max_char_len = 4;
+
+            // Given a byte, checks if it's the first byte of a multibyte character, or is a single-byte character.
+            // Even if this function returns true, `byte` can be an invalid first byte.
+            // To check for the byte validity, use `FirstByteToCharacterLength`.
+            [[nodiscard]] constexpr bool IsFirstByte(char byte)
+            {
+                return (byte & 0b11000000) != 0b10000000;
+            }
+
+            // Counts the number of codepoints (usually characters) in a valid UTF8 string, by counting the bytes matching `IsFirstByte()`.
+            [[nodiscard]] constexpr std::size_t CountFirstBytes(std::string_view string)
+            {
+                return std::size_t(std::count_if(string.begin(), string.end(), IsFirstByte));
+            }
+
+            // Given the first byte of a multibyte character (or a single-byte character), returns the amount of bytes occupied by the character.
+            // Returns 0 if this is not a valid first byte, or not a first byte at all.
+            [[nodiscard]] constexpr std::size_t FirstByteToCharacterLength(char first_byte)
+            {
+                if ((first_byte & 0b10000000) == 0b00000000) return 1; // Note the different bit pattern in this one.
+                if ((first_byte & 0b11100000) == 0b11000000) return 2;
+                if ((first_byte & 0b11110000) == 0b11100000) return 3;
+                if ((first_byte & 0b11111000) == 0b11110000) return 4;
+                return 0;
+            }
+
+            // Returns true if `ch` is a valid unicode ch (aka 'codepoint').
+            [[nodiscard]] constexpr bool IsValidCharacterCode(char32_t ch)
+            {
+                return ch <= max_char_value;
+            }
+
+            // Returns the amount of bytes needed to represent a character.
+            // If the character is invalid (use `IsValidCharacterCode` to check for validity) returns 4, which is the maximum possible length
+            [[nodiscard]] constexpr std::size_t CharacterCodeToLength(char32_t ch)
+            {
+                if (ch <= 0x7f) return 1;
+                if (ch <= 0x7ff) return 2;
+                if (ch <= 0xffff) return 3;
+                // Here `ch <= 0x10ffff`, or the character is invalid.
+                // Mathematically the cap should be `0x1fffff`, but Unicode defines the max value to be lower.
+                return 4;
+            }
+
+            // Encodes a character into UTF8.
+            // The buffer length can be `max_char_len` (or use `CharacterCodeToLength` for the precise byte length).
+            // If the character is invalid, writes `default_char` instead.
+            // No null-terminator is added.
+            // Returns the amount of bytes written, equal to what `CharacterCodeToLength` would return.
+            [[nodiscard]] constexpr std::size_t EncodeCharToBuffer(char32_t ch, char *buffer)
+            {
+                if (!IsValidCharacterCode(ch))
+                    return EncodeCharToBuffer(default_char, buffer);
+
+                std::size_t len = CharacterCodeToLength(ch);
+                switch (len)
+                {
+                  case 1:
+                    *buffer = char(ch);
+                    break;
+                  case 2:
+                    *buffer++ = char(0b11000000 | (ch >> 6));
+                    *buffer   = char(0b10000000 | (ch & 0b00111111));
+                    break;
+                  case 3:
+                    *buffer++ = char(0b11100000 |  (ch >> 12));
+                    *buffer++ = char(0b10000000 | ((ch >>  6) & 0b00111111));
+                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
+                    break;
+                  case 4:
+                    *buffer++ = char(0b11110000 |  (ch >> 18));
+                    *buffer++ = char(0b10000000 | ((ch >> 12) & 0b00111111));
+                    *buffer++ = char(0b10000000 | ((ch >> 6 ) & 0b00111111));
+                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
+                    break;
+                }
+
+                return len;
+            }
+
+            // Encodes one string into another.
+            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
+            constexpr void Encode(std::u32string_view view, std::string &str)
+            {
+                str.clear();
+                str.reserve(view.size() * max_char_len);
+                for (char32_t ch : view)
+                {
+                    char buf[max_char_len];
+                    std::size_t len = EncodeCharToBuffer(ch, buf);
+                    str.append(buf, len);
+                }
+            }
+
+            // Decodes a UTF8 character.
+            // Returns a pointer to the first byte of the next character.
+            // If `end` is not null, it'll stop reading at `end`. In this case `end` will be returned.
+            [[nodiscard]] constexpr const char *FindNextCharacter(const char *data, const char *end = nullptr)
+            {
+                do
+                    data++;
+                while (data != end && !IsFirstByte(*data));
+
+                return data;
+            }
+
+            // Returns a decoded character or `default_char` on failure.
+            // If `end` is not null, it won't attempt to read past it.
+            // If `next_char` is not null, it will be set to point to the next byte after the current character.
+            // If `data == end`, returns '\0'. (If `end != 0` and `data > end`, also returns '\0'.)
+            // If `data == 0`, returns '\0'.
+            constexpr char32_t DecodeCharFromBuffer(const char *data, const char *end = nullptr, const char **next_char = nullptr)
+            {
+                // Stop if `data` is a null pointer.
+                if (!data)
+                {
+                    if (next_char)
+                        *next_char = nullptr;
+                    return 0;
+                }
+
+                // Stop if we have an empty string.
+                if (end && data >= end) // For `data >= end` to be well-defined, `end` has to be not null if `data` is not null.
+                {
+                    if (next_char)
+                        *next_char = data;
+                    return 0;
+                }
+
+                // Get character length.
+                std::size_t len = FirstByteToCharacterLength(*data);
+
+                // Stop if this is not a valid first byte.
+                if (len == 0)
+                {
+                    if (next_char)
+                        *next_char = FindNextCharacter(data, end);
+                    return default_char;
+                }
+
+                // Handle single byte characters.
+                if (len == 1)
+                {
+                    if (next_char)
+                        *next_char = data+1;
+                    return (unsigned char)*data;
+                }
+
+                // Stop if there is not enough characters left in `data`.
+                if (end && end - data < std::ptrdiff_t(len))
+                {
+                    if (next_char)
+                        *next_char = end;
+                    return default_char;
+                }
+
+                // Extract bits from the first byte.
+                char32_t ret = (unsigned char)*data & (0xff >> len); // `len + 1` would have the same effect as `len`, but it's longer to type.
+
+                // For each remaining byte...
+                for (std::size_t i = 1; i < len; i++)
+                {
+                    // Stop if it's a first byte of some character.
+                    if (IsFirstByte(data[i]))
+                    {
+                        if (next_char)
+                            *next_char = data + i;
+                        return default_char;
+                    }
+
+                    // Extract bits and append them to the code.
+                    ret = ret << 6 | ((unsigned char)data[i] & 0b00111111);
+                }
+
+                // Get next character position.
+                if (next_char)
+                    *next_char = data + len;
+
+                return ret;
+            }
+
+            // Decodes one string into another.
+            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
+            inline void Decode(std::string_view view, std::u32string &str)
+            {
+                str.clear();
+                str.reserve(view.size());
+                for (const char *cur = view.data(); cur - view.data() < std::ptrdiff_t(view.size());)
+                    str += uni::DecodeCharFromBuffer(cur, view.data() + view.size(), &cur);
+            }
         }
-        [[nodiscard]] consteval std::string_view view() const && = delete;
-    };
-    template <std::size_t A, std::size_t B>
-    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const ConstString<B> &b)
-    {
-        ConstString<A + B - 1> ret;
-        std::copy_n(a.str, a.size, ret.str);
-        std::copy_n(b.str, b.size, ret.str + a.size);
-        return ret;
-    }
-    template <std::size_t A, std::size_t B>
-    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const ConstString<A> &a, const char (&b)[B])
-    {
-        return a + ConstString<B>(b);
-    }
-    template <std::size_t A, std::size_t B>
-    [[nodiscard]] consteval ConstString<A + B - 1> operator+(const char (&a)[A], const ConstString<B> &b)
-    {
-        return ConstString<A>(a) + b;
-    }
-    template <ConstString X>
-    struct ConstStringTag
-    {
-        static constexpr auto value = X;
-    };
 
-    // The lambda overloader.
-    template <typename ...P>
-    struct Overload : P... {using P::operator()...;};
-    template <typename ...P>
-    Overload(P...) -> Overload<P...>;
+        // String escaping.
+        namespace escape
+        {
+            // Escapes a string, writes the result to `out_iter`. Includes quotes automatically.
+            template <typename It>
+            constexpr void EscapeString(std::string_view source, It out_iter, bool double_quotes)
+            {
+                *out_iter++ = "'\""[double_quotes];
 
-    // --- STRING CONVERSIONS ---
+                for (char signed_ch : source)
+                {
+                    unsigned char ch = (unsigned char)signed_ch;
 
+                    bool should_escape = (ch < ' ') || ch == 0x7f || (ch == (double_quotes ? '"' : '\''));
+
+                    if (!should_escape)
+                    {
+                        *out_iter++ = signed_ch;
+                        continue;
+                    }
+
+                    switch (ch)
+                    {
+                        case '\0': *out_iter++ = '\\'; *out_iter++ = '0'; break;
+                        case '\'': *out_iter++ = '\\'; *out_iter++ = '\''; break;
+                        case '\"': *out_iter++ = '\\'; *out_iter++ = '"'; break;
+                        case '\\': *out_iter++ = '\\'; *out_iter++ = '\\'; break;
+                        case '\a': *out_iter++ = '\\'; *out_iter++ = 'a'; break;
+                        case '\b': *out_iter++ = '\\'; *out_iter++ = 'b'; break;
+                        case '\f': *out_iter++ = '\\'; *out_iter++ = 'f'; break;
+                        case '\n': *out_iter++ = '\\'; *out_iter++ = 'n'; break;
+                        case '\r': *out_iter++ = '\\'; *out_iter++ = 'r'; break;
+                        case '\t': *out_iter++ = '\\'; *out_iter++ = 't'; break;
+                        case '\v': *out_iter++ = '\\'; *out_iter++ = 'v'; break;
+
+                      default:
+                        // The syntax with braces is from C++23. Without braces the escapes could consume extra characters on the right.
+                        // Octal escapes don't do that, but they're just inherently ugly.
+                        char buffer[7]; // 7 bytes for: \ x { N N } \0
+                        std::snprintf(buffer, sizeof buffer, "\\x{%02x}", ch);
+                        for (char *ptr = buffer; *ptr;)
+                            *out_iter++ = *ptr++;
+                        break;
+                    }
+                }
+
+                *out_iter++ = "'\""[double_quotes];
+            }
+
+            // Unescapes a string.
+            // Writes the string to the `output` iterator. Returns the error message on failure, or empty string on success.
+            // Tries to support all standard escapes, except for `\N{...}` named characters, because that would be stupid.
+            // We also don't support the useless `\?`.
+            // If `quote_char` isn't zero, we expect it before and after the string.
+            template <typename Iter>
+            std::string UnescapeString(const char *&source, char quote_char, Iter output, bool only_single_char)
+            {
+                // Consumes digits for an escape sequence.
+                // If `hex == true` those are hex digits, otherwise octal.
+                // `max_digits` is how many digits we can consume, or `-1` to consume as many as possible, or `-2` to wait for a `}`.
+                // `max_value` is the max value we're allowing, inclusive.
+                // Writes the resulting number to `result`. Returns the error on failure, or an empty string on success.
+                auto ConsumeDigits = [&](char32_t &result, bool hex, int max_digits, char32_t max_value) -> std::string
+                {
+                    result = 0;
+
+                    int i = 0;
+                    while (true)
+                    {
+                        bool is_digit = false;
+                        bool is_decimal = false;
+                        bool is_hex_lowercase = false;
+                        bool is_hex_uppercase = false;
+
+                        if (hex)
+                        {
+                            is_digit =
+                                (is_decimal = *source >= '0' && *source <= '9') ||
+                                (is_hex_lowercase = *source >= 'a' && *source <= 'f') ||
+                                (is_hex_uppercase = *source >= 'A' && *source <= 'F');
+                        }
+                        else
+                        {
+                            is_decimal = true;
+                            is_digit = *source >= '0' && *source <= '7';
+                        }
+
+                        if (!is_digit)
+                        {
+                            if (max_digits < 0 && i > 0)
+                                break;
+                            else
+                                return CFG_TA_FMT_NAMESPACE::format("Expected {} digit in escape sequence.", hex ? "hexadecimal" : "octal");
+                        }
+
+                        char32_t new_result = result * (hex ? 16 : 8) + char32_t(is_decimal ? *source - '0' : is_hex_lowercase ? *source - 'a' + 10 : *source - 'A' + 10);
+                        if (new_result > max_value)
+                            return "Escape sequence is out of range.";
+
+                        result = new_result;
+
+                        source++;
+                        i++;
+                        if (i == max_digits)
+                            break;
+                    }
+
+                    if (max_digits == -2)
+                    {
+                        #if 0
+                        { // Prevent the following '}' from messing up the folding in Clangd!
+                        #endif
+
+                        if (*source != '}')
+                            return "Expected `}` to close the escape sequence.";
+                        source++;
+                    }
+
+                    return "";
+                };
+
+                if (quote_char)
+                {
+                    if (*source != quote_char)
+                        return CFG_TA_FMT_NAMESPACE::format("Expected opening `{}`.", quote_char);
+                    source++;
+                }
+
+                std::size_t char_counter = 0;
+
+                while (*source != '\0' && *source != quote_char)
+                {
+                    char_counter++;
+                    if (only_single_char && char_counter == 2)
+                        break;
+
+                    if (*source != '\\')
+                    {
+                        *output++ = *source++;
+                        continue;
+                    }
+                    source++;
+
+                    switch (*source++)
+                    {
+                        case 'N': source--; return "Named character escapes are not supported.";
+
+                        case '\'': *output++ = '\''; break;
+                        case '"':  *output++ = '"';  break;
+                        case '\\': *output++ = '\\'; break;
+                        case 'a':  *output++ = '\a'; break;
+                        case 'b':  *output++ = '\b'; break;
+                        case 'f':  *output++ = '\f'; break;
+                        case 'n':  *output++ = '\n'; break;
+                        case 'r':  *output++ = '\r'; break;
+                        case 't':  *output++ = '\t'; break;
+                        case 'v':  *output++ = '\v'; break;
+
+                      case 'o':
+                        {
+                            if (*source != '{')
+                                return "Expected `{` to begin the escape sequence.";
+                            source++;
+                            char32_t n = 0;
+                            if (auto error = ConsumeDigits(n, false, -2, 0xff); !error.empty())
+                                return error;
+                            *output++ = char(n);
+                        }
+                        break;
+
+                      case 'x':
+                        {
+                            char32_t n = 0;
+                            if (*source == '{')
+                            {
+                                source++;
+                                if (auto error = ConsumeDigits(n, true, -2, 0xff); !error.empty())
+                                    return error;
+                            }
+                            else
+                            {
+                                if (auto error = ConsumeDigits(n, true, -1, 0xff); !error.empty())
+                                    return error;
+                            }
+                            *output++ = char(n);
+                        }
+                        break;
+
+                      case 'u':
+                      case 'U':
+                        {
+                            char32_t n = 0;
+                            if (*source == '{')
+                            {
+                                source++;
+                                if (auto error = ConsumeDigits(n, true, -2, uni::max_char_value); !error.empty())
+                                    return error;
+                            }
+                            else
+                            {
+                                if (auto error = ConsumeDigits(n, true, source[-1] == 'u' ? 4 : 8, uni::max_char_value); !error.empty())
+                                    return error;
+                            }
+
+                            char buffer[uni::max_char_len];
+                            std::size_t len = uni::EncodeCharToBuffer(n, buffer);
+                            if (only_single_char && n > 0x7f)
+                                return "Escape sequence is too large for this character type.";
+                            for (std::size_t i = 0; i < len; i++)
+                                *output++ = buffer[i];
+                        }
+                        break;
+
+                      default:
+                        source--;
+                        if (*source >= '0' && *source <= '7')
+                        {
+                            char32_t n = 0;
+                            if (auto error = ConsumeDigits(n, false, 3, 0xff); !error.empty())
+                                return error;
+                            *output++ = char(n);
+                            break;
+                        }
+                        return "Invalid escape sequence.";
+                    }
+                }
+
+                if (only_single_char && char_counter == 0)
+                    return "Expected a character.";
+
+                if (quote_char)
+                {
+                    if (*source != quote_char)
+                        return CFG_TA_FMT_NAMESPACE::format("Expected closing `{}`.", quote_char);
+                    source++;
+                }
+
+                return "";
+            }
+        }
+
+        // Demangles output from `typeid(...).name()`.
+        class Demangler
+        {
+            #if CFG_TA_CXXABI_DEMANGLE
+            char *buf_ptr = nullptr;
+            std::size_t buf_size = 0;
+            #endif
+
+          public:
+            CFG_TA_API Demangler();
+            Demangler(const Demangler &) = delete;
+            Demangler &operator=(const Demangler &) = delete;
+            CFG_TA_API ~Demangler();
+
+            // Demangles a name.
+            // On GCC ang Clang invokes `__cxa_demangle()`, on MSVC returns the string unchanged.
+            // The returned pointer remains as long as both the passed string and the class instance are alive.
+            // Preserve the class instance between calls to potentially reuse the buffer.
+            [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
+        };
+
+        // Caches type names produced by `Demangler`.
+        template <typename T>
+        [[nodiscard]] const std::string &TypeName()
+        {
+            static const std::string ret = Demangler{}(typeid(T).name());
+            return ret;
+        }
+
+        // Parsing C++ expressions.
+        namespace expr
+        {
+            // The state of the parser state machine.
+            enum class CharKind
+            {
+                normal,
+                string, // A string literal (not raw), not including things outside quotes.
+                character, // A character literal, not including things outside quotes.
+                string_escape_slash, // Escaping slashes in a string literal.
+                character_escape_slash, // Escaping slashes in a character literal.
+                raw_string, // A raw string literal, starting from `(` and until the closing `"` inclusive.
+                raw_string_initial_sep // A raw string literal, from the opening `"` to the `(` exclusive.
+            };
+
+            // `emit_char` is `(const char &ch, CharKind kind) -> void`.
+            // It's called for every character, classifying it. The character address is guaranteed to be in `expr`.
+            // `function_call` is `(std::string_view name, std::string_view args, std::size_t depth) -> void`.
+            // It's called for every pair of parentheses. `args` is the contents of parentheses, possibly with leading and trailing whitespace.
+            // `name` is the identifier preceding the `(`, without whitespace. It can be empty, or otherwise invalid.
+            // `depth` is the parentheses nesting depth, starting at 0.
+            template <typename EmitCharFunc, typename FunctionCallFunc>
+            constexpr void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, FunctionCallFunc &&function_call)
+            {
+                CharKind state = CharKind::normal;
+
+                // The previous character.
+                char prev_ch = '\0';
+                // The current identifier. Only makes sense in `state == normal`.
+                std::string_view identifier;
+                // Points at the start of the initial separator of a raw string.
+                const char *raw_string_sep_start = nullptr;
+                // The separator at the end of the raw string.
+                std::string_view raw_string_sep;
+
+                struct Entry
+                {
+                    // The identifier preceding the `(`, such as the function name. if any.
+                    std::string_view ident;
+                    // Points to the beginning of the arguments, right after `(`.
+                    const char *args = nullptr;
+                };
+
+                // A stack of `()` parentheses.
+                // This should be a vector, by my Clang 16 can't handle them in constexpr calls yet...
+                Entry parens_stack[256];
+                std::size_t parens_stack_pos = 0;
+
+                for (const char &ch : expr)
+                {
+                    const CharKind prev_state = state;
+
+                    switch (state)
+                    {
+                      case CharKind::normal:
+                        if (ch == '"' && prev_ch == 'R')
+                        {
+                            state = CharKind::raw_string_initial_sep;
+                            raw_string_sep_start = &ch + 1;
+                        }
+                        else if (ch == '"')
+                        {
+                            state = CharKind::string;
+                        }
+                        else if (ch == '\'')
+                        {
+                            // This condition handles `'` digit separators.
+                            if (identifier.empty() || &identifier.back() + 1 != &ch || !chars::IsDigit(identifier.front()))
+                                state = CharKind::character;
+                        }
+                        else if (chars::IsIdentifierChar(ch))
+                        {
+                            // We reset `identifier` lazily here, as opposed to immediately,
+                            // to allow function calls with whitespace between the identifier and `(`.
+                            if (!chars::IsIdentifierChar(prev_ch))
+                                identifier = {};
+
+                            if (identifier.empty())
+                                identifier = {&ch, 1};
+                            else
+                                identifier = {identifier.data(), identifier.size() + 1};
+                        }
+                        else
+                        {
+                            if constexpr (!std::is_null_pointer_v<FunctionCallFunc>)
+                            {
+                                if (ch == '(')
+                                {
+                                    if (parens_stack_pos >= std::size(parens_stack))
+                                        HardError("Too many nested parentheses.");
+                                    parens_stack[parens_stack_pos++] = {
+                                        .ident = identifier,
+                                        .args = &ch + 1,
+                                    };
+                                    identifier = {};
+                                }
+                                else if (ch == ')' && parens_stack_pos > 0)
+                                {
+                                    parens_stack_pos--;
+                                    function_call(parens_stack[parens_stack_pos].ident, std::string_view(parens_stack[parens_stack_pos].args, &ch), parens_stack_pos);
+                                }
+                            }
+                        }
+                        break;
+                      case CharKind::string:
+                        if (ch == '"')
+                            state = CharKind::normal;
+                        else if (ch == '\\')
+                            state = CharKind::string_escape_slash;
+                        break;
+                      case CharKind::character:
+                        if (ch == '\'')
+                            state = CharKind::normal;
+                        else if (ch == '\\')
+                            state = CharKind::character_escape_slash;
+                        break;
+                      case CharKind::string_escape_slash:
+                        state = CharKind::string;
+                        break;
+                      case CharKind::character_escape_slash:
+                        state = CharKind::character;
+                        break;
+                      case CharKind::raw_string_initial_sep:
+                        if (ch == '(')
+                        {
+                            state = CharKind::raw_string;
+                            raw_string_sep = {raw_string_sep_start, &ch};
+                        }
+                        break;
+                      case CharKind::raw_string:
+                        if (ch == '"')
+                        {
+                            std::string_view content(raw_string_sep_start, &ch);
+                            if (content.size() >/*sic*/ raw_string_sep.size() && content[content.size() - raw_string_sep.size() - 1] == ')' && content.ends_with(raw_string_sep))
+                                state = CharKind::normal;
+                        }
+                        break;
+                    }
+
+                    if (prev_state != CharKind::normal && state == CharKind::normal)
+                        identifier = {};
+
+                    CharKind fixed_state = state;
+                    if (prev_state == CharKind::string || prev_state == CharKind::character || prev_state == CharKind::raw_string)
+                        fixed_state = prev_state;
+
+                    if constexpr (!std::is_null_pointer_v<EmitCharFunc>)
+                        emit_char(ch, fixed_state);
+
+                    prev_ch = ch;
+                }
+            }
+        }
+    }
+
+    // String conversions.
     namespace string_conv
     {
+        // This imitates `std::range_format`, except we don't deal with unescaped strings.
+        enum class RangeKind
+        {
+            disabled, // Not a range.
+            sequence, // [...]
+            set, // {...}
+            map, // {A: B, C: D}
+            string, // "..."
+        };
+
+
+        // --- TO STRING ---
+
         // You normally shouldn't specialize this, specialize `ToStringTraits` defined below.
         // `DefaultToStringTraits` uses this for types that don't support the debug format `"{:?}"`.
         template <typename T, typename = void>
@@ -440,17 +1193,6 @@ namespace ta_test
             {
                 return CFG_TA_FMT_NAMESPACE::format("{}", value);
             }
-        };
-        // Throw in some fallback formatters to escape strings, for format libraries that don't support this yet.
-        template <>
-        struct DefaultFallbackToStringTraits<char>
-        {
-            CFG_TA_API std::string operator()(char value) const;
-        };
-        template <>
-        struct DefaultFallbackToStringTraits<std::string_view>
-        {
-            CFG_TA_API std::string operator()(std::string_view value) const;
         };
 
         // Don't specialize this, specialize `ToStringTraits` defined below.
@@ -467,6 +1209,38 @@ namespace ta_test
                 else
                     return DefaultFallbackToStringTraits<T>{}(value);
             }
+        };
+
+        // You can specialize this for your types.
+        template <typename T, typename = void>
+        struct ToStringTraits : DefaultToStringTraits<T> {};
+
+        // Whether `ToString()` works on `T`.
+        // Ignores cvref-qualifiers (well, except volatile).
+        template <typename T>
+        concept SupportsToString = requires(const T &t){ToStringTraits<std::remove_cvref_t<T>>{}(t);};
+
+        // Converts `value` to a string using `ToStringTraits`.
+        // We don't support non-const ranges for now, and we probably shouldn't (don't want to mess up user's stateful views?).
+        template <typename T>
+        requires std::is_same_v<T, std::remove_cvref_t<T>>
+        [[nodiscard]] std::string ToString(const T &value)
+        {
+            return ToStringTraits<std::remove_cvref_t<T>>{}(value);
+        }
+
+        // --- TO STRING SPECIALIZATIONS ---
+
+        // Throw in some fallback formatters to escape strings, for format libraries that don't support this yet.
+        template <>
+        struct DefaultFallbackToStringTraits<char>
+        {
+            CFG_TA_API std::string operator()(char value) const;
+        };
+        template <>
+        struct DefaultFallbackToStringTraits<std::string_view>
+        {
+            CFG_TA_API std::string operator()(std::string_view value) const;
         };
         // libstdc++ 13 has a broken non-SFINAE-friendly `formatter<const char *>::set_debug_string()`, which causes issues.
         // `std::string_view` formatter doesn't have this issue, so we just use it here instead.
@@ -500,21 +1274,487 @@ namespace ta_test
         template <>
         struct DefaultToStringTraits<std::type_info> : DefaultToStringTraits<std::type_index> {};
 
-        // You can specialize this for your types.
-        template <typename T, typename = void>
-        struct ToStringTraits : DefaultToStringTraits<T> {};
-
-        // Whether `ToString()` works on `T`.
-        // Ignores cvref-qualifiers (well, except volatile).
+        // Ranges.
+        #if CFG_TA_FMT_HAS_RANGE_FORMAT == 0
+        // This replaces `std::format_kind` (or `fmt::range_format_kind`) if the formatting library can't format ranges.
+        // You can specialize this.
+        // This classifier never returns `RangeKind::string`, just like the standard one.
+        // NOTE: The standard (and libfmt) versions of this variable return junk for `std::string[_view]`, so ours does too, and we never use it on those types.
         template <typename T>
-        concept SupportsToString = requires(const T &t){ToStringTraits<std::remove_cvref_t<T>>{}(t);};
+        constexpr RangeKind range_format_kind = []{
+            if constexpr (!std::ranges::input_range<T>)
+            {
+                // A bit weird to check `input_range` when converting TO a string, but this is what `std::format_kind` uses,
+                // and we should probably be consistent with it.
+                return RangeKind::disabled;
+            }
+            else if constexpr (std::same_as<std::remove_cvref_t<std::ranges::range_reference_t<T>>, T>)
+            {
+                // Straight from cppreference. Probably for ranges that contain instances of the same type, like `std::filesystem::path`?
+                return RangeKind::disabled;
+            }
+            else if constexpr (requires{typename T::key_type;})
+            {
+                using Elem = std::remove_cvref_t<std::ranges::range_reference_t<T>>;
+                // `std::tuple_size_v` is SFINAE-unfriendly, so we're using `std::tuple_size` instead.
+                // This condition is slightly simplified compared to what cppreference uses, but whatever.
+                if constexpr (requires{requires std::tuple_size<Elem>::value == 2;})
+                    return RangeKind::map;
+                else
+                    return RangeKind::set;
+            }
+            else
+            {
+                return RangeKind::sequence;
+            }
+        }();
 
-        // Converts `value` to a string using `ToStringTraits`.
+        // Range formatter.
         template <typename T>
-        [[nodiscard]] std::string ToString(T &&value)
+        requires(range_format_kind<T> != RangeKind::disabled)
+        struct DefaultToStringTraits<T>
         {
-            return ToStringTraits<std::remove_cvref_t<T>>{}(value);
+            std::string operator()(const T &value) const
+            {
+                if constexpr (range_format_kind<T> == RangeKind::string)
+                {
+                    if constexpr (std::contiguous_iterator<std::ranges::iterator_t<T>>)
+                    {
+                        std::basic_string_view<std::ranges::range_value_t<T>> view(std::to_address(value.begin()), std::to_address(value.end()));
+                        return (ToString)(view);
+                    }
+                    else
+                    {
+                        std::basic_string<std::ranges::range_value_t<T>> string(value.begin(), value.end());
+                        return (ToString)(string);
+                    }
+                }
+                else
+                {
+                    constexpr bool use_braces = range_format_kind<T> != RangeKind::sequence;
+                    std::string ret;
+                    ret += "[{"[use_braces];
+                    for (bool first = true; const auto &elem : value)
+                    {
+                        if (first)
+                            first = false;
+                        else
+                            ret += ", ";
+
+                        if constexpr (range_format_kind<T> == RangeKind::map)
+                        {
+                            ret += (ToString)(std::get<0>(elem));
+                            ret += ": ";
+                            ret += (ToString)(std::get<1>(elem));
+                        }
+                        else
+                        {
+                            ret += (ToString)(elem);
+                        }
+                    }
+                    ret += "]}"[use_braces];
+                    return ret;
+                }
+            }
+        };
+
+        template <typename T>
+        concept TupleLike = requires{std::tuple_size<T>::value;}; // Note, `std::tuple_size_v` would be SFINAE-unfriendly.
+
+        // Tuple formatter.
+        template <TupleLike T>
+        struct DefaultToStringTraits<T>
+        {
+            std::string operator()(const T &value) const
+            {
+                std::string ret = "(";
+                [&]<std::size_t ...I>(std::index_sequence<I...>){
+                    ([&]{
+                        if constexpr (I > 0)
+                            ret += ", ";
+                        ret += (ToString)(std::get<I>(value));
+                    }(), ...);
+                }(std::make_index_sequence<std::tuple_size_v<T>>{});
+                ret += ")";
+                return ret;
+            }
+        };
+        #endif
+
+
+        // --- FROM STRING ---
+
+        template <typename T>
+        concept ScalarConvertibleFromString = (std::is_integral_v<T> && sizeof(T) <= sizeof(long long)) || (std::is_floating_point_v<T> && sizeof(T) <= sizeof(long double));
+
+        // Calls the most suitable `std::strto*` for the specified type.
+        // The return type might be wider than `T`.
+        template <ScalarConvertibleFromString T>
+        [[nodiscard]] auto strto_low(const char *str, char **str_end, int base = 0)
+        {
+            if constexpr (std::is_integral_v<T>)
+            {
+                constexpr bool use_long = sizeof(T) <= sizeof(long);
+                constexpr bool is_signed = std::is_signed_v<T>;
+
+                if constexpr (use_long && is_signed)
+                    return std::strtol(str, str_end, base);
+                else if constexpr (use_long && !is_signed)
+                    return std::strtoul(str, str_end, base);
+                else if constexpr (!use_long && is_signed)
+                    return std::strtoll(str, str_end, base);
+                else // !use_long && !is_signed
+                    return std::strtoull(str, str_end, base);
+            }
+            else
+            {
+                if constexpr (sizeof(T) <= sizeof(float))
+                    return std::strtof(str, str_end);
+                else if constexpr (sizeof(T) <= sizeof(double))
+                    return std::strtod(str, str_end);
+                else if constexpr (sizeof(T) <= sizeof(long double))
+                    return std::strtold(str, str_end);
+            }
         }
+
+        // Wraps `strto_low` to check for various errors. Reports errors by setting `*str_end` to `str`.
+        template <ScalarConvertibleFromString T>
+        [[nodiscard]] T strto(const char *str, const char **str_end, int base = 0)
+        {
+            if (std::isspace((unsigned char)*str))
+            {
+                *str_end = str;
+                return 0;
+            }
+
+            char *end = const_cast<char *>(str);
+            errno = 0; // `strto*` appears to indicate out-of-range errors only by setting `errno`.
+            auto raw_result = (strto_low<T>)(str, &end, base);
+            if (end == str || errno != 0)
+            {
+                *str_end = str;
+                return 0;
+            }
+
+            T result = T(raw_result);
+
+            // Check roundtrip conversion.
+            if constexpr (!std::is_same_v<decltype(raw_result), T>)
+            {
+                // This wouldn't work for `signed T <-> unsigned T`, but we should never have sign mismatch here.
+                if (decltype(raw_result)(result) != raw_result)
+                {
+                    *str_end = str;
+                    return 0;
+                }
+            }
+
+            *str_end = end;
+            return result;
+        }
+
+        // Don't specialize this, specialize `FromStringTraits`.
+        template <typename T>
+        struct DefaultFromStringTraits {};
+
+        template <typename T>
+        struct FromStringTraits : DefaultFromStringTraits<T>
+        {
+            // Since we use `std::strtoX` for scalars internally, this forces us to use null-terminated strings for everything,
+            //   so we can't accept a `std::string_view` here.
+            // Returns the error message, or empty on success. `target` will always start value-initialized.
+            // std::string operator()(T &target, const char *&string) const;
+        };
+
+        // Whether `FromString()` works on `T`. `T` must be cvref-unqualified.
+        template <typename T>
+        concept SupportsFromString =
+            std::is_same_v<T, std::remove_cvref_t<T>>
+            && requires(T &target, const char *&string)
+            {
+                { FromStringTraits<T>{}(target, string) } -> std::same_as<std::string>;
+            };
+
+        // Writes an error message to `error` on failure, then returns null.
+        // On failure `string` will point to the offending character. On success, it will point to the end of string.
+        template <SupportsFromString T>
+        [[nodiscard]] std::optional<T> FromString(const char *&string, std::string &error)
+        {
+            std::optional<T> ret(std::in_place);
+            error = FromStringTraits<T>{}(*ret, string);
+            if (!error.empty())
+            {
+                ret.reset();
+                return ret;
+            }
+            if (*string != '\0')
+            {
+                error = "Expected end of string.";
+                ret.reset();
+                return ret;
+            }
+            return ret;
+        }
+
+
+        // --- FROM STRING SPECIALIZATIONS ---
+
+        // Scalars.
+        template <ScalarConvertibleFromString T>
+        struct DefaultFromStringTraits<T>
+        {
+            std::string operator()(T &target, const char *&string) const
+            {
+                const char *end = string;
+                target = (strto<T>)(string, &end, 0);
+                if (end == string)
+                    return CFG_TA_FMT_NAMESPACE::format("Invalid {}.", text::TypeName<T>());
+                string = end;
+                return "";
+            }
+        };
+
+        // Single character.
+        template <>
+        struct DefaultFromStringTraits<char>
+        {
+            std::string operator()(char &target, const char *&string) const
+            {
+                return text::escape::UnescapeString(string, '\'', &target, true);
+            }
+        };
+
+        // Ranges.
+
+        // Classifies the range for converting from a string. You almost never want to specialize this.
+        // Normally you want to specialize `std::format_kind` or `fmt::range_format_kind` or our `ta_test::string_conv::range_format_kind`,
+        //   depending on what formatting library you use.
+        template <typename T>
+        constexpr RangeKind from_string_range_format_kind =
+        #if CFG_TA_FMT_HAS_RANGE_FORMAT == 0
+            range_format_kind<T>;
+        #else
+            []{
+                if constexpr (!std::input_range<T>)
+                {
+                    return RangeKind::disabled;
+                }
+                else
+                {
+                    auto value =
+                    #if CFG_TA_FMT_HAS_RANGE_FORMAT == 1
+                        CFG_TA_FMT_NAMESPACE::format_kind<T>;
+                    #elif CFG_TA_FMT_HAS_RANGE_FORMAT == 2
+                        CFG_TA_FMT_NAMESPACE::range_format_kind<T>::value;
+                    #else
+                    #error Invalid `CFG_TA_FMT_HAS_RANGE_FORMAT` value.
+                    #endif
+                    return
+                        value == CFG_TA_FMT_NAMESPACE::format_kind::sequence ? RangeKind::sequence :
+                        value == CFG_TA_FMT_NAMESPACE::format_kind::set      ? RangeKind::set :
+                        value == CFG_TA_FMT_NAMESPACE::format_kind::map      ? RangeKind::map :
+                        value == CFG_TA_FMT_NAMESPACE::format_kind::string || value == CFG_TA_FMT_NAMESPACE::format_kind::debug_string ? RangeKind::string :
+                        RangeKind::disabled;
+                }
+            }();
+        #endif
+
+        // Our classifier returns junk for `std::string[_view]` by default, so we need those overrides.
+        template <>
+        inline constexpr RangeKind from_string_range_format_kind<std::string> = RangeKind::string;
+        template <>
+        inline constexpr RangeKind from_string_range_format_kind<std::string_view> = RangeKind::string;
+
+        // Adjusts a range element type to prepare it for converting from string.
+        template <typename T>
+        struct AdjustRangeElemToConvertFromString {using type = T;};
+        // Remove constness from a map key.
+        template <typename T, typename U>
+        struct AdjustRangeElemToConvertFromString<std::pair<const T, U>> {using type = std::pair<T, U>;};
+
+        // Whether `T` is a range that possibly could be converted from string. We further constrain this concept below.
+        template <typename T>
+        concept RangeSupportingFromStringWeak = from_string_range_format_kind<T> != RangeKind::disabled;
+        // Whether we can `.emplace_back()` to this range.
+        // This is nice, because we can insert first, and then operate on a reference.
+        template <typename T>
+        concept RangeSupportingEmplaceBack = RangeSupportingFromStringWeak<T> &&
+            std::is_same_v<typename AdjustRangeElemToConvertFromString<T>::type, T> &&
+            requires(T &target) {requires std::is_same_v<decltype(target.emplace_back()), std::ranges::range_value_t<T> &>;};
+        // Whether we can `.push_back()` to this range. Unsure what container would actually need this over `emplace_back()`, perhaps something non-standard?
+        template <typename T>
+        concept RangeSupportingPushBack = RangeSupportingFromStringWeak<T> &&
+            requires(T &target, std::ranges::range_value_t<T> &&e){target.push_back(std::move(e));};
+        // Whether we can `.insert()` to this range.
+        template <typename T>
+        concept RangeSupportingInsert = RangeSupportingFromStringWeak<T> &&
+            requires(T &target, std::ranges::range_value_t<T> &&e){requires std::is_same_v<decltype(target.insert(std::move(e)).second), bool>;};
+        // Whether this range can be converted from a string.
+        template <typename T>
+        concept RangeSupportingFromString = RangeSupportingEmplaceBack<T> || RangeSupportingPushBack<T> || RangeSupportingInsert<T>;
+
+        // The actual code for ranges. Escaped strings are handled here too.
+        template <RangeSupportingFromString T>
+        struct DefaultFromStringTraits<T>
+        {
+            std::string operator()(T &target, const char *&string) const
+            {
+                if constexpr (from_string_range_format_kind<T> == RangeKind::string)
+                {
+                    return text::escape::UnescapeString(string, '"', std::back_inserter(target), false);
+                }
+                else
+                {
+                    constexpr bool is_associative = from_string_range_format_kind<T> != RangeKind::sequence;
+                    constexpr char brace_open = "[{"[is_associative];
+                    constexpr char brace_close = "]}"[is_associative];
+
+                    // Consume opening brace.
+                    if (*string != brace_open)
+                        return CFG_TA_FMT_NAMESPACE::format("Expected opening `{}`.", brace_open);
+                    string++;
+
+                    bool first = true;
+
+                    while (true)
+                    {
+                        text::chars::SkipWhitespace(string);
+
+                        // Stop on closing brace.
+                        if (*string == brace_close)
+                        {
+                            string++;
+                            break;
+                        }
+
+                        // Consume comma.
+                        if (first)
+                        {
+                            first = false;
+                        }
+                        else
+                        {
+                            if (*string == ',')
+                                string++;
+                            else
+                                return CFG_TA_FMT_NAMESPACE::format("Expected `,` or closing `{}`.", brace_close);
+
+                            text::chars::SkipWhitespace(string);
+                        }
+
+                        using Elem = typename AdjustRangeElemToConvertFromString<std::ranges::range_value_t<T>>::type;
+
+                        auto ConsumeElem = [&](Elem &target) -> std::string
+                        {
+                            if constexpr (from_string_range_format_kind<T> == RangeKind::map)
+                            {
+                                // Note that `tuple_size_v` would not be SFINAE-friendly.
+                                // Using `requires` for SFINAE-friendliness.
+                                static_assert(requires{requires std::tuple_size<Elem>::value == 2;}, "Range kind is set to `map`, but its element type is not a 2-tuple.");
+
+                                std::string error = FromStringTraits<std::tuple_element_t<0, Elem>>{}(std::get<0>(target), string);
+                                if (!error.empty())
+                                    return error;
+                                text::chars::SkipWhitespace(string);
+
+                                if (*string != ':')
+                                    return "Expected `:` after the element key.";
+                                string++;
+
+                                text::chars::SkipWhitespace(string);
+                                return FromStringTraits<std::tuple_element_t<1, Elem>>{}(std::get<1>(target), string);
+                            }
+                            else
+                            {
+                                return FromStringTraits<Elem>{}(target, string);
+                            }
+                        };
+
+                        // Insert the element.
+                        if constexpr (RangeSupportingInsert<T>)
+                        {
+                            const char *old_string = string;
+                            Elem elem{};
+                            std::string error = ConsumeElem(elem);
+                            if (!error.empty())
+                                return error;
+                            if (!target.insert(std::move(elem)).second)
+                            {
+                                string = old_string;
+                                return "Duplicate key.";
+                            }
+                        }
+                        else if constexpr (RangeSupportingEmplaceBack<T>)
+                        {
+                            std::string error = ConsumeElem(target.emplace_back());
+                            if (!error.empty())
+                                return error;
+                        }
+                        else if constexpr (RangeSupportingPushBack<T>)
+                        {
+                            Elem elem{};
+                            std::string error = ConsumeElem(elem);
+                            if (!error.empty())
+                                return error;
+                            target.push_back(std::move(elem));
+                        }
+                        else
+                        {
+                            static_assert(meta::AlwaysFalse<T>::value, "Internal error: Unknown container flavor.");
+                        }
+                    }
+
+                    return "";
+                }
+            }
+        };
+
+        // Tuples.
+
+        template <TupleLike T>
+        struct DefaultFromStringTraits<T>
+        {
+            std::string operator()(T &target, const char *&string) const
+            {
+                if (*string != '(')
+                    return "Expected opening `(`.";
+                string++;
+
+                std::string error;
+
+                bool fail = [&]<std::size_t ...I>(std::index_sequence<I...>){
+                    return ([&]{
+                        if constexpr (I != 0)
+                        {
+                            text::chars::SkipWhitespace(string);
+
+                            if (*string != ',')
+                            {
+                                error = "Expected `,`.";
+                                return true;
+                            }
+                            string++;
+                        }
+
+                        text::chars::SkipWhitespace(string);
+
+                        error = FromStringTraits<std::tuple_element_t<I, T>>{}(std::get<I>(target), string);
+                        return !error.empty();
+                    }() || ...);
+                }(std::make_index_sequence<std::tuple_size_v<T>>{});
+
+                if (fail)
+                    return error;
+
+                text::chars::SkipWhitespace(string);
+
+                if (*string != ')')
+                    return "Expected closing `)`.";
+                string++;
+
+                return "";
+            }
+        };
     }
 
     // Parsing command line arguments.
@@ -1294,16 +2534,10 @@ namespace ta_test
         };
         [[nodiscard]] CFG_TA_API GlobalThreadState &ThreadState();
 
-        // Extracts the class type from a member pointer type.
-        template <typename T>
-        struct MemberPointerClass {};
-        template <typename T, typename C>
-        struct MemberPointerClass<T C::*> {using type = C;};
-
         // Returns true if `P` is a member function pointer of a class other than `BasicModule`.
         template <auto P>
         struct IsOverriddenModuleFunction
-            : std::bool_constant<!std::is_same_v<typename MemberPointerClass<decltype(P)>::type, BasicModule>>
+            : std::bool_constant<!std::is_same_v<typename meta::MemberPointerClass<decltype(P)>::type, BasicModule>>
         {};
 
         // Inherits from a user module, and checks which virtual functions were overriden.
@@ -1326,19 +2560,6 @@ namespace ta_test
                 return ret;
             }
         };
-
-        // Returns true if `X` and `Y` have the same type and are equal.
-        template <auto X, auto Y>
-        struct ValuesAreEqual : std::false_type {};
-        template <auto X>
-        struct ValuesAreEqual<X, X> : std::true_type {};
-
-        // Always returns `false`.
-        template <typename, typename...>
-        struct AlwaysFalse : std::false_type {};
-
-        template <auto>
-        struct ValueTag {};
     }
 
 
@@ -1431,20 +2652,18 @@ namespace ta_test
         {
             constexpr BasicModule::InterfaceFunction func_enum = []{
                 #define DETAIL_TA_X(func_) \
-                    if constexpr (detail::ValuesAreEqual<F, &BasicModule::func_>::value) \
+                    if constexpr (meta::ValuesAreEqual<F, &BasicModule::func_>::value) \
                         return BasicModule::InterfaceFunction::func_; \
                     else
                 DETAIL_TA_MODULE_FUNCS(DETAIL_TA_X)
                 #undef DETAIL_TA_X
-                static_assert(detail::AlwaysFalse<detail::ValueTag<F>>::value, "Bad member function pointer.");
+                static_assert(meta::AlwaysFalse<meta::ValueTag<F>>::value, "Bad member function pointer.");
             }();
             for (auto *m : GetModulesImplementing<func_enum>())
                 (m->*F)(params...); // No forwarding because there's more than one call.
         }
     };
 
-
-    // --- PLATFORM INFORMATION ---
 
     namespace platform
     {
@@ -1453,402 +2672,182 @@ namespace ta_test
         CFG_TA_API bool IsDebuggerAttached();
 
         // Whether stdout (or stderr, depending on the argument) is attached to a terminal.
-        CFG_TA_API bool IsTerminalAttached(bool stderr);
+        CFG_TA_API bool IsTerminalAttached(bool is_stderr);
     }
 
-
-    // --- PRINTING AND STRINGS ---
-
-    // Text color.
-    enum class TextColor
+    namespace output
     {
-        // 16 colors palette.
-        // The values are the foreground text colors. Add 10 to make background colors.
-        none = 39,
-        dark_black = 30,
-        dark_red = 31,
-        dark_green = 32,
-        dark_yellow = 33,
-        dark_blue = 34,
-        dark_magenta = 35,
-        dark_cyan = 36,
-        dark_white = 37,
-        light_black = 90,
-        light_red = 91,
-        light_green = 92,
-        light_yellow = 93,
-        light_blue = 94,
-        light_magenta = 95,
-        light_cyan = 96,
-        light_white = 97,
-
-        // Extended colors:
-        // First 16 map to the ones listed above.
-        // The next 216 are 6-bits-per-channel RGB: R*36 + G*6 + B.
-        // The remaining 24 are shades of gray, from black to almost white.
-        extended = 256,
-        extended_end = extended + 256,
-    };
-    // Creates a 6-bit-per-channel extended terminal color. Each component must be `0 <= x < 6`.
-    [[nodiscard]] constexpr TextColor TextColorRgb6(int r, int g, int b)
-    {
-        return TextColor(int(TextColor::extended) + 16 + r * 36 + g * 6 + b);
-    }
-    // Creates a grayscale color, with `n == 0` for black and `n == 24` (sic, not 23) for pure white.
-    // `n` is clamped to `0..24`.
-    [[nodiscard]] constexpr TextColor TextColorGrayscale24(int n)
-    {
-        if (n < 0)
-            n = 0;
-        else if (n >= 24)
-            return TextColorRgb6(5,5,5);
-        return TextColor(int(TextColor::extended) + 232 + n);
-    }
-
-    // Text style.
-    struct TextStyle
-    {
-        TextColor color = TextColor::none;
-        TextColor bg_color = TextColor::none;
-        bool bold = false;
-        bool italic = false;
-        bool underline = false;
-
-        friend bool operator==(const TextStyle &, const TextStyle &) = default;
-    };
-
-    // Configuration for printing text.
-    struct Terminal
-    {
-        bool enable_color = false;
-
-        // The characters are written to this `std::vprintf`-style callback.
-        // Defaults to `SetFileOutput(stdout)`.
-        std::function<void(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args)> output_func;
-
-        Terminal() : Terminal(stdout) {}
-
-        // Sets `output_func` to print to `stream`.
-        // Also guesses `enable_color` (always false when `stream` is neither `stdout` nor `stderr`).
-        CFG_TA_API Terminal(FILE *stream);
-
-        // Prints a message using `output_func`. Unlike `Print`, doesn't accept `TextStyle`s directly.
-        // Prefer `Print()`.
-        CFG_TA_API void PrintLow(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) const;
-
-        // Resets the text style when constructed and when destructed.
-        // Can't be constructed manually, use `MakeStyleGuard()`.
-        class StyleGuard
+        // Text color.
+        enum class TextColor
         {
-            friend Terminal;
+            // 16 colors palette.
+            // The values are the foreground text colors. Add 10 to make background colors.
+            none = 39,
+            dark_black = 30,
+            dark_red = 31,
+            dark_green = 32,
+            dark_yellow = 33,
+            dark_blue = 34,
+            dark_magenta = 35,
+            dark_cyan = 36,
+            dark_white = 37,
+            light_black = 90,
+            light_red = 91,
+            light_green = 92,
+            light_yellow = 93,
+            light_blue = 94,
+            light_magenta = 95,
+            light_cyan = 96,
+            light_white = 97,
 
-            Terminal &terminal;
-            int exception_counter = 0;
-            TextStyle cur_style;
+            // Extended colors:
+            // First 16 map to the ones listed above.
+            // The next 216 are 6-bits-per-channel RGB: R*36 + G*6 + B.
+            // The remaining 24 are shades of gray, from black to almost white.
+            extended = 256,
+            extended_end = extended + 256,
+        };
+        // Creates a 6-bit-per-channel extended terminal color. Each component must be `0 <= x < 6`.
+        [[nodiscard]] constexpr TextColor TextColorRgb6(int r, int g, int b)
+        {
+            return TextColor(int(TextColor::extended) + 16 + r * 36 + g * 6 + b);
+        }
+        // Creates a grayscale color, with `n == 0` for black and `n == 24` (sic, not 23) for pure white.
+        // `n` is clamped to `0..24`.
+        [[nodiscard]] constexpr TextColor TextColorGrayscale24(int n)
+        {
+            if (n < 0)
+                n = 0;
+            else if (n >= 24)
+                return TextColorRgb6(5,5,5);
+            return TextColor(int(TextColor::extended) + 232 + n);
+        }
 
-            CFG_TA_API StyleGuard(Terminal &terminal);
+        // Text style.
+        struct TextStyle
+        {
+            TextColor color = TextColor::none;
+            TextColor bg_color = TextColor::none;
+            bool bold = false;
+            bool italic = false;
+            bool underline = false;
 
-          public:
-            StyleGuard(const StyleGuard &) = delete;
-            StyleGuard &operator=(const StyleGuard &) = delete;
-
-            CFG_TA_API ~StyleGuard();
-
-            // Pokes the terminal to reset the style, usually before and after running user code.
-            CFG_TA_API void ResetStyle();
+            friend bool operator==(const TextStyle &, const TextStyle &) = default;
         };
 
-        [[nodiscard]] StyleGuard MakeStyleGuard()
+        // Configuration for printing text.
+        struct Terminal
         {
-            return StyleGuard(*this);
-        }
+            bool enable_color = false;
 
-        // --- MANUAL ANSI ESCAPE SEQUENCE API ---
+            // The characters are written to this `std::vprintf`-style callback.
+            // Defaults to `SetFileOutput(stdout)`.
+            std::function<void(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args)> output_func;
 
-        // Printing this string resets the text styles. It's always null-terminated.
-        [[nodiscard]] CFG_TA_API std::string_view AnsiResetString() const;
+            Terminal() : Terminal(stdout) {}
 
-        // Should be large enough.
-        using AnsiDeltaStringBuffer = std::array<char, 100>;
+            // Sets `output_func` to print to `stream`.
+            // Also guesses `enable_color` (always false when `stream` is neither `stdout` nor `stderr`).
+            CFG_TA_API Terminal(FILE *stream);
 
-        // Produces a string to switch between text styles, from `prev` to `cur`.
-        // If the styles are the same, does nothing.
-        //
-        [[nodiscard]] CFG_TA_API AnsiDeltaStringBuffer AnsiDeltaString(const StyleGuard &&cur, const TextStyle &next) const;
+            // Prints a message using `output_func`. Unlike `Print`, doesn't accept `TextStyle`s directly.
+            // Prefer `Print()`.
+            CFG_TA_API void PrintLow(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) const;
 
-        // This overload additionally performs `cur = next`.
-        [[nodiscard]] AnsiDeltaStringBuffer AnsiDeltaString(StyleGuard &cur, const TextStyle &next) const
-        {
-            AnsiDeltaStringBuffer ret = AnsiDeltaString(std::move(cur), next);
-            cur.cur_style = next;
-            return ret;
-        }
-
-        // --- HIGH-LEVEL PRINTING ---
-
-        // Prints all arguments using `output_func`. This overload doesn't support text styles.
-        template <typename ...P>
-        void Print(CFG_TA_FMT_NAMESPACE::format_string<P...> fmt, P &&... args) const
-        {
-            PrintLow(fmt.get(), CFG_TA_FMT_NAMESPACE::make_format_args(args...)); // It seems we don't need to forward `args...`.
-        }
-
-        // For internal use! Not `private` only because we need to write a formatter for it.
-        // This is generated internally by `Print`, and is fed to `std::format()`.
-        // When printed, it prints the delta between `cur_style` and `new_style`, then does `cur_style = new_style`.
-        struct PrintableAnsiDelta
-        {
-            const Terminal &terminal;
-            Terminal::StyleGuard &cur_style;
-            TextStyle new_style;
-        };
-
-      private:
-        // Replaces `TextStyle` with `PrintableAnsiDelta` for the template arguments of `std::format_string<...>`.
-        template <typename T>
-        using WrapStyleTypeForFormatString = std::conditional_t<std::is_same_v<std::remove_cvref_t<T>, TextStyle>, PrintableAnsiDelta, T>;
-
-        // Replaces objects of type `TextStyle` with `PrintableAnsiDelta` for `std::format(...)`.
-        template <typename T>
-        static decltype(auto) WrapStyleForFormatString(const Terminal &terminal, StyleGuard &cur_style, T &&target)
-        {
-            if constexpr (std::is_same_v<std::remove_cvref_t<T>, TextStyle>)
-                return PrintableAnsiDelta{.terminal = terminal, .cur_style = cur_style, .new_style = target};
-            else
-                return std::forward<T>(target);
-        }
-
-      public:
-        // Prints all arguments using `output_func`. This overload supports text styles.
-        template <typename ...P>
-        void Print(StyleGuard &cur_style, CFG_TA_FMT_NAMESPACE::format_string<WrapStyleTypeForFormatString<P>...> fmt, P &&... args) const
-        {
-            // It seems we don't need to forward `args...`.
-            PrintLow(fmt.get(), CFG_TA_FMT_NAMESPACE::make_format_args(WrapStyleForFormatString(*this, cur_style, args)...));
-        }
-    };
-
-    // Text processing functions.
-    namespace text
-    {
-        // Character classification functions.
-        namespace chars
-        {
-            [[nodiscard]] constexpr bool IsWhitespace(char ch)
+            // Resets the text style when constructed and when destructed.
+            // Can't be constructed manually, use `MakeStyleGuard()`.
+            class StyleGuard
             {
-                return ch == ' ' || ch == '\t';
-            }
-            [[nodiscard]] constexpr bool IsAlphaLowercase(char ch)
-            {
-                return ch >= 'a' && ch <= 'z';
-            }
-            [[nodiscard]] constexpr bool IsAlphaUppercase(char ch)
-            {
-                return ch >= 'A' && ch <= 'Z';
-            }
-            [[nodiscard]] constexpr bool IsAlpha(char ch)
-            {
-                return IsAlphaLowercase(ch) || IsAlphaUppercase(ch);
-            }
-            // Whether `ch` is a letter or an other non-digit identifier character.
-            [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
-            {
-                return ch == '_' || IsAlpha(ch);
-            }
-            [[nodiscard]] constexpr bool IsDigit(char ch)
-            {
-                return ch >= '0' && ch <= '9';
-            }
-            // Whether `ch` can be a part of an identifier.
-            [[nodiscard]] constexpr bool IsIdentifierCharStrict(char ch)
-            {
-                return IsNonDigitIdentifierChar(ch) || IsDigit(ch);
-            }
-            // Same, but also allows `$`, which we use in our macro.
-            [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
-            {
-                if (ch == '$')
-                    return true; // Non-standard, but all modern compilers seem to support it, and we use it in our optional short macros.
-                return IsIdentifierCharStrict(ch);
-            }
-            // Whether `ch` is a punctuation character.
-            // Unlike the standard function, we don't reject invisible characters here. Importantly, we do reject unicode.
-            [[nodiscard]] constexpr bool IsPunct(char ch)
-            {
-                return ch >= 0 && ch <= 127 && !IsIdentifierChar(ch);
-            }
-            // Returns true if `name` is `"TA_ARG"` or one of its aliases.
-            [[nodiscard]] constexpr bool IsArgMacroName(std::string_view name)
-            {
-                for (std::string_view alias : std::initializer_list<std::string_view>{
-                    "TA_ARG",
-                    #if CFG_TA_USE_DOLLAR
-                    "$"
-                    #endif
-                    CFG_TA_EXTRA_ARG_MACROS
-                })
-                {
-                    if (alias == name)
-                        return true;
-                }
+                friend Terminal;
 
-                return false;
-            }
-        }
+                Terminal &terminal;
+                int exception_counter = 0;
+                TextStyle cur_style;
 
-        // Parsing C++ expressions.
-        namespace expr
-        {
-            // The state of the parser state machine.
-            enum class CharKind
-            {
-                normal,
-                string, // A string literal (not raw), not including things outside quotes.
-                character, // A character literal, not including things outside quotes.
-                string_escape_slash, // Escaping slashes in a string literal.
-                character_escape_slash, // Escaping slashes in a character literal.
-                raw_string, // A raw string literal, starting from `(` and until the closing `"` inclusive.
-                raw_string_initial_sep // A raw string literal, from the opening `"` to the `(` exclusive.
+                CFG_TA_API StyleGuard(Terminal &terminal);
+
+              public:
+                StyleGuard(const StyleGuard &) = delete;
+                StyleGuard &operator=(const StyleGuard &) = delete;
+
+                CFG_TA_API ~StyleGuard();
+
+                // Pokes the terminal to reset the style, usually before and after running user code.
+                CFG_TA_API void ResetStyle();
             };
 
-            // `emit_char` is `(const char &ch, CharKind kind) -> void`.
-            // It's called for every character, classifying it. The character address is guaranteed to be in `expr`.
-            // `function_call` is `(std::string_view name, std::string_view args, std::size_t depth) -> void`.
-            // It's called for every pair of parentheses. `args` is the contents of parentheses, possibly with leading and trailing whitespace.
-            // `name` is the identifier preceding the `(`, without whitespace. It can be empty, or otherwise invalid.
-            // `depth` is the parentheses nesting depth, starting at 0.
-            template <typename EmitCharFunc, typename FunctionCallFunc>
-            constexpr void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, FunctionCallFunc &&function_call)
+            [[nodiscard]] StyleGuard MakeStyleGuard()
             {
-                CharKind state = CharKind::normal;
-
-                // The previous character.
-                char prev_ch = '\0';
-                // The current identifier. Only makes sense in `state == normal`.
-                std::string_view identifier;
-                // Points at the start of the initial separator of a raw string.
-                const char *raw_string_sep_start = nullptr;
-                // The separator at the end of the raw string.
-                std::string_view raw_string_sep;
-
-                struct Entry
-                {
-                    // The identifier preceding the `(`, such as the function name. if any.
-                    std::string_view ident;
-                    // Points to the beginning of the arguments, right after `(`.
-                    const char *args = nullptr;
-                };
-
-                // A stack of `()` parentheses.
-                // This should be a vector, by my Clang 16 can't handle them in constexpr calls yet...
-                Entry parens_stack[256];
-                std::size_t parens_stack_pos = 0;
-
-                for (const char &ch : expr)
-                {
-                    const CharKind prev_state = state;
-
-                    switch (state)
-                    {
-                      case CharKind::normal:
-                        if (ch == '"' && prev_ch == 'R')
-                        {
-                            state = CharKind::raw_string_initial_sep;
-                            raw_string_sep_start = &ch + 1;
-                        }
-                        else if (ch == '"')
-                        {
-                            state = CharKind::string;
-                        }
-                        else if (ch == '\'')
-                        {
-                            // This condition handles `'` digit separators.
-                            if (identifier.empty() || &identifier.back() + 1 != &ch || !chars::IsDigit(identifier.front()))
-                                state = CharKind::character;
-                        }
-                        else if (chars::IsIdentifierChar(ch))
-                        {
-                            // We reset `identifier` lazily here, as opposed to immediately,
-                            // to allow function calls with whitespace between the identifier and `(`.
-                            if (!chars::IsIdentifierChar(prev_ch))
-                                identifier = {};
-
-                            if (identifier.empty())
-                                identifier = {&ch, 1};
-                            else
-                                identifier = {identifier.data(), identifier.size() + 1};
-                        }
-                        else
-                        {
-                            if constexpr (!std::is_null_pointer_v<FunctionCallFunc>)
-                            {
-                                if (ch == '(')
-                                {
-                                    if (parens_stack_pos >= std::size(parens_stack))
-                                        HardError("Too many nested parentheses.");
-                                    parens_stack[parens_stack_pos++] = {
-                                        .ident = identifier,
-                                        .args = &ch + 1,
-                                    };
-                                    identifier = {};
-                                }
-                                else if (ch == ')' && parens_stack_pos > 0)
-                                {
-                                    parens_stack_pos--;
-                                    function_call(parens_stack[parens_stack_pos].ident, std::string_view(parens_stack[parens_stack_pos].args, &ch), parens_stack_pos);
-                                }
-                            }
-                        }
-                        break;
-                      case CharKind::string:
-                        if (ch == '"')
-                            state = CharKind::normal;
-                        else if (ch == '\\')
-                            state = CharKind::string_escape_slash;
-                        break;
-                      case CharKind::character:
-                        if (ch == '\'')
-                            state = CharKind::normal;
-                        else if (ch == '\\')
-                            state = CharKind::character_escape_slash;
-                        break;
-                      case CharKind::string_escape_slash:
-                        state = CharKind::string;
-                        break;
-                      case CharKind::character_escape_slash:
-                        state = CharKind::character;
-                        break;
-                      case CharKind::raw_string_initial_sep:
-                        if (ch == '(')
-                        {
-                            state = CharKind::raw_string;
-                            raw_string_sep = {raw_string_sep_start, &ch};
-                        }
-                        break;
-                      case CharKind::raw_string:
-                        if (ch == '"')
-                        {
-                            std::string_view content(raw_string_sep_start, &ch);
-                            if (content.size() >/*sic*/ raw_string_sep.size() && content[content.size() - raw_string_sep.size() - 1] == ')' && content.ends_with(raw_string_sep))
-                                state = CharKind::normal;
-                        }
-                        break;
-                    }
-
-                    if (prev_state != CharKind::normal && state == CharKind::normal)
-                        identifier = {};
-
-                    CharKind fixed_state = state;
-                    if (prev_state == CharKind::string || prev_state == CharKind::character || prev_state == CharKind::raw_string)
-                        fixed_state = prev_state;
-
-                    if constexpr (!std::is_null_pointer_v<EmitCharFunc>)
-                        emit_char(ch, fixed_state);
-
-                    prev_ch = ch;
-                }
+                return StyleGuard(*this);
             }
 
+            // --- MANUAL ANSI ESCAPE SEQUENCE API ---
+
+            // Printing this string resets the text styles. It's always null-terminated.
+            [[nodiscard]] CFG_TA_API std::string_view AnsiResetString() const;
+
+            // Should be large enough.
+            using AnsiDeltaStringBuffer = std::array<char, 100>;
+
+            // Produces a string to switch between text styles, from `prev` to `cur`.
+            // If the styles are the same, does nothing.
+            //
+            [[nodiscard]] CFG_TA_API AnsiDeltaStringBuffer AnsiDeltaString(const StyleGuard &&cur, const TextStyle &next) const;
+
+            // This overload additionally performs `cur = next`.
+            [[nodiscard]] AnsiDeltaStringBuffer AnsiDeltaString(StyleGuard &cur, const TextStyle &next) const
+            {
+                AnsiDeltaStringBuffer ret = AnsiDeltaString(std::move(cur), next);
+                cur.cur_style = next;
+                return ret;
+            }
+
+            // --- HIGH-LEVEL PRINTING ---
+
+            // Prints all arguments using `output_func`. This overload doesn't support text styles.
+            template <typename ...P>
+            void Print(CFG_TA_FMT_NAMESPACE::format_string<P...> fmt, P &&... args) const
+            {
+                PrintLow(fmt.get(), CFG_TA_FMT_NAMESPACE::make_format_args(args...)); // It seems we don't need to forward `args...`.
+            }
+
+            // For internal use! Not `private` only because we need to write a formatter for it.
+            // This is generated internally by `Print`, and is fed to `std::format()`.
+            // When printed, it prints the delta between `cur_style` and `new_style`, then does `cur_style = new_style`.
+            struct PrintableAnsiDelta
+            {
+                const Terminal &terminal;
+                Terminal::StyleGuard &cur_style;
+                TextStyle new_style;
+            };
+
+          private:
+            // Replaces `TextStyle` with `PrintableAnsiDelta` for the template arguments of `std::format_string<...>`.
+            template <typename T>
+            using WrapStyleTypeForFormatString = std::conditional_t<std::is_same_v<std::remove_cvref_t<T>, TextStyle>, PrintableAnsiDelta, T>;
+
+            // Replaces objects of type `TextStyle` with `PrintableAnsiDelta` for `std::format(...)`.
+            template <typename T>
+            static decltype(auto) WrapStyleForFormatString(const Terminal &terminal, StyleGuard &cur_style, T &&target)
+            {
+                if constexpr (std::is_same_v<std::remove_cvref_t<T>, TextStyle>)
+                    return PrintableAnsiDelta{.terminal = terminal, .cur_style = cur_style, .new_style = target};
+                else
+                    return std::forward<T>(target);
+            }
+
+          public:
+            // Prints all arguments using `output_func`. This overload supports text styles.
+            template <typename ...P>
+            void Print(StyleGuard &cur_style, CFG_TA_FMT_NAMESPACE::format_string<WrapStyleTypeForFormatString<P>...> fmt, P &&... args) const
+            {
+                // It seems we don't need to forward `args...`.
+                PrintLow(fmt.get(), CFG_TA_FMT_NAMESPACE::make_format_args(WrapStyleForFormatString(*this, cur_style, args)...));
+            }
+        };
+
+        namespace expr
+        {
             // C++ keyword classification for highlighting.
             enum class KeywordKind {generic, value, op};
 
@@ -2104,235 +3103,6 @@ namespace ta_test
             }
         };
 
-        // A mini unicode library.
-        namespace uni
-        {
-            // A placeholder value for invalid characters.
-            constexpr char32_t default_char = 0xfffd;
-
-            // Max bytes per character.
-            constexpr std::size_t max_char_len = 4;
-
-            // Given a byte, checks if it's the first byte of a multibyte character, or is a single-byte character.
-            // Even if this function returns true, `byte` can be an invalid first byte.
-            // To check for the byte validity, use `FirstByteToCharacterLength`.
-            [[nodiscard]] constexpr bool IsFirstByte(char byte)
-            {
-                return (byte & 0b11000000) != 0b10000000;
-            }
-
-            // Counts the number of codepoints (usually characters) in a valid UTF8 string, by counting the bytes matching `IsFirstByte()`.
-            [[nodiscard]] constexpr std::size_t CountFirstBytes(std::string_view string)
-            {
-                return std::size_t(std::count_if(string.begin(), string.end(), IsFirstByte));
-            }
-
-            // Given the first byte of a multibyte character (or a single-byte character), returns the amount of bytes occupied by the character.
-            // Returns 0 if this is not a valid first byte, or not a first byte at all.
-            [[nodiscard]] constexpr std::size_t FirstByteToCharacterLength(char first_byte)
-            {
-                if ((first_byte & 0b10000000) == 0b00000000) return 1; // Note the different bit pattern in this one.
-                if ((first_byte & 0b11100000) == 0b11000000) return 2;
-                if ((first_byte & 0b11110000) == 0b11100000) return 3;
-                if ((first_byte & 0b11111000) == 0b11110000) return 4;
-                return 0;
-            }
-
-            // Returns true if `ch` is a valid unicode ch (aka 'codepoint').
-            [[nodiscard]] constexpr bool IsValidCharacterCode(char32_t ch)
-            {
-                return ch <= 0x10ffff;
-            }
-
-            // Returns the amount of bytes needed to represent a character.
-            // If the character is invalid (use `IsValidCharacterCode` to check for validity) returns 4, which is the maximum possible length
-            [[nodiscard]] constexpr std::size_t CharacterCodeToLength(char32_t ch)
-            {
-                if (ch <= 0x7f) return 1;
-                if (ch <= 0x7ff) return 2;
-                if (ch <= 0xffff) return 3;
-                // Here `ch <= 0x10ffff`, or the character is invalid.
-                // Mathematically the cap should be `0x1fffff`, but Unicode defines the max value to be lower.
-                return 4;
-            }
-
-            // Encodes a character into UTF8.
-            // The minimal buffer length can be determined with `CharacterCodeToLength`.
-            // If the character is invalid, writes `default_char` instead.
-            // No null-terminator is added.
-            // Returns the amount of bytes written, equal to what `CharacterCodeToLength` would return.
-            [[nodiscard]] constexpr std::size_t EncodeCharToBuffer(char32_t ch, char *buffer)
-            {
-                if (!IsValidCharacterCode(ch))
-                    return EncodeCharToBuffer(default_char, buffer);
-
-                std::size_t len = CharacterCodeToLength(ch);
-                switch (len)
-                {
-                  case 1:
-                    *buffer = char(ch);
-                    break;
-                  case 2:
-                    *buffer++ = char(0b11000000 | (ch >> 6));
-                    *buffer   = char(0b10000000 | (ch & 0b00111111));
-                    break;
-                  case 3:
-                    *buffer++ = char(0b11100000 |  (ch >> 12));
-                    *buffer++ = char(0b10000000 | ((ch >>  6) & 0b00111111));
-                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
-                    break;
-                  case 4:
-                    *buffer++ = char(0b11110000 |  (ch >> 18));
-                    *buffer++ = char(0b10000000 | ((ch >> 12) & 0b00111111));
-                    *buffer++ = char(0b10000000 | ((ch >> 6 ) & 0b00111111));
-                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
-                    break;
-                }
-
-                return len;
-            }
-
-            // Encodes one string into another.
-            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
-            constexpr void Encode(std::u32string_view view, std::string &str)
-            {
-                str.clear();
-                str.reserve(view.size() * max_char_len);
-                for (char32_t ch : view)
-                {
-                    char buf[max_char_len];
-                    std::size_t len = EncodeCharToBuffer(ch, buf);
-                    str.append(buf, len);
-                }
-            }
-
-            // Decodes a UTF8 character.
-            // Returns a pointer to the first byte of the next character.
-            // If `end` is not null, it'll stop reading at `end`. In this case `end` will be returned.
-            [[nodiscard]] constexpr const char *FindNextCharacter(const char *data, const char *end = nullptr)
-            {
-                do
-                    data++;
-                while (data != end && !IsFirstByte(*data));
-
-                return data;
-            }
-
-            // Returns a decoded character or `default_char` on failure.
-            // If `end` is not null, it won't attempt to read past it.
-            // If `next_char` is not null, it will be set to point to the next byte after the current character.
-            // If `data == end`, returns '\0'. (If `end != 0` and `data > end`, also returns '\0'.)
-            // If `data == 0`, returns '\0'.
-            constexpr char32_t DecodeCharFromBuffer(const char *data, const char *end = nullptr, const char **next_char = nullptr)
-            {
-                // Stop if `data` is a null pointer.
-                if (!data)
-                {
-                    if (next_char)
-                        *next_char = nullptr;
-                    return 0;
-                }
-
-                // Stop if we have an empty string.
-                if (end && data >= end) // For `data >= end` to be well-defined, `end` has to be not null if `data` is not null.
-                {
-                    if (next_char)
-                        *next_char = data;
-                    return 0;
-                }
-
-                // Get character length.
-                std::size_t len = FirstByteToCharacterLength(*data);
-
-                // Stop if this is not a valid first byte.
-                if (len == 0)
-                {
-                    if (next_char)
-                        *next_char = FindNextCharacter(data, end);
-                    return default_char;
-                }
-
-                // Handle single byte characters.
-                if (len == 1)
-                {
-                    if (next_char)
-                        *next_char = data+1;
-                    return (unsigned char)*data;
-                }
-
-                // Stop if there is not enough characters left in `data`.
-                if (end && end - data < std::ptrdiff_t(len))
-                {
-                    if (next_char)
-                        *next_char = end;
-                    return default_char;
-                }
-
-                // Extract bits from the first byte.
-                char32_t ret = (unsigned char)*data & (0xff >> len); // `len + 1` would have the same effect as `len`, but it's longer to type.
-
-                // For each remaining byte...
-                for (std::size_t i = 1; i < len; i++)
-                {
-                    // Stop if it's a first byte of some character.
-                    if (IsFirstByte(data[i]))
-                    {
-                        if (next_char)
-                            *next_char = data + i;
-                        return default_char;
-                    }
-
-                    // Extract bits and append them to the code.
-                    ret = ret << 6 | ((unsigned char)data[i] & 0b00111111);
-                }
-
-                // Get next character position.
-                if (next_char)
-                    *next_char = data + len;
-
-                return ret;
-            }
-
-            // Decodes one string into another.
-            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
-            inline void Decode(std::string_view view, std::u32string &str)
-            {
-                str.clear();
-                str.reserve(view.size());
-                for (const char *cur = view.data(); cur - view.data() < std::ptrdiff_t(view.size());)
-                    str += uni::DecodeCharFromBuffer(cur, view.data() + view.size(), &cur);
-            }
-        }
-
-        // Demangles output from `typeid(...).name()`.
-        class Demangler
-        {
-            #if CFG_TA_CXXABI_DEMANGLE
-            char *buf_ptr = nullptr;
-            std::size_t buf_size = 0;
-            #endif
-
-          public:
-            CFG_TA_API Demangler();
-            Demangler(const Demangler &) = delete;
-            Demangler &operator=(const Demangler &) = delete;
-            CFG_TA_API ~Demangler();
-
-            // Demangles a name.
-            // On GCC ang Clang invokes `__cxa_demangle()`, on MSVC returns the string unchanged.
-            // The returned pointer remains as long as both the passed string and the class instance are alive.
-            // Preserve the class instance between calls to potentially reuse the buffer.
-            [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
-        };
-
-        // Caches type names produced by `Demangler`.
-        template <typename T>
-        [[nodiscard]] const std::string &TypeName()
-        {
-            static const std::string ret = Demangler{}(typeid(T).name());
-            return ret;
-        }
-
         // A class for composing 2D ASCII graphics.
         class TextCanvas
         {
@@ -2426,52 +3196,6 @@ namespace ta_test
             CFG_TA_API std::size_t DrawToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr, const Style *style = nullptr);
         }
 
-        // Escapes a string, writes the result to `out_iter`. Includes quotes automatically.
-        template <typename It>
-        constexpr void EscapeString(std::string_view source, It out_iter, bool double_quotes)
-        {
-            *out_iter++ = "'\""[double_quotes];
-
-            for (char signed_ch : source)
-            {
-                unsigned char ch = (unsigned char)signed_ch;
-
-                bool should_escape = (ch < ' ') || ch == 0x7f || (ch == (double_quotes ? '"' : '\''));
-
-                if (!should_escape)
-                {
-                    *out_iter++ = signed_ch;
-                    continue;
-                }
-
-                switch (ch)
-                {
-                    case '\0': *out_iter++ = '\\'; *out_iter++ = '0'; break;
-                    case '\'': *out_iter++ = '\\'; *out_iter++ = '\''; break;
-                    case '\"': *out_iter++ = '\\'; *out_iter++ = '"'; break;
-                    case '\\': *out_iter++ = '\\'; *out_iter++ = '\\'; break;
-                    case '\a': *out_iter++ = '\\'; *out_iter++ = 'a'; break;
-                    case '\b': *out_iter++ = '\\'; *out_iter++ = 'b'; break;
-                    case '\f': *out_iter++ = '\\'; *out_iter++ = 'f'; break;
-                    case '\n': *out_iter++ = '\\'; *out_iter++ = 'n'; break;
-                    case '\r': *out_iter++ = '\\'; *out_iter++ = 'r'; break;
-                    case '\t': *out_iter++ = '\\'; *out_iter++ = 't'; break;
-                    case '\v': *out_iter++ = '\\'; *out_iter++ = 'v'; break;
-
-                  default:
-                    // The syntax with braces is from C++23. Without braces the escapes could consume extra characters on the right.
-                    // Octal escapes don't do that, but they're just inherently ugly.
-                    char buffer[7]; // 7 bytes for: \ x { N N } \0
-                    std::snprintf(buffer, sizeof buffer, "\\x{%02x}", ch);
-                    for (char *ptr = buffer; *ptr;)
-                        *out_iter++ = *ptr++;
-                    break;
-                }
-            }
-
-            *out_iter++ = "'\""[double_quotes];
-        }
-
         // Uses the current modules to print the context stack. See `namespace context` above.
         // If `skip_last_frame` is specified and is the last frame, that frame is not printed.
         CFG_TA_API void PrintContext(Terminal::StyleGuard &cur_style, const context::BasicFrame *skip_last_frame = nullptr, context::Context con = context::CurrentContext());
@@ -2496,8 +3220,8 @@ namespace ta_test
         BasicPrintingModule &operator=(const BasicPrintingModule &) = default;
         BasicPrintingModule &operator=(BasicPrintingModule &&) = default;
 
-        Terminal terminal;
-        text::CommonData common_data;
+        output::Terminal terminal;
+        output::CommonData common_data;
 
         virtual void EnableUnicode(bool enable)
         {
@@ -2507,16 +3231,16 @@ namespace ta_test
         // This is called whenever the context information needs to be printed.
         // Return true if this type of context frame is known to you and you handled it, then the other modules won't receive this call.
         // Do nothing and return false if you don't know this context frame type.
-        virtual bool PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) {(void)cur_style; (void)frame; return false;}
+        virtual bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) {(void)cur_style; (void)frame; return false;}
         // This is called to print the log.
         // Return true to prevent other modules from receiving this call.
         // `unscoped_log` can alternatively be obtained from `BasicModule::RunSingleTestResults`.
         // `scoped_log` can alternatively be obtained from `context::CurrentScopedLog()`.
-        virtual bool PrintLogEntries(Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) {(void)cur_style; (void)unscoped_log; (void)scoped_log; return false;}
+        virtual bool PrintLogEntries(output::Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) {(void)cur_style; (void)unscoped_log; (void)scoped_log; return false;}
 
       protected:
-        CFG_TA_API void PrintWarning(Terminal::StyleGuard &cur_style, std::string_view text) const;
-        CFG_TA_API void PrintNote(Terminal::StyleGuard &cur_style, std::string_view text) const;
+        CFG_TA_API void PrintWarning(output::Terminal::StyleGuard &cur_style, std::string_view text) const;
+        CFG_TA_API void PrintNote(output::Terminal::StyleGuard &cur_style, std::string_view text) const;
     };
 
 
@@ -2593,7 +3317,7 @@ namespace ta_test
     // You can call the inherited `Reset()` to disarm if a `Trace` to remove it from the stack.
     // You can copy and move `Trace` to propagate the location and function name (moving also `Reset()`s the original).
     // Copying/moving constructs a live instance even if the original was `Reset()`, but not if it was constructed from `NoTrace()`.
-    template <ConstString FuncName>
+    template <meta::ConstString FuncName>
     class Trace : public BasicTrace
     {
       public:
@@ -2759,12 +3483,12 @@ namespace ta_test
                 return DETAIL_TA_ADD_MESSAGE;
             }
 
-            std::optional<std::string_view> GetUserMessage() const override;
+            CFG_TA_API std::optional<std::string_view> GetUserMessage() const override;
 
             virtual ArgWrapper BeginArg(int counter) = 0;
         };
 
-        template <ConstString MacroName, ConstString RawString, ConstString ExpandedString, ConstString FileName, int LineNumber>
+        template <meta::ConstString MacroName, meta::ConstString RawString, meta::ConstString ExpandedString, meta::ConstString FileName, int LineNumber>
         struct AssertWrapper : BasicAssertWrapper, BasicModule::BasicAssertionExpr
         {
             using BasicAssertWrapper::BasicAssertWrapper;
@@ -2923,7 +3647,7 @@ namespace ta_test
                 }
                 else
                 {
-                    static constexpr ConstString name_with_paren = MacroName + "(";
+                    static constexpr meta::ConstString name_with_paren = MacroName + "(";
                     if (index == 0)
                         return DecoFixedString{.string = name_with_paren.view()};
                     else if (index == 1)
@@ -3016,7 +3740,7 @@ namespace ta_test
         // An implementation of `BasicTest` for a specific test.
         // `P` is a pointer to the test function, see `DETAIL_TA_TEST()` for details.
         // `B` is a lambda that triggers a breakpoint in the test location itself when called.
-        template <auto P, auto B, ConstString TestName, ConstString LocFile, int LocLine>
+        template <auto P, auto B, meta::ConstString TestName, meta::ConstString LocFile, int LocLine>
         struct SpecificTest : BasicTest
         {
             static constexpr bool test_name_is_valid = []{
@@ -3099,7 +3823,7 @@ namespace ta_test
 
         // --- GENERATORS ---
 
-        template <ConstString Name, ConstString LocFile, int LocLine, int LocCounter, typename ReturnType, typename F>
+        template <meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter, typename ReturnType, typename F>
         struct SpecificGenerator : BasicModule::BasicTypedGenerator<ReturnType>
         {
             F func;
@@ -3136,7 +3860,7 @@ namespace ta_test
         };
 
         // Using a concept instead of a `static_assert`, because I can't find where to put the `static_assert` to make Clangd report on it.
-        template <ConstString Name>
+        template <meta::ConstString Name>
         concept IsValidGeneratorName =
             !Name.view().empty() && // Not empty.
             !text::chars::IsDigit(Name.view().front()) && // Doesn't start with a digit.
@@ -3144,7 +3868,7 @@ namespace ta_test
 
         template <
             // Manually specified:
-            ConstString Name, ConstString LocFile, int LocLine, int LocCounter,
+            meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter,
             // Deduced:
             typename F,
             // Computed:
@@ -3480,7 +4204,7 @@ namespace ta_test
                         HardError("Invalid `ExceptionElemVar` variant.");
                     if (!State() || State()->elems.empty())
                         return false; // Should be good enough. This shouldn't normally happen.
-                    return std::visit(Overload{
+                    return std::visit(meta::Overload{
                         [&](ExceptionElem elem)
                         {
                             switch (elem)
@@ -3660,7 +4384,7 @@ namespace ta_test
             Evaluator DETAIL_TA_ADD_MESSAGE = *this;
 
             // Makes an instance of this class.
-            template <ConstString File, int Line, ConstString MacroName, ConstString Expr, typename F>
+            template <meta::ConstString File, int Line, meta::ConstString MacroName, meta::ConstString Expr, typename F>
             [[nodiscard]] static MustThrowWrapper Make(const F &func, void (*break_func)())
             {
                 static const BasicModule::MustThrowStaticInfo info = []{
@@ -3776,16 +4500,16 @@ namespace ta_test
         // Also automatically enables/disables color.
         void SetOutputStream(FILE *stream) const
         {
-            SetTerminalSettings([&](Terminal &terminal)
+            SetTerminalSettings([&](output::Terminal &terminal)
             {
-                terminal = Terminal(stream);
+                terminal = output::Terminal(stream);
             });
         }
 
         // Configures every `BasicPrintingModule` to print to `stream`.
         void SetEnableColor(bool enable) const
         {
-            SetTerminalSettings([&](Terminal &terminal)
+            SetTerminalSettings([&](output::Terminal &terminal)
             {
                 terminal.enable_color = enable;
             });
@@ -3802,7 +4526,7 @@ namespace ta_test
         }
 
         // Calls `func` on `Terminal` of every `BasicPrintingModule`.
-        void SetTerminalSettings(std::function<void(Terminal &terminal)> func) const
+        void SetTerminalSettings(std::function<void(output::Terminal &terminal)> func) const
         {
             for (const auto &m : modules)
             {
@@ -3834,19 +4558,24 @@ namespace ta_test
         struct BasicExceptionContentsPrinter
         {
           public:
-            TextStyle style_exception_type = {.color = TextColor::dark_magenta};
-            TextStyle style_exception_message = {.color = TextColor::light_blue};
+            output::TextStyle style_exception_type = {.color = output::TextColor::dark_magenta};
+            output::TextStyle style_exception_message = {.color = output::TextColor::light_blue};
 
             std::string chars_unknown_exception = "Unknown exception.";
             std::string chars_indent_type = "    ";
             std::string chars_indent_message = "        ";
             std::string chars_type_suffix = ": ";
 
-            std::function<void(const BasicExceptionContentsPrinter &self, const Terminal &terminal, Terminal::StyleGuard &cur_style, const std::exception_ptr &e)> print_callback;
+            std::function<void(
+                const BasicExceptionContentsPrinter &self,
+                const output::Terminal &terminal,
+                output::Terminal::StyleGuard &cur_style,
+                const std::exception_ptr &e
+            )> print_callback;
 
           protected:
             CFG_TA_API BasicExceptionContentsPrinter();
-            CFG_TA_API void PrintException(const Terminal &terminal, Terminal::StyleGuard &cur_style, const std::exception_ptr &e) const;
+            CFG_TA_API void PrintException(const output::Terminal &terminal, output::Terminal::StyleGuard &cur_style, const std::exception_ptr &e) const;
         };
 
         // --- MODULES ---
@@ -3958,104 +4687,104 @@ namespace ta_test
             std::size_t separator_line_width = 100;
 
             // Optional message at startup when some tests are skipped.
-            TextStyle style_skipped_tests = {.color = TextColor::light_blue, .bold = true};
+            output::TextStyle style_skipped_tests = {.color = output::TextColor::light_blue, .bold = true};
             // The prefix before the name of the starting test.
-            TextStyle style_prefix = {.color = TextColor::dark_green};
+            output::TextStyle style_prefix = {.color = output::TextColor::dark_green};
             // Same, but when reentering a group after a failure.
-            TextStyle style_prefix_continuing = {.color = TextColor::light_black};
+            output::TextStyle style_prefix_continuing = {.color = output::TextColor::light_black};
             // The message when a test starts.
-            TextStyle style_name = {.color = TextColor::light_white, .bold = true};
+            output::TextStyle style_name = {.color = output::TextColor::light_white, .bold = true};
             // The message when a test group starts.
-            TextStyle style_group_name = {.color = TextColor::dark_white};
+            output::TextStyle style_group_name = {.color = output::TextColor::dark_white};
             // This is used to print a group name when reentering it after a failed test.
-            TextStyle style_continuing_group = {.color = TextColor::light_black};
+            output::TextStyle style_continuing_group = {.color = output::TextColor::light_black};
             // The indentation guides for nested test starts.
-            TextStyle style_indentation_guide = {.color = TextColorGrayscale24(8)};
+            output::TextStyle style_indentation_guide = {.color = output::TextColorGrayscale24(8)};
             // The test index.
-            TextStyle style_index = {.color = TextColor::light_white, .bold = true};
+            output::TextStyle style_index = {.color = output::TextColor::light_white, .bold = true};
             // The test index, when printed repeatedly, such as when repeating a test because of a generator.
-            TextStyle style_index_repeated = {.color = TextColor::light_black, .bold = true};
+            output::TextStyle style_index_repeated = {.color = output::TextColor::light_black, .bold = true};
             // The total test count printed after each test index.
-            TextStyle style_total_count = {.color = TextColor::light_black};
+            output::TextStyle style_total_count = {.color = output::TextColor::light_black};
             // The failed test counter.
-            TextStyle style_failed_count = {.color = TextColor::light_red, .bold = true};
+            output::TextStyle style_failed_count = {.color = output::TextColor::light_red, .bold = true};
             // Some decorations around the failed test counter.
-            TextStyle style_failed_count_decorations = {.color = TextColor::dark_magenta};
+            output::TextStyle style_failed_count_decorations = {.color = output::TextColor::dark_magenta};
             // The line that separates the test counter from the test names/groups (or from the repetition counter, if any).
-            TextStyle style_gutter_border = {.color = TextColorGrayscale24(10)};
+            output::TextStyle style_gutter_border = {.color = output::TextColorGrayscale24(10)};
             // The generator repetition counter of the specific test.
-            TextStyle style_repetition_total_count = {.color = TextColor::dark_cyan};
+            output::TextStyle style_repetition_total_count = {.color = output::TextColor::dark_cyan};
             // The number of failed generator repetitions of the specific test.
-            TextStyle style_repetition_failed_count = {.color = TextColor::light_red, .bold = true};
+            output::TextStyle style_repetition_failed_count = {.color = output::TextColor::light_red, .bold = true};
             // The brackets around that counter.
-            TextStyle style_repetition_failed_count_decorations = {.color = TextColor::dark_magenta};
+            output::TextStyle style_repetition_failed_count_decorations = {.color = output::TextColor::dark_magenta};
             // This line separate the repetition counters, if any, from the test names/groups.
-            TextStyle style_repetition_border = {.color = TextColorGrayscale24(10)};
+            output::TextStyle style_repetition_border = {.color = output::TextColorGrayscale24(10)};
             struct StyleGenerator
             {
                 // The prefix before the name of the generated variable.
-                TextStyle prefix = {.color = TextColor::light_blue};
+                output::TextStyle prefix = {.color = output::TextColor::light_blue};
                 // The name of the generated variable.
-                TextStyle name = {.color = TextColor::dark_white};
+                output::TextStyle name = {.color = output::TextColor::dark_white};
                 // The index of the generated variable.
-                TextStyle index = {.color = TextColor::light_white, .bold = true};
+                output::TextStyle index = {.color = output::TextColor::light_white, .bold = true};
                 // The brackets around this index.
-                TextStyle index_brackets = {.color = TextColor::light_black};
+                output::TextStyle index_brackets = {.color = output::TextColor::light_black};
                 // Separates the generated value from the generator name and index.
-                TextStyle value_separator = {.color = TextColor::light_black};
+                output::TextStyle value_separator = {.color = output::TextColor::light_black};
                 // The generated value, if printable.
-                TextStyle value = {.color = TextColor::light_blue, .bold = true};
+                output::TextStyle value = {.color = output::TextColor::light_blue, .bold = true};
                 // The ellipsis in the generated value, if it's too long.
-                TextStyle value_ellipsis = {.color = TextColor::light_black, .bold = true};
+                output::TextStyle value_ellipsis = {.color = output::TextColor::light_black, .bold = true};
             };
             // The normal run of a generator.
             StyleGenerator style_generator{};
             // Re-printing the existing value of a generator after a failure.
             StyleGenerator style_generator_repeated = {
-                .prefix = {.color = TextColor::light_black},
-                .name = {.color = TextColor::light_black, .bold = true},
-                .index = {.color = TextColor::light_black, .bold = true},
-                .index_brackets = {.color = TextColor::light_black},
-                .value_separator = {.color = TextColor::light_black},
-                .value = {.color = TextColor::light_black, .bold = true},
-                .value_ellipsis = {.color = TextColor::light_black},
+                .prefix = {.color = output::TextColor::light_black},
+                .name = {.color = output::TextColor::light_black, .bold = true},
+                .index = {.color = output::TextColor::light_black, .bold = true},
+                .index_brackets = {.color = output::TextColor::light_black},
+                .value_separator = {.color = output::TextColor::light_black},
+                .value = {.color = output::TextColor::light_black, .bold = true},
+                .value_ellipsis = {.color = output::TextColor::light_black},
             };
             // Printing a list of failed generators.
             StyleGenerator style_generator_failed = {
-                .prefix = {.color = TextColor::dark_red},
-                .name = {.color = TextColor::light_red},
-                .index = {.color = TextColor::light_red, .bold = true},
-                .index_brackets = {.color = TextColor::dark_red},
-                .value_separator = {.color = TextColor::dark_red},
-                .value = {.color = TextColor::light_red, .bold = true},
-                .value_ellipsis = {.color = TextColor::light_black, .bold = true},
+                .prefix = {.color = output::TextColor::dark_red},
+                .name = {.color = output::TextColor::light_red},
+                .index = {.color = output::TextColor::light_red, .bold = true},
+                .index_brackets = {.color = output::TextColor::dark_red},
+                .value_separator = {.color = output::TextColor::dark_red},
+                .value = {.color = output::TextColor::light_red, .bold = true},
+                .value_ellipsis = {.color = output::TextColor::light_black, .bold = true},
             };
             // When printing a per-test summary of failed generators, this is the number of failed repetitions.
-            TextStyle style_repetitions_summary_failed_count = {.color = TextColor::light_red, .bold = true};
+            output::TextStyle style_repetitions_summary_failed_count = {.color = output::TextColor::light_red, .bold = true};
             // When printing a per-test summary of failed generators, this is the total number of repetitions.
-            TextStyle style_repetitions_summary_total_count = {.color = TextColor::dark_red};
+            output::TextStyle style_repetitions_summary_total_count = {.color = output::TextColor::dark_red};
 
             // The name of a failed test, printed when it fails.
-            TextStyle style_failed_name = {.color = TextColor::light_yellow, .bold = true};
+            output::TextStyle style_failed_name = {.color = output::TextColor::light_yellow, .bold = true};
             // The name of a group of a failed test, printed when the test fails.
-            TextStyle style_failed_group_name = {.color = TextColor::light_yellow};
+            output::TextStyle style_failed_group_name = {.color = output::TextColor::light_yellow};
             // The style for a horizontal line that's printed after a test failure message, before any details.
-            TextStyle style_test_failed_separator = {.color = TextColor::dark_red};
+            output::TextStyle style_test_failed_separator = {.color = output::TextColor::dark_red};
             // This line is printed after all details on the test failure.
-            TextStyle style_test_failed_ending_separator = {.color = TextColorGrayscale24(10)};
+            output::TextStyle style_test_failed_ending_separator = {.color = output::TextColorGrayscale24(10)};
             // Style for `chars_starting_tests`.
-            TextStyle style_starting_tests = {.color = TextColor::light_black, .bold = true};
+            output::TextStyle style_starting_tests = {.color = output::TextColor::light_black, .bold = true};
             // Style for `chars_continuing_tests`.
-            TextStyle style_continuing_tests = {.color = TextColor::dark_yellow};
+            output::TextStyle style_continuing_tests = {.color = output::TextColor::dark_yellow};
 
             // The name of a failed test, printed at the end.
-            TextStyle style_summary_failed_name = {.color = TextColor::light_red, .bold = true};
+            output::TextStyle style_summary_failed_name = {.color = output::TextColor::light_red, .bold = true};
             // The name of a group of a failed test, printed at the end.
-            TextStyle style_summary_failed_group_name = {.color = TextColor::dark_red};
+            output::TextStyle style_summary_failed_group_name = {.color = output::TextColor::dark_red};
             // Separates failed test names from their source locations.
-            TextStyle style_summary_path_separator = {.color = TextColorGrayscale24(10)};
+            output::TextStyle style_summary_path_separator = {.color = output::TextColorGrayscale24(10)};
             // The source locations of the failed tests.
-            TextStyle style_summary_path = {.color = TextColor::none};
+            output::TextStyle style_summary_path = {.color = output::TextColor::none};
 
           protected:
             struct State
@@ -4173,13 +4902,13 @@ namespace ta_test
             }
 
             enum class TestCounterStyle {none, normal, repeated};
-            CFG_TA_API void PrintContextLinePrefix(Terminal::StyleGuard &cur_style, const RunTestsProgress &all_tests, TestCounterStyle test_counter_style) const;
-            CFG_TA_API void PrintContextLineIndentation(Terminal::StyleGuard &cur_style, std::size_t depth, std::size_t skip_characters) const;
+            CFG_TA_API void PrintContextLinePrefix(output::Terminal::StyleGuard &cur_style, const RunTestsProgress &all_tests, TestCounterStyle test_counter_style) const;
+            CFG_TA_API void PrintContextLineIndentation(output::Terminal::StyleGuard &cur_style, std::size_t depth, std::size_t skip_characters) const;
 
             // Prints the entire line describing a generator.
             // `repeating_info == true` means that we're printing this not because a new value got generated,
             // but because we're providing the context again after an error.
-            CFG_TA_API void PrintGeneratorInfo(Terminal::StyleGuard &cur_style, const RunSingleTestProgress &test, const BasicGenerator &generator, bool repeating_info);
+            CFG_TA_API void PrintGeneratorInfo(output::Terminal::StyleGuard &cur_style, const RunSingleTestProgress &test, const BasicGenerator &generator, bool repeating_info);
 
           public:
             CFG_TA_API ProgressPrinter();
@@ -4197,15 +4926,15 @@ namespace ta_test
         struct ResultsPrinter : BasicPrintingModule
         {
             // The number of skipped tests.
-            TextStyle style_num_skipped = {.color = TextColor::light_blue};
+            output::TextStyle style_num_skipped = {.color = output::TextColor::light_blue};
             // No tests to run.
-            TextStyle style_no_tests = {.color = TextColor::light_blue, .bold = true};
+            output::TextStyle style_no_tests = {.color = output::TextColor::light_blue, .bold = true};
             // All tests passed.
-            TextStyle style_all_passed = {.color = TextColor::light_green, .bold = true};
+            output::TextStyle style_all_passed = {.color = output::TextColor::light_green, .bold = true};
             // Some tests passed, this part shows how many have passed.
-            TextStyle style_num_passed = {.color = TextColor::light_green};
+            output::TextStyle style_num_passed = {.color = output::TextColor::light_green};
             // Some tests passed, this part shows how many have failed.
-            TextStyle style_num_failed = {.color = TextColor::light_red, .bold = true};
+            output::TextStyle style_num_failed = {.color = output::TextColor::light_red, .bold = true};
 
             void OnPostRunTests(const RunTestsResults &data) override;
         };
@@ -4230,23 +4959,23 @@ namespace ta_test
             std::u32string chars_in_assertion = U"While checking assertion:";
 
             // The argument colors. They are cycled in this order.
-            std::vector<TextStyle> style_arguments = {
-                {.color = TextColorRgb6(1,4,1), .bold = true},
-                {.color = TextColorRgb6(1,3,5), .bold = true},
-                {.color = TextColorRgb6(1,0,5), .bold = true},
-                {.color = TextColorRgb6(5,1,0), .bold = true},
-                {.color = TextColorRgb6(5,4,0), .bold = true},
-                {.color = TextColorRgb6(0,4,3), .bold = true},
-                {.color = TextColorRgb6(0,5,5), .bold = true},
-                {.color = TextColorRgb6(3,1,5), .bold = true},
-                {.color = TextColorRgb6(4,0,2), .bold = true},
-                {.color = TextColorRgb6(5,2,1), .bold = true},
-                {.color = TextColorRgb6(4,5,3), .bold = true},
+            std::vector<output::TextStyle> style_arguments = {
+                {.color = output::TextColorRgb6(1,4,1), .bold = true},
+                {.color = output::TextColorRgb6(1,3,5), .bold = true},
+                {.color = output::TextColorRgb6(1,0,5), .bold = true},
+                {.color = output::TextColorRgb6(5,1,0), .bold = true},
+                {.color = output::TextColorRgb6(5,4,0), .bold = true},
+                {.color = output::TextColorRgb6(0,4,3), .bold = true},
+                {.color = output::TextColorRgb6(0,5,5), .bold = true},
+                {.color = output::TextColorRgb6(3,1,5), .bold = true},
+                {.color = output::TextColorRgb6(4,0,2), .bold = true},
+                {.color = output::TextColorRgb6(5,2,1), .bold = true},
+                {.color = output::TextColorRgb6(4,5,3), .bold = true},
             };
             // This is used for brackets above expressions.
-            TextStyle style_overline = {.color = TextColor::light_magenta, .bold = true};
+            output::TextStyle style_overline = {.color = output::TextColor::light_magenta, .bold = true};
             // This is used to dim the unwanted parts of expressions.
-            TextColor color_dim = TextColor::light_black;
+            output::TextColor color_dim = output::TextColor::light_black;
 
             // Labels a subexpression that had a nested assertion failure in it.
             std::u32string chars_in_this_subexpr = U"in here";
@@ -4254,16 +4983,16 @@ namespace ta_test
             std::u32string chars_in_this_subexpr_inexact = U"in here?";
 
             void OnAssertionFailed(const BasicAssertionInfo &data) override;
-            bool PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
+            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
 
-            CFG_TA_API void PrintAssertionFrameLow(Terminal::StyleGuard &cur_style, const BasicAssertionInfo &data, bool is_most_nested) const;
+            CFG_TA_API void PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const BasicAssertionInfo &data, bool is_most_nested) const;
         };
 
         // Responds to `text::PrintLog()` to print the current log.
         // Does nothing by itself, is only used by the other modules.
         struct LogPrinter : BasicPrintingModule
         {
-            TextStyle style_message = {.color = TextColor::dark_cyan};
+            output::TextStyle style_message = {.color = output::TextColor::dark_cyan};
 
             std::string chars_message_prefix = "// ";
 
@@ -4273,7 +5002,7 @@ namespace ta_test
 
             void OnPreRunSingleTest(const RunSingleTestInfo &data) override;
             void OnPostRunSingleTest(const RunSingleTestResults &data) override;
-            bool PrintLogEntries(Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) override;
+            bool PrintLogEntries(output::Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) override;
         };
 
         // A generic module to analyze exceptions.
@@ -4330,10 +5059,10 @@ namespace ta_test
             std::string chars_throw_location = "Thrown here:";
 
             void OnMissingException(const MustThrowInfo &data, bool &should_break) override;
-            bool PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
+            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
 
             CFG_TA_API void PrintFrame(
-                Terminal::StyleGuard &cur_style,
+                output::Terminal::StyleGuard &cur_style,
                 const BasicModule::MustThrowStaticInfo &static_info,
                 const BasicModule::MustThrowDynamicInfo *dynamic_info, // Optional.
                 const BasicModule::CaughtExceptionInfo *caught, // Optional. If set, we're analyzing a caught exception. If null, we're looking at a macro call.
@@ -4346,7 +5075,7 @@ namespace ta_test
         {
             std::u32string chars_func_name_prefix = U"In function: ";
 
-            bool PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
+            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
         };
 
         // Detects whether the debugger is attached in a platform-specific way.
@@ -4382,7 +5111,7 @@ namespace ta_test
 }
 
 template <>
-struct CFG_TA_FMT_NAMESPACE::formatter<ta_test::Terminal::PrintableAnsiDelta, char>
+struct CFG_TA_FMT_NAMESPACE::formatter<ta_test::output::Terminal::PrintableAnsiDelta, char>
 {
     constexpr auto parse(std::basic_format_parse_context<char> &parse_ctx)
     {
@@ -4390,7 +5119,7 @@ struct CFG_TA_FMT_NAMESPACE::formatter<ta_test::Terminal::PrintableAnsiDelta, ch
     }
 
     template <typename OutputIt>
-    constexpr auto format(const ta_test::Terminal::PrintableAnsiDelta &arg, std::basic_format_context<OutputIt, char> &format_ctx) const
+    constexpr auto format(const ta_test::output::Terminal::PrintableAnsiDelta &arg, std::basic_format_context<OutputIt, char> &format_ctx) const
     {
         return CFG_TA_FMT_NAMESPACE::format_to(format_ctx.out(), "{}", arg.terminal.AnsiDeltaString(arg.cur_style, arg.new_style).data());
     }

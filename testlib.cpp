@@ -44,7 +44,7 @@ void ta_test::HardError(std::string_view message, HardErrorKind kind)
         std::terminate(); // We've already been there.
 
     std::fprintf(stderr, "%sta_test: %s: %.*s\n",
-        Terminal(stderr).AnsiResetString().data(),
+        output::Terminal(stderr).AnsiResetString().data(),
         kind == HardErrorKind::internal ? "Internal error" : "Error",
         int(message.size()), message.data()
     );
@@ -55,10 +55,33 @@ void ta_test::HardError(std::string_view message, HardErrorKind kind)
     std::terminate();
 }
 
+ta_test::text::Demangler::Demangler() {}
+
+ta_test::text::Demangler::~Demangler()
+{
+    #if CFG_TA_CXXABI_DEMANGLE
+    // Freeing a nullptr is a no-op.
+    std::free(buf_ptr);
+    #endif
+}
+
+const char *ta_test::text::Demangler::operator()(const char *name)
+{
+    #if CFG_TA_CXXABI_DEMANGLE
+    int status = -4;
+    buf_ptr = abi::__cxa_demangle(name, buf_ptr, &buf_size, &status);
+    if (status != 0) // -1 = out of memory, -2 = invalid string, -3 = invalid usage
+        return name;
+    return buf_ptr;
+    #else
+    return name;
+    #endif
+}
+
 std::string ta_test::string_conv::DefaultFallbackToStringTraits<char>::operator()(char value) const
 {
     char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
-    text::EscapeString({&value, 1}, ret, false);
+    text::escape::EscapeString({&value, 1}, ret, false);
     return ret;
 }
 
@@ -66,7 +89,7 @@ std::string ta_test::string_conv::DefaultFallbackToStringTraits<std::string_view
 {
     std::string ret;
     ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-    text::EscapeString(value, std::back_inserter(ret), true);
+    text::escape::EscapeString(value, std::back_inserter(ret), true);
     return ret;
 }
 
@@ -138,776 +161,6 @@ std::string ta_test::SingleException::GetTypeName() const
         return text::Demangler{}(type.name());
     else
         return "";
-}
-
-// Gracefully fails the current test, if not already failed.
-// Call this first, before printing any messages.
-void ta_test::detail::GlobalThreadState::FailCurrentTest()
-{
-    if (!current_test)
-        HardError("Trying to fail the current test, but no test is currently running.");
-
-    if (current_test->failed)
-        return; // Already failed.
-
-    current_test->failed = true;
-    current_test->all_tests->modules->Call<&BasicModule::OnPreFailTest>(*current_test);
-}
-
-ta_test::detail::GlobalThreadState &ta_test::detail::ThreadState()
-{
-    thread_local GlobalThreadState ret;
-    return ret;
-}
-
-bool ta_test::platform::IsDebuggerAttached()
-{
-    #if !CFG_TA_DETECT_DEBUGGER
-    return false;
-    #elif defined(_WIN32)
-    return bool(IsDebuggerPresent());
-    #elif defined(__linux__)
-    std::ifstream file("/proc/self/status");
-    if (!file)
-        return false;
-    for (std::string line; std::getline(file, line);)
-    {
-        constexpr std::string_view prefix = "TracerPid:";
-        if (!line.starts_with(prefix))
-            continue;
-        for (std::size_t i = prefix.size(); i < line.size(); i++)
-        {
-            if (text::chars::IsDigit(line[i]) && line[i] != '0')
-                return true;
-        }
-    }
-    return false;
-    #else
-    return false;
-    #endif
-}
-
-bool ta_test::platform::IsTerminalAttached(bool stderr)
-{
-    // We cache the return value.
-    auto lambda = []<bool IsStderr>
-    {
-        static bool ret = []{
-            #if defined(_WIN32)
-            return GetFileType(GetStdHandle(IsStderr ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
-            #elif defined(DETAIL_TA_USE_ISATTY)
-            return isatty(IsStderr ? STDERR_FILENO : STDOUT_FILENO) == 1;
-            #else
-            return false;
-            #endif
-        }();
-        return ret;
-    };
-    if (stderr)
-        return lambda.operator()<true>();
-    else
-        return lambda.operator()<false>();
-}
-
-ta_test::Terminal::Terminal(FILE *stream)
-{
-    output_func = [stream
-    #if CFG_TA_FMT_HAS_FILE_PRINT == 0 && defined(_WIN32)
-    , need_init = stream == stdout || stream == stderr
-    #endif
-    ](std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) mutable
-    {
-        #if CFG_TA_FMT_HAS_FILE_PRINT == 2
-        CFG_TA_FMT_NAMESPACE::vprint_unicode(stream, fmt, args);
-        #elif CFG_TA_FMT_HAS_FILE_PRINT == 1
-        CFG_TA_FMT_NAMESPACE::vprint(stream, fmt, args);
-        #elif CFG_TA_FMT_HAS_FILE_PRINT == 0
-
-        #ifdef _WIN32
-        if (need_init)
-        {
-            need_init = false;
-            if (ta_test::platform::IsTerminalAttached())
-            {
-                SetConsoleOutputCP(CP_UTF8);
-
-                auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
-                DWORD current_mode{};
-                GetConsoleMode(handle, &current_mode);
-                SetConsoleMode(handle, current_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-            }
-        }
-        #endif
-
-        std::string buffer = CFG_TA_FMT_NAMESPACE::vformat(fmt, args);
-        std::fwrite(buffer.c_str(), buffer.size(), 1, stream);
-        #else
-        #error Invalid value of `CFG_TA_FMT_HAS_FILE_PRINT`.
-        #endif
-    };
-
-    enable_color =
-        stream == stdout ? platform::IsTerminalAttached(false) :
-        stream == stderr ? platform::IsTerminalAttached(true) : false;
-}
-
-void ta_test::Terminal::PrintLow(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) const
-{
-    if (output_func)
-        output_func(fmt, args);
-}
-
-ta_test::Terminal::StyleGuard::StyleGuard(Terminal &terminal)
-    : terminal(terminal)
-{
-    if (terminal.enable_color)
-    {
-        ResetStyle();
-        exception_counter = std::uncaught_exceptions(); // Don't need this without color.
-    }
-}
-
-ta_test::Terminal::StyleGuard::~StyleGuard()
-{
-    if (terminal.enable_color && exception_counter == std::uncaught_exceptions())
-        ResetStyle();
-}
-
-void ta_test::Terminal::StyleGuard::ResetStyle()
-{
-    if (terminal.enable_color)
-        terminal.Print("{}", terminal.AnsiResetString().data());
-}
-
-std::string_view ta_test::Terminal::AnsiResetString() const
-{
-    if (enable_color)
-        return "\033[0m";
-    else
-        return "";
-}
-
-ta_test::Terminal::AnsiDeltaStringBuffer ta_test::Terminal::AnsiDeltaString(const StyleGuard &&cur, const TextStyle &next) const
-{
-    AnsiDeltaStringBuffer ret;
-    ret[0] = '\0';
-
-    if (!enable_color)
-        return ret;
-
-    std::strcpy(ret.data(), "\033[");
-    char *ptr = ret.data() + 2;
-    if (next.color != cur.cur_style.color)
-    {
-        if (next.color >= TextColor::extended && next.color < TextColor::extended_end)
-            ptr += std::sprintf(ptr, "38;5;%d;", int(next.color) - int(TextColor::extended));
-        else
-            ptr += std::sprintf(ptr, "%d;", int(next.color));
-    }
-    if (next.bg_color != cur.cur_style.bg_color)
-    {
-        if (next.bg_color >= TextColor::extended && next.bg_color < TextColor::extended_end)
-            ptr += std::sprintf(ptr, "48;5;%d;", int(next.bg_color) - int(TextColor::extended));
-        else
-            ptr += std::sprintf(ptr, "%d;", int(next.bg_color) + 10);
-    }
-    if (next.bold != cur.cur_style.bold)
-        ptr += std::sprintf(ptr, "%s;", next.bold ? "1" : "22"); // Bold text is a little weird.
-    if (next.italic != cur.cur_style.italic)
-        ptr += std::sprintf(ptr, "%s3;", next.italic ? "" : "2");
-    if (next.underline != cur.cur_style.underline)
-        ptr += std::sprintf(ptr, "%s4;", next.underline ? "" : "2");
-
-    if (ptr != ret.data() + 2)
-    {
-        // `sprintf` automatically null-terminates the buffer.
-        ptr[-1] = 'm';
-
-        return ret;
-    }
-
-    // Nothing useful in the buffer.
-    ret[0] = '\0';
-    return ret;
-}
-
-ta_test::text::Demangler::Demangler() {}
-
-ta_test::text::Demangler::~Demangler()
-{
-    #if CFG_TA_CXXABI_DEMANGLE
-    // Freeing a nullptr is a no-op.
-    std::free(buf_ptr);
-    #endif
-}
-
-const char *ta_test::text::Demangler::operator()(const char *name)
-{
-    #if CFG_TA_CXXABI_DEMANGLE
-    int status = -4;
-    buf_ptr = abi::__cxa_demangle(name, buf_ptr, &buf_size, &status);
-    if (status != 0) // -1 = out of memory, -2 = invalid string, -3 = invalid usage
-        return name;
-    return buf_ptr;
-    #else
-    return name;
-    #endif
-}
-
-void ta_test::text::TextCanvas::Print(const Terminal &terminal, Terminal::StyleGuard &cur_style) const
-{
-    std::string buffer;
-
-    for (const Line &line : lines)
-    {
-        std::size_t segment_start = 0;
-
-        auto FlushSegment = [&](std::size_t end_pos)
-        {
-            if (segment_start == end_pos)
-                return;
-
-            uni::Encode(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
-            terminal.Print("{}", std::string_view(buffer));
-            segment_start = end_pos;
-        };
-
-        if (terminal.enable_color)
-        {
-            for (std::size_t i = 0; i < line.text.size(); i++)
-            {
-                if (line.text[i] == ' ')
-                    continue;
-
-                FlushSegment(i);
-                terminal.Print("{}", terminal.AnsiDeltaString(cur_style, line.info[i].style).data());
-            }
-        }
-
-        FlushSegment(line.text.size());
-
-        terminal.Print("\n");
-    }
-}
-
-std::size_t ta_test::text::TextCanvas::NumLines() const
-{
-    return lines.size();
-}
-
-void ta_test::text::TextCanvas::EnsureNumLines(std::size_t size)
-{
-    if (lines.size() < size)
-        lines.resize(size);
-}
-
-void ta_test::text::TextCanvas::EnsureLineSize(std::size_t line_number, std::size_t size)
-{
-    if (line_number >= lines.size())
-        HardError("Line index is out of range.");
-
-    Line &line = lines[line_number];
-    if (line.text.size() < size)
-    {
-        line.text.resize(size, ' ');
-        line.info.resize(size);
-    }
-}
-
-void ta_test::text::TextCanvas::InsertLineBefore(std::size_t line_number)
-{
-    if (line_number >/*sic*/ lines.size())
-        HardError("Line number is out of range.");
-
-    lines.insert(lines.begin() + std::ptrdiff_t(line_number), Line{});
-}
-
-bool ta_test::text::TextCanvas::IsCellFree(std::size_t line, std::size_t column) const
-{
-    if (line >= lines.size())
-        return true;
-    const Line &this_line = lines[line];
-    if (column >= this_line.info.size())
-        return true;
-    return !this_line.info[column].important;
-}
-
-bool ta_test::text::TextCanvas::IsLineFree(std::size_t line, std::size_t column, std::size_t width, std::size_t gap) const
-{
-    // Apply `gap` to `column` and `width`.
-    column = gap < column ? column - gap : 0;
-    width += gap * 2;
-
-    if (line >= lines.size())
-        return true; // This space is below the canvas height.
-
-    const Line &this_line = lines[line];
-    if (this_line.info.empty())
-        return true; // This line is completely empty.
-
-    std::size_t last_column = column + width;
-    if (last_column >/*sic*/ this_line.info.size())
-        last_column = this_line.info.size();
-
-    bool ok = true;
-    for (std::size_t i = column; i < last_column; i++)
-    {
-        if (this_line.info[i].important)
-        {
-            ok = false;
-            break;
-        }
-    }
-    return ok;
-}
-
-std::size_t ta_test::text::TextCanvas::FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap, std::size_t vertical_step) const
-{
-    std::size_t num_free_lines = 0;
-    std::size_t line = starting_line;
-    while (true)
-    {
-        if (num_free_lines > 0 || (line - starting_line) % vertical_step == 0)
-        {
-            if (!IsLineFree(line, column, width, gap))
-            {
-                num_free_lines = 0;
-            }
-            else
-            {
-                num_free_lines++;
-                if (num_free_lines >= height)
-                    return line - height + 1;
-            }
-        }
-
-        line++; // Try the next line.
-    }
-}
-
-char32_t &ta_test::text::TextCanvas::CharAt(std::size_t line, std::size_t pos)
-{
-    if (line >= lines.size())
-        HardError("Line index is out of range.");
-
-    Line &this_line = lines[line];
-    if (pos >= this_line.text.size())
-        HardError("Character index is out of range.");
-
-    return this_line.text[pos];
-}
-
-// Accesses the cell info for the specified cell. The cell must exist.
-ta_test::text::TextCanvas::CellInfo &ta_test::text::TextCanvas::CellInfoAt(std::size_t line, std::size_t pos)
-{
-    if (line >= lines.size())
-        HardError("Line index is out of range.");
-
-    Line &this_line = lines[line];
-    if (pos >= this_line.info.size())
-        HardError("Character index is out of range.");
-
-    return this_line.info[pos];
-}
-
-std::size_t ta_test::text::TextCanvas::DrawString(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info)
-{
-    EnsureNumLines(line + 1);
-    EnsureLineSize(line, start + text.size());
-
-    auto out = lines[line].text.begin() + (std::ptrdiff_t)start;
-    for (char32_t ch : text)
-    {
-        // Replace control characters with their Unicode printable representations.
-        if (ch >= '\0' && ch < ' ')
-            ch += 0x2400;
-
-        *out++ = ch;
-    }
-
-    for (std::size_t i = start; i < start + text.size(); i++)
-        lines[line].info[i] = info;
-    return text.size();
-}
-
-std::size_t ta_test::text::TextCanvas::DrawString(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info)
-{
-    std::u32string decoded_text;
-    uni::Decode(text, decoded_text);
-    return DrawString(line, start, decoded_text, info);
-}
-
-std::size_t ta_test::text::TextCanvas::DrawRow(char32_t ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info)
-{
-    EnsureNumLines(line + 1);
-    EnsureLineSize(line, column + width);
-    for (std::size_t i = column; i < column + width; i++)
-    {
-        if (skip_important && !IsCellFree(line, i))
-            continue;
-
-        lines[line].text[i] = ch;
-        lines[line].info[i] = info;
-    }
-
-    return width;
-}
-
-void ta_test::text::TextCanvas::DrawColumn(char32_t ch, std::size_t line_start, std::size_t column, std::size_t height, bool skip_important, const CellInfo &info)
-{
-    if (height == 0)
-        return;
-
-    EnsureNumLines(line_start + height);
-
-    for (std::size_t i = line_start; i < line_start + height; i++)
-    {
-        if (skip_important && !IsCellFree(i, column))
-            continue;
-
-        EnsureLineSize(i, column + 1);
-
-        Line &line = lines[i];
-        line.text[column] = ch;
-        line.info[column] = info;
-    }
-}
-
-void ta_test::text::TextCanvas::DrawHorBracket(std::size_t line_start, std::size_t column_start, std::size_t height, std::size_t width, const CellInfo &info)
-{
-    if (width < 2 || height < 1)
-        return;
-
-    // Sides.
-    if (height > 1)
-    {
-        DrawColumn(data->bar, line_start, column_start, height - 1, true, info);
-        DrawColumn(data->bar, line_start, column_start + width - 1, height - 1, true, info);
-    }
-
-    // Bottom.
-    if (width > 2)
-        DrawRow(data->bracket_bottom, line_start + height - 1, column_start + 1, width - 2, false, info);
-
-    // Corners.
-    DrawRow(data->bracket_corner_bottom_left, line_start + height - 1, column_start, 1, false, info);
-    DrawRow(data->bracket_corner_bottom_right, line_start + height - 1, column_start + width - 1, 1, false, info);
-}
-
-void ta_test::text::TextCanvas::DrawOverline(std::size_t line, std::size_t column_start, std::size_t width, const CellInfo &info)
-{
-    if (width < 2)
-        return;
-
-    // Middle part.
-    if (width > 2)
-        DrawRow(data->bracket_top, line, column_start + 1, width - 2, false, info);
-
-    // Corners.
-    DrawRow(data->bracket_corner_top_left, line, column_start, 1, false, info);
-    DrawRow(data->bracket_corner_top_right, line, column_start + width - 1, 1, false, info);
-}
-
-std::size_t ta_test::text::expr::DrawToCanvas(TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr, const Style *style)
-{
-    if (!style)
-        style = &canvas.GetCommonData()->style_expr;
-
-    canvas.DrawString(line, start, expr);
-
-    std::size_t i = 0;
-    char prev_ch = '\0';
-    CharKind prev_kind = CharKind::normal;
-    bool is_number = false;
-    const char *identifier_start = nullptr;
-    bool is_number_suffix = false;
-    bool is_string_suffix = false;
-    std::size_t raw_string_separator_len = 0;
-
-    CharKind prev_string_kind{}; // One of: `string`, `character`, `raw_string`.
-
-    auto FinalizeIdentifier = [&](std::string_view ident)
-    {
-        const TextStyle *ident_style = nullptr;
-
-        // Check if this is a keyword.
-        auto it = style->highlighted_keywords.find(ident);
-        if (it != style->highlighted_keywords.end())
-        {
-            switch (it->second)
-            {
-              case KeywordKind::generic:
-                ident_style = &style->keyword_generic;
-                break;
-              case KeywordKind::value:
-                ident_style = &style->keyword_value;
-                break;
-              case KeywordKind::op:
-                ident_style = &style->keyword_op;
-                break;
-            }
-        }
-
-        // If this identifier needs a custom style...
-        if (ident_style)
-        {
-            for (std::size_t j = 0; j < ident.size(); j++)
-                canvas.CellInfoAt(line, start + i - j - 1).style = *ident_style;
-        }
-    };
-
-    auto lambda = [&](const char &ch, CharKind kind)
-    {
-        if (!uni::IsFirstByte(ch))
-            return;
-
-        TextCanvas::CellInfo &info = canvas.CellInfoAt(line, start + i);
-        bool is_punct = chars::IsPunct(ch);
-
-        const char *const prev_identifier_start = identifier_start;
-
-        if (kind != CharKind::normal)
-        {
-            is_number = false;
-            identifier_start = nullptr;
-            is_number_suffix = false;
-            is_string_suffix = false;
-        }
-
-        // When exiting raw string, backtrack and color the closing sequence.
-        if (prev_kind == CharKind::raw_string && kind != CharKind::raw_string)
-        {
-            for (std::size_t j = 0; j < raw_string_separator_len; j++)
-                canvas.CellInfoAt(line, start + i - j - 1).style = style->raw_string_delimiters;
-        }
-
-        switch (kind)
-        {
-          case CharKind::normal:
-            if (is_string_suffix && !chars::IsIdentifierChar(ch))
-                is_string_suffix = false;
-            if ((prev_kind == CharKind::string || prev_kind == CharKind::character || prev_kind == CharKind::raw_string) && chars::IsIdentifierChar(ch))
-                is_string_suffix = true;
-
-            if (is_number_suffix && !chars::IsIdentifierChar(ch))
-                is_number_suffix = false;
-
-            if (!is_number && !identifier_start && !is_string_suffix && !is_number_suffix)
-            {
-                if (chars::IsDigit(ch))
-                {
-                    is_number = true;
-
-                    // Backtrack and make the leading `.` a number too, if it's there.
-                    if (i > 0 && expr[i-1] == '.')
-                        canvas.CellInfoAt(line, start + i - 1).style = style->number;
-                }
-                else if (chars::IsIdentifierChar(ch))
-                {
-                    identifier_start = &ch;
-                }
-            }
-            else if (is_number)
-            {
-                if (!(chars::IsDigit(ch) || chars::IsAlpha(ch) || ch == '.' || ch == '\'' ||
-                    ((prev_ch == 'e' || prev_ch == 'E' || prev_ch == 'p' || prev_ch == 'P') && ( ch == '-' || ch == '+'))
-                ))
-                {
-                    is_number = false;
-                    if (ch == '_')
-                        is_number_suffix = true;
-                }
-            }
-            else if (identifier_start)
-            {
-                if (!chars::IsIdentifierChar(ch))
-                    identifier_start = nullptr;
-            }
-
-            if (is_string_suffix)
-            {
-                switch (prev_string_kind)
-                {
-                  case CharKind::string:
-                    info.style = style->string_suffix;
-                    break;
-                  case CharKind::character:
-                    info.style = style->character_suffix;
-                    break;
-                  case CharKind::raw_string:
-                    info.style = style->raw_string_suffix;
-                    break;
-                  default:
-                    HardError("Lexer error during pretty-printing.");
-                    break;
-                }
-            }
-            else if (is_number_suffix)
-                info.style = style->number_suffix;
-            else if (is_number)
-                info.style = style->number;
-            else if (is_punct)
-                info.style = style->punct;
-            else
-                info.style = style->normal;
-            break;
-          case CharKind::string:
-          case CharKind::character:
-          case CharKind::raw_string:
-          case CharKind::raw_string_initial_sep:
-            if (prev_kind != kind && prev_kind != CharKind::raw_string_initial_sep)
-            {
-                if (kind == CharKind::raw_string_initial_sep)
-                    prev_string_kind = CharKind::raw_string;
-                else
-                    prev_string_kind = kind;
-
-                // Backtrack and color the prefix.
-                std::size_t j = i;
-                while (j-- > 0 && (chars::IsAlpha(expr[j]) || chars::IsDigit(expr[j])))
-                {
-                    TextStyle &target_style = canvas.CellInfoAt(line, start + j).style;
-                    switch (prev_string_kind)
-                    {
-                      case CharKind::string:
-                        target_style = style->string_prefix;
-                        break;
-                      case CharKind::character:
-                        target_style = style->character_prefix;
-                        break;
-                      case CharKind::raw_string:
-                        target_style = style->raw_string_prefix;
-                        break;
-                      default:
-                        HardError("Lexer error during pretty-printing.");
-                        break;
-                    }
-                }
-            }
-
-            if (kind == CharKind::raw_string_initial_sep)
-            {
-                if (prev_kind != CharKind::raw_string_initial_sep)
-                    raw_string_separator_len = 1;
-                raw_string_separator_len++;
-            }
-
-            switch (kind)
-            {
-              case CharKind::string:
-                info.style = style->string;
-                break;
-              case CharKind::character:
-                info.style = style->character;
-                break;
-              case CharKind::raw_string:
-              case CharKind::raw_string_initial_sep:
-                if (kind == CharKind::raw_string_initial_sep || prev_kind == CharKind::raw_string_initial_sep)
-                    info.style = style->raw_string_delimiters;
-                else
-                    info.style = style->raw_string;
-                break;
-              default:
-                HardError("Lexer error during pretty-printing.");
-                break;
-            }
-            break;
-          case CharKind::string_escape_slash:
-            info.style = style->string;
-            break;
-          case CharKind::character_escape_slash:
-            info.style = style->character;
-            break;
-        }
-
-        // Finalize identifiers.
-        if (prev_identifier_start && !identifier_start)
-            FinalizeIdentifier({prev_identifier_start, &ch});
-
-        prev_ch = ch;
-        prev_kind = kind;
-
-        i++;
-    };
-    ParseExpr(expr, lambda, nullptr);
-    if (identifier_start)
-        FinalizeIdentifier({identifier_start, expr.data() + expr.size()});
-
-    return expr.size();
-}
-
-void ta_test::text::PrintContext(Terminal::StyleGuard &cur_style, const context::BasicFrame *skip_last_frame, context::Context con)
-{
-    bool first = true;
-    for (auto it = con.end(); it != con.begin();)
-    {
-        --it;
-        if (first && skip_last_frame && skip_last_frame == it->get())
-            continue;
-
-        first = false;
-        ta_test::text::PrintContextFrame(cur_style, **it);
-    }
-}
-
-void ta_test::text::PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
-{
-    auto &thread_state = detail::ThreadState();
-    if (!thread_state.current_test)
-        HardError("No test is currently running, can't print context.", HardErrorKind::user);
-
-    for (const auto &m : thread_state.current_test->all_tests->modules->AllModules())
-    {
-        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
-        {
-            if (base->PrintContextFrame(cur_style, frame))
-                break;
-        }
-    }
-}
-
-void ta_test::text::PrintLog(Terminal::StyleGuard &cur_style)
-{
-    auto &thread_state = detail::ThreadState();
-    if (!thread_state.current_test)
-        HardError("No test is currently running, can't print log.", HardErrorKind::user);
-
-    // Refresh the messages. Only the scoped log, since the unscoped one should never be lazy.
-    for (auto *entry : thread_state.scoped_log)
-        entry->RefreshMessage();
-
-    for (const auto &m : thread_state.current_test->all_tests->modules->AllModules())
-    {
-        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
-        {
-            if (base->PrintLogEntries(cur_style, thread_state.current_test->unscoped_log, context::CurrentScopedLog()))
-                break;
-        }
-    }
-}
-
-void ta_test::BasicPrintingModule::PrintWarning(Terminal::StyleGuard &cur_style, std::string_view text) const
-{
-    // Resetting the style before and after just in case.
-    cur_style.ResetStyle();
-    terminal.Print(cur_style, "{}{}{}\n",
-        common_data.style_warning,
-        common_data.warning_prefix,
-        text
-    );
-    cur_style.ResetStyle();
-}
-
-void ta_test::BasicPrintingModule::PrintNote(Terminal::StyleGuard &cur_style, std::string_view text) const
-{
-    // Resetting the style before and after just in case.
-    cur_style.ResetStyle();
-    terminal.Print(cur_style, "{}{}{}\n",
-        common_data.style_note,
-        common_data.note_prefix,
-        text
-    );
-    cur_style.ResetStyle();
 }
 
 void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<void(SingleException elem)> &func)
@@ -997,6 +250,755 @@ std::string ta_test::BasicModule::BasicGenerator::GetTypeName() const
     }
 
     return ret;
+}
+
+// Gracefully fails the current test, if not already failed.
+// Call this first, before printing any messages.
+void ta_test::detail::GlobalThreadState::FailCurrentTest()
+{
+    if (!current_test)
+        HardError("Trying to fail the current test, but no test is currently running.");
+
+    if (current_test->failed)
+        return; // Already failed.
+
+    current_test->failed = true;
+    current_test->all_tests->modules->Call<&BasicModule::OnPreFailTest>(*current_test);
+}
+
+ta_test::detail::GlobalThreadState &ta_test::detail::ThreadState()
+{
+    thread_local GlobalThreadState ret;
+    return ret;
+}
+
+bool ta_test::platform::IsDebuggerAttached()
+{
+    #if !CFG_TA_DETECT_DEBUGGER
+    return false;
+    #elif defined(_WIN32)
+    return bool(IsDebuggerPresent());
+    #elif defined(__linux__)
+    std::ifstream file("/proc/self/status");
+    if (!file)
+        return false;
+    for (std::string line; std::getline(file, line);)
+    {
+        constexpr std::string_view prefix = "TracerPid:";
+        if (!line.starts_with(prefix))
+            continue;
+        for (std::size_t i = prefix.size(); i < line.size(); i++)
+        {
+            if (text::chars::IsDigit(line[i]) && line[i] != '0')
+                return true;
+        }
+    }
+    return false;
+    #else
+    return false;
+    #endif
+}
+
+bool ta_test::platform::IsTerminalAttached(bool is_stderr)
+{
+    // We cache the return value.
+    auto lambda = []<bool IsStderr>
+    {
+        static bool ret = []{
+            #if defined(_WIN32)
+            return GetFileType(GetStdHandle(IsStderr ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
+            #elif defined(DETAIL_TA_USE_ISATTY)
+            return isatty(IsStderr ? STDERR_FILENO : STDOUT_FILENO) == 1;
+            #else
+            return false;
+            #endif
+        }();
+        return ret;
+    };
+    if (is_stderr)
+        return lambda.operator()<true>();
+    else
+        return lambda.operator()<false>();
+}
+
+ta_test::output::Terminal::Terminal(FILE *stream)
+{
+    bool is_terminal =
+        stream == stdout ? platform::IsTerminalAttached(false) :
+        stream == stderr ? platform::IsTerminalAttached(true) : false;
+
+    output_func = [stream
+    #if CFG_TA_FMT_HAS_FILE_PRINT == 0 && defined(_WIN32)
+    , need_init = is_terminal
+    #endif
+    ](std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) mutable
+    {
+        #if CFG_TA_FMT_HAS_FILE_PRINT == 2
+        CFG_TA_FMT_NAMESPACE::vprint_unicode(stream, fmt, args);
+        #elif CFG_TA_FMT_HAS_FILE_PRINT == 1
+        CFG_TA_FMT_NAMESPACE::vprint(stream, fmt, args);
+        #elif CFG_TA_FMT_HAS_FILE_PRINT == 0
+
+        #ifdef _WIN32
+        if (need_init)
+        {
+            need_init = false;
+
+            SetConsoleOutputCP(CP_UTF8);
+
+            auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            DWORD current_mode{};
+            GetConsoleMode(handle, &current_mode);
+            SetConsoleMode(handle, current_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+        #endif
+
+        std::string buffer = CFG_TA_FMT_NAMESPACE::vformat(fmt, args);
+        std::fwrite(buffer.c_str(), buffer.size(), 1, stream);
+        #else
+        #error Invalid value of `CFG_TA_FMT_HAS_FILE_PRINT`.
+        #endif
+    };
+
+    enable_color = is_terminal;
+}
+
+void ta_test::output::Terminal::PrintLow(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) const
+{
+    if (output_func)
+        output_func(fmt, args);
+}
+
+ta_test::output::Terminal::StyleGuard::StyleGuard(Terminal &terminal)
+    : terminal(terminal)
+{
+    if (terminal.enable_color)
+    {
+        ResetStyle();
+        exception_counter = std::uncaught_exceptions(); // Don't need this without color.
+    }
+}
+
+ta_test::output::Terminal::StyleGuard::~StyleGuard()
+{
+    if (terminal.enable_color && exception_counter == std::uncaught_exceptions())
+        ResetStyle();
+}
+
+void ta_test::output::Terminal::StyleGuard::ResetStyle()
+{
+    if (terminal.enable_color)
+        terminal.Print("{}", terminal.AnsiResetString().data());
+}
+
+std::string_view ta_test::output::Terminal::AnsiResetString() const
+{
+    if (enable_color)
+        return "\033[0m";
+    else
+        return "";
+}
+
+ta_test::output::Terminal::AnsiDeltaStringBuffer ta_test::output::Terminal::AnsiDeltaString(const StyleGuard &&cur, const TextStyle &next) const
+{
+    AnsiDeltaStringBuffer ret;
+    ret[0] = '\0';
+
+    if (!enable_color)
+        return ret;
+
+    std::strcpy(ret.data(), "\033[");
+    char *ptr = ret.data() + 2;
+    if (next.color != cur.cur_style.color)
+    {
+        if (next.color >= TextColor::extended && next.color < TextColor::extended_end)
+            ptr += std::sprintf(ptr, "38;5;%d;", int(next.color) - int(TextColor::extended));
+        else
+            ptr += std::sprintf(ptr, "%d;", int(next.color));
+    }
+    if (next.bg_color != cur.cur_style.bg_color)
+    {
+        if (next.bg_color >= TextColor::extended && next.bg_color < TextColor::extended_end)
+            ptr += std::sprintf(ptr, "48;5;%d;", int(next.bg_color) - int(TextColor::extended));
+        else
+            ptr += std::sprintf(ptr, "%d;", int(next.bg_color) + 10);
+    }
+    if (next.bold != cur.cur_style.bold)
+        ptr += std::sprintf(ptr, "%s;", next.bold ? "1" : "22"); // Bold text is a little weird.
+    if (next.italic != cur.cur_style.italic)
+        ptr += std::sprintf(ptr, "%s3;", next.italic ? "" : "2");
+    if (next.underline != cur.cur_style.underline)
+        ptr += std::sprintf(ptr, "%s4;", next.underline ? "" : "2");
+
+    if (ptr != ret.data() + 2)
+    {
+        // `sprintf` automatically null-terminates the buffer.
+        ptr[-1] = 'm';
+
+        return ret;
+    }
+
+    // Nothing useful in the buffer.
+    ret[0] = '\0';
+    return ret;
+}
+
+void ta_test::output::TextCanvas::Print(const Terminal &terminal, Terminal::StyleGuard &cur_style) const
+{
+    std::string buffer;
+
+    for (const Line &line : lines)
+    {
+        std::size_t segment_start = 0;
+
+        auto FlushSegment = [&](std::size_t end_pos)
+        {
+            if (segment_start == end_pos)
+                return;
+
+            text::uni::Encode(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
+            terminal.Print("{}", std::string_view(buffer));
+            segment_start = end_pos;
+        };
+
+        if (terminal.enable_color)
+        {
+            for (std::size_t i = 0; i < line.text.size(); i++)
+            {
+                if (line.text[i] == ' ')
+                    continue;
+
+                FlushSegment(i);
+                terminal.Print("{}", terminal.AnsiDeltaString(cur_style, line.info[i].style).data());
+            }
+        }
+
+        FlushSegment(line.text.size());
+
+        terminal.Print("\n");
+    }
+}
+
+std::size_t ta_test::output::TextCanvas::NumLines() const
+{
+    return lines.size();
+}
+
+void ta_test::output::TextCanvas::EnsureNumLines(std::size_t size)
+{
+    if (lines.size() < size)
+        lines.resize(size);
+}
+
+void ta_test::output::TextCanvas::EnsureLineSize(std::size_t line_number, std::size_t size)
+{
+    if (line_number >= lines.size())
+        HardError("Line index is out of range.");
+
+    Line &line = lines[line_number];
+    if (line.text.size() < size)
+    {
+        line.text.resize(size, ' ');
+        line.info.resize(size);
+    }
+}
+
+void ta_test::output::TextCanvas::InsertLineBefore(std::size_t line_number)
+{
+    if (line_number >/*sic*/ lines.size())
+        HardError("Line number is out of range.");
+
+    lines.insert(lines.begin() + std::ptrdiff_t(line_number), Line{});
+}
+
+bool ta_test::output::TextCanvas::IsCellFree(std::size_t line, std::size_t column) const
+{
+    if (line >= lines.size())
+        return true;
+    const Line &this_line = lines[line];
+    if (column >= this_line.info.size())
+        return true;
+    return !this_line.info[column].important;
+}
+
+bool ta_test::output::TextCanvas::IsLineFree(std::size_t line, std::size_t column, std::size_t width, std::size_t gap) const
+{
+    // Apply `gap` to `column` and `width`.
+    column = gap < column ? column - gap : 0;
+    width += gap * 2;
+
+    if (line >= lines.size())
+        return true; // This space is below the canvas height.
+
+    const Line &this_line = lines[line];
+    if (this_line.info.empty())
+        return true; // This line is completely empty.
+
+    std::size_t last_column = column + width;
+    if (last_column >/*sic*/ this_line.info.size())
+        last_column = this_line.info.size();
+
+    bool ok = true;
+    for (std::size_t i = column; i < last_column; i++)
+    {
+        if (this_line.info[i].important)
+        {
+            ok = false;
+            break;
+        }
+    }
+    return ok;
+}
+
+std::size_t ta_test::output::TextCanvas::FindFreeSpace(std::size_t starting_line, std::size_t column, std::size_t height, std::size_t width, std::size_t gap, std::size_t vertical_step) const
+{
+    std::size_t num_free_lines = 0;
+    std::size_t line = starting_line;
+    while (true)
+    {
+        if (num_free_lines > 0 || (line - starting_line) % vertical_step == 0)
+        {
+            if (!IsLineFree(line, column, width, gap))
+            {
+                num_free_lines = 0;
+            }
+            else
+            {
+                num_free_lines++;
+                if (num_free_lines >= height)
+                    return line - height + 1;
+            }
+        }
+
+        line++; // Try the next line.
+    }
+}
+
+char32_t &ta_test::output::TextCanvas::CharAt(std::size_t line, std::size_t pos)
+{
+    if (line >= lines.size())
+        HardError("Line index is out of range.");
+
+    Line &this_line = lines[line];
+    if (pos >= this_line.text.size())
+        HardError("Character index is out of range.");
+
+    return this_line.text[pos];
+}
+
+// Accesses the cell info for the specified cell. The cell must exist.
+ta_test::output::TextCanvas::CellInfo &ta_test::output::TextCanvas::CellInfoAt(std::size_t line, std::size_t pos)
+{
+    if (line >= lines.size())
+        HardError("Line index is out of range.");
+
+    Line &this_line = lines[line];
+    if (pos >= this_line.info.size())
+        HardError("Character index is out of range.");
+
+    return this_line.info[pos];
+}
+
+std::size_t ta_test::output::TextCanvas::DrawString(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info)
+{
+    EnsureNumLines(line + 1);
+    EnsureLineSize(line, start + text.size());
+
+    auto out = lines[line].text.begin() + (std::ptrdiff_t)start;
+    for (char32_t ch : text)
+    {
+        // Replace control characters with their Unicode printable representations.
+        if (ch >= '\0' && ch < ' ')
+            ch += 0x2400;
+
+        *out++ = ch;
+    }
+
+    for (std::size_t i = start; i < start + text.size(); i++)
+        lines[line].info[i] = info;
+    return text.size();
+}
+
+std::size_t ta_test::output::TextCanvas::DrawString(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info)
+{
+    std::u32string decoded_text;
+    text::uni::Decode(text, decoded_text);
+    return DrawString(line, start, decoded_text, info);
+}
+
+std::size_t ta_test::output::TextCanvas::DrawRow(char32_t ch, std::size_t line, std::size_t column, std::size_t width, bool skip_important, const CellInfo &info)
+{
+    EnsureNumLines(line + 1);
+    EnsureLineSize(line, column + width);
+    for (std::size_t i = column; i < column + width; i++)
+    {
+        if (skip_important && !IsCellFree(line, i))
+            continue;
+
+        lines[line].text[i] = ch;
+        lines[line].info[i] = info;
+    }
+
+    return width;
+}
+
+void ta_test::output::TextCanvas::DrawColumn(char32_t ch, std::size_t line_start, std::size_t column, std::size_t height, bool skip_important, const CellInfo &info)
+{
+    if (height == 0)
+        return;
+
+    EnsureNumLines(line_start + height);
+
+    for (std::size_t i = line_start; i < line_start + height; i++)
+    {
+        if (skip_important && !IsCellFree(i, column))
+            continue;
+
+        EnsureLineSize(i, column + 1);
+
+        Line &line = lines[i];
+        line.text[column] = ch;
+        line.info[column] = info;
+    }
+}
+
+void ta_test::output::TextCanvas::DrawHorBracket(std::size_t line_start, std::size_t column_start, std::size_t height, std::size_t width, const CellInfo &info)
+{
+    if (width < 2 || height < 1)
+        return;
+
+    // Sides.
+    if (height > 1)
+    {
+        DrawColumn(data->bar, line_start, column_start, height - 1, true, info);
+        DrawColumn(data->bar, line_start, column_start + width - 1, height - 1, true, info);
+    }
+
+    // Bottom.
+    if (width > 2)
+        DrawRow(data->bracket_bottom, line_start + height - 1, column_start + 1, width - 2, false, info);
+
+    // Corners.
+    DrawRow(data->bracket_corner_bottom_left, line_start + height - 1, column_start, 1, false, info);
+    DrawRow(data->bracket_corner_bottom_right, line_start + height - 1, column_start + width - 1, 1, false, info);
+}
+
+void ta_test::output::TextCanvas::DrawOverline(std::size_t line, std::size_t column_start, std::size_t width, const CellInfo &info)
+{
+    if (width < 2)
+        return;
+
+    // Middle part.
+    if (width > 2)
+        DrawRow(data->bracket_top, line, column_start + 1, width - 2, false, info);
+
+    // Corners.
+    DrawRow(data->bracket_corner_top_left, line, column_start, 1, false, info);
+    DrawRow(data->bracket_corner_top_right, line, column_start + width - 1, 1, false, info);
+}
+
+std::size_t ta_test::output::expr::DrawToCanvas(output::TextCanvas &canvas, std::size_t line, std::size_t start, std::string_view expr, const Style *style)
+{
+    using CharKind = text::expr::CharKind;
+
+    if (!style)
+        style = &canvas.GetCommonData()->style_expr;
+
+    canvas.DrawString(line, start, expr);
+
+    std::size_t i = 0;
+    char prev_ch = '\0';
+    CharKind prev_kind = CharKind::normal;
+    bool is_number = false;
+    const char *identifier_start = nullptr;
+    bool is_number_suffix = false;
+    bool is_string_suffix = false;
+    std::size_t raw_string_separator_len = 0;
+
+    CharKind prev_string_kind{}; // One of: `string`, `character`, `raw_string`.
+
+    auto FinalizeIdentifier = [&](std::string_view ident)
+    {
+        const TextStyle *ident_style = nullptr;
+
+        // Check if this is a keyword.
+        auto it = style->highlighted_keywords.find(ident);
+        if (it != style->highlighted_keywords.end())
+        {
+            switch (it->second)
+            {
+              case KeywordKind::generic:
+                ident_style = &style->keyword_generic;
+                break;
+              case KeywordKind::value:
+                ident_style = &style->keyword_value;
+                break;
+              case KeywordKind::op:
+                ident_style = &style->keyword_op;
+                break;
+            }
+        }
+
+        // If this identifier needs a custom style...
+        if (ident_style)
+        {
+            for (std::size_t j = 0; j < ident.size(); j++)
+                canvas.CellInfoAt(line, start + i - j - 1).style = *ident_style;
+        }
+    };
+
+    auto lambda = [&](const char &ch, CharKind kind)
+    {
+        if (!text::uni::IsFirstByte(ch))
+            return;
+
+        TextCanvas::CellInfo &info = canvas.CellInfoAt(line, start + i);
+        bool is_punct = text::chars::IsPunct(ch);
+
+        const char *const prev_identifier_start = identifier_start;
+
+        if (kind != CharKind::normal)
+        {
+            is_number = false;
+            identifier_start = nullptr;
+            is_number_suffix = false;
+            is_string_suffix = false;
+        }
+
+        // When exiting raw string, backtrack and color the closing sequence.
+        if (prev_kind == CharKind::raw_string && kind != CharKind::raw_string)
+        {
+            for (std::size_t j = 0; j < raw_string_separator_len; j++)
+                canvas.CellInfoAt(line, start + i - j - 1).style = style->raw_string_delimiters;
+        }
+
+        switch (kind)
+        {
+          case CharKind::normal:
+            if (is_string_suffix && !text::chars::IsIdentifierChar(ch))
+                is_string_suffix = false;
+            if ((prev_kind == CharKind::string || prev_kind == CharKind::character || prev_kind == CharKind::raw_string) && text::chars::IsIdentifierChar(ch))
+                is_string_suffix = true;
+
+            if (is_number_suffix && !text::chars::IsIdentifierChar(ch))
+                is_number_suffix = false;
+
+            if (!is_number && !identifier_start && !is_string_suffix && !is_number_suffix)
+            {
+                if (text::chars::IsDigit(ch))
+                {
+                    is_number = true;
+
+                    // Backtrack and make the leading `.` a number too, if it's there.
+                    if (i > 0 && expr[i-1] == '.')
+                        canvas.CellInfoAt(line, start + i - 1).style = style->number;
+                }
+                else if (text::chars::IsIdentifierChar(ch))
+                {
+                    identifier_start = &ch;
+                }
+            }
+            else if (is_number)
+            {
+                if (!(text::chars::IsDigit(ch) || text::chars::IsAlpha(ch) || ch == '.' || ch == '\'' ||
+                    ((prev_ch == 'e' || prev_ch == 'E' || prev_ch == 'p' || prev_ch == 'P') && ( ch == '-' || ch == '+'))
+                ))
+                {
+                    is_number = false;
+                    if (ch == '_')
+                        is_number_suffix = true;
+                }
+            }
+            else if (identifier_start)
+            {
+                if (!text::chars::IsIdentifierChar(ch))
+                    identifier_start = nullptr;
+            }
+
+            if (is_string_suffix)
+            {
+                switch (prev_string_kind)
+                {
+                  case CharKind::string:
+                    info.style = style->string_suffix;
+                    break;
+                  case CharKind::character:
+                    info.style = style->character_suffix;
+                    break;
+                  case CharKind::raw_string:
+                    info.style = style->raw_string_suffix;
+                    break;
+                  default:
+                    HardError("Lexer error during pretty-printing.");
+                    break;
+                }
+            }
+            else if (is_number_suffix)
+                info.style = style->number_suffix;
+            else if (is_number)
+                info.style = style->number;
+            else if (is_punct)
+                info.style = style->punct;
+            else
+                info.style = style->normal;
+            break;
+          case CharKind::string:
+          case CharKind::character:
+          case CharKind::raw_string:
+          case CharKind::raw_string_initial_sep:
+            if (prev_kind != kind && prev_kind != CharKind::raw_string_initial_sep)
+            {
+                if (kind == CharKind::raw_string_initial_sep)
+                    prev_string_kind = CharKind::raw_string;
+                else
+                    prev_string_kind = kind;
+
+                // Backtrack and color the prefix.
+                std::size_t j = i;
+                while (j-- > 0 && (text::chars::IsAlpha(expr[j]) || text::chars::IsDigit(expr[j])))
+                {
+                    TextStyle &target_style = canvas.CellInfoAt(line, start + j).style;
+                    switch (prev_string_kind)
+                    {
+                      case CharKind::string:
+                        target_style = style->string_prefix;
+                        break;
+                      case CharKind::character:
+                        target_style = style->character_prefix;
+                        break;
+                      case CharKind::raw_string:
+                        target_style = style->raw_string_prefix;
+                        break;
+                      default:
+                        HardError("Lexer error during pretty-printing.");
+                        break;
+                    }
+                }
+            }
+
+            if (kind == CharKind::raw_string_initial_sep)
+            {
+                if (prev_kind != CharKind::raw_string_initial_sep)
+                    raw_string_separator_len = 1;
+                raw_string_separator_len++;
+            }
+
+            switch (kind)
+            {
+              case CharKind::string:
+                info.style = style->string;
+                break;
+              case CharKind::character:
+                info.style = style->character;
+                break;
+              case CharKind::raw_string:
+              case CharKind::raw_string_initial_sep:
+                if (kind == CharKind::raw_string_initial_sep || prev_kind == CharKind::raw_string_initial_sep)
+                    info.style = style->raw_string_delimiters;
+                else
+                    info.style = style->raw_string;
+                break;
+              default:
+                HardError("Lexer error during pretty-printing.");
+                break;
+            }
+            break;
+          case CharKind::string_escape_slash:
+            info.style = style->string;
+            break;
+          case CharKind::character_escape_slash:
+            info.style = style->character;
+            break;
+        }
+
+        // Finalize identifiers.
+        if (prev_identifier_start && !identifier_start)
+            FinalizeIdentifier({prev_identifier_start, &ch});
+
+        prev_ch = ch;
+        prev_kind = kind;
+
+        i++;
+    };
+    text::expr::ParseExpr(expr, lambda, nullptr);
+    if (identifier_start)
+        FinalizeIdentifier({identifier_start, expr.data() + expr.size()});
+
+    return expr.size();
+}
+
+void ta_test::output::PrintContext(Terminal::StyleGuard &cur_style, const context::BasicFrame *skip_last_frame, context::Context con)
+{
+    bool first = true;
+    for (auto it = con.end(); it != con.begin();)
+    {
+        --it;
+        if (first && skip_last_frame && skip_last_frame == it->get())
+            continue;
+
+        first = false;
+        PrintContextFrame(cur_style, **it);
+    }
+}
+
+void ta_test::output::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
+{
+    auto &thread_state = detail::ThreadState();
+    if (!thread_state.current_test)
+        HardError("No test is currently running, can't print context.", HardErrorKind::user);
+
+    for (const auto &m : thread_state.current_test->all_tests->modules->AllModules())
+    {
+        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+        {
+            if (base->PrintContextFrame(cur_style, frame))
+                break;
+        }
+    }
+}
+
+void ta_test::output::PrintLog(Terminal::StyleGuard &cur_style)
+{
+    auto &thread_state = detail::ThreadState();
+    if (!thread_state.current_test)
+        HardError("No test is currently running, can't print log.", HardErrorKind::user);
+
+    // Refresh the messages. Only the scoped log, since the unscoped one should never be lazy.
+    for (auto *entry : thread_state.scoped_log)
+        entry->RefreshMessage();
+
+    for (const auto &m : thread_state.current_test->all_tests->modules->AllModules())
+    {
+        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+        {
+            if (base->PrintLogEntries(cur_style, thread_state.current_test->unscoped_log, context::CurrentScopedLog()))
+                break;
+        }
+    }
+}
+
+void ta_test::BasicPrintingModule::PrintWarning(output::Terminal::StyleGuard &cur_style, std::string_view text) const
+{
+    // Resetting the style before and after just in case.
+    cur_style.ResetStyle();
+    terminal.Print(cur_style, "{}{}{}\n",
+        common_data.style_warning,
+        common_data.warning_prefix,
+        text
+    );
+    cur_style.ResetStyle();
+}
+
+void ta_test::BasicPrintingModule::PrintNote(output::Terminal::StyleGuard &cur_style, std::string_view text) const
+{
+    // Resetting the style before and after just in case.
+    cur_style.ResetStyle();
+    terminal.Print(cur_style, "{}{}{}\n",
+        common_data.style_note,
+        common_data.note_prefix,
+        text
+    );
+    cur_style.ResetStyle();
 }
 
 void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
@@ -1220,7 +1222,7 @@ std::string ta_test::string_conv::DefaultToStringTraits<ta_test::ExceptionElemVa
 {
     if (value.valueless_by_exception())
         HardError("Invalid `ExceptionElemVar` variant.");
-    return std::visit(Overload{
+    return std::visit(meta::Overload{
         [](ExceptionElem elem) {return (ToString)(elem);},
         [](int index) {return (ToString)(index);},
     }, value);
@@ -1565,7 +1567,12 @@ int ta_test::Runner::Run()
 // --- modules::BasicExceptionContentsPrinter ---
 
 ta_test::modules::BasicExceptionContentsPrinter::BasicExceptionContentsPrinter()
-    : print_callback([](const BasicExceptionContentsPrinter &self, const Terminal &terminal, Terminal::StyleGuard &cur_style, const std::exception_ptr &e)
+    : print_callback([](
+        const BasicExceptionContentsPrinter &self,
+        const output::Terminal &terminal,
+        output::Terminal::StyleGuard &cur_style,
+        const std::exception_ptr &e
+    )
     {
         AnalyzeException(e, [&](const SingleException &elem)
         {
@@ -1593,7 +1600,11 @@ ta_test::modules::BasicExceptionContentsPrinter::BasicExceptionContentsPrinter()
     })
 {}
 
-void ta_test::modules::BasicExceptionContentsPrinter::PrintException(const Terminal &terminal, Terminal::StyleGuard &cur_style, const std::exception_ptr &e) const
+void ta_test::modules::BasicExceptionContentsPrinter::PrintException(
+    const output::Terminal &terminal,
+    output::Terminal::StyleGuard &cur_style,
+    const std::exception_ptr &e
+) const
 {
     print_callback(*this, terminal, cur_style, e);
 }
@@ -1830,7 +1841,11 @@ ta_test::modules::ProgressPrinter::GeneratorValueShortener::GeneratorValueShorte
     is_short = true;
 }
 
-void ta_test::modules::ProgressPrinter::PrintContextLinePrefix(Terminal::StyleGuard &cur_style, const RunTestsProgress &all_tests, TestCounterStyle test_counter_style) const
+void ta_test::modules::ProgressPrinter::PrintContextLinePrefix(
+    output::Terminal::StyleGuard &cur_style,
+    const RunTestsProgress &all_tests,
+    TestCounterStyle test_counter_style
+) const
 {
     // Test index, if necessary.
     if (test_counter_style != TestCounterStyle::none)
@@ -1874,7 +1889,7 @@ void ta_test::modules::ProgressPrinter::PrintContextLinePrefix(Terminal::StyleGu
     );
 }
 
-void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(Terminal::StyleGuard &cur_style, std::size_t depth, std::size_t skip_characters) const
+void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(output::Terminal::StyleGuard &cur_style, std::size_t depth, std::size_t skip_characters) const
 {
     // Indentation prefix.
     terminal.Print(cur_style, "{}{}",
@@ -1911,7 +1926,7 @@ void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(Terminal::St
         terminal.Print("{}", chars_indentation);
 }
 
-void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(Terminal::StyleGuard &cur_style, const RunSingleTestProgress &test, const BasicGenerator &generator, bool repeating_info)
+void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(output::Terminal::StyleGuard &cur_style, const RunSingleTestProgress &test, const BasicGenerator &generator, bool repeating_info)
 {
     PrintContextLinePrefix(cur_style, *test.all_tests, state.per_test.per_repetition.printed_counter ? TestCounterStyle::none : TestCounterStyle::repeated);
 
@@ -2493,12 +2508,12 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data)
 {
     auto cur_style = terminal.MakeStyleGuard();
-    text::PrintLog(cur_style);
+    output::PrintLog(cur_style);
     PrintAssertionFrameLow(cur_style, data, true);
-    text::PrintContext(cur_style, &data);
+    output::PrintContext(cur_style, &data);
 }
 
-bool ta_test::modules::AssertionPrinter::PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
+bool ta_test::modules::AssertionPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
 {
     if (auto assertion_frame = dynamic_cast<const BasicAssertionInfo *>(&frame))
     {
@@ -2509,9 +2524,9 @@ bool ta_test::modules::AssertionPrinter::PrintContextFrame(Terminal::StyleGuard 
     return false;
 }
 
-void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(Terminal::StyleGuard &cur_style, const BasicAssertionInfo &data, bool is_most_nested) const
+void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const BasicAssertionInfo &data, bool is_most_nested) const
 {
-    text::TextCanvas canvas(&common_data);
+    output::TextCanvas canvas(&common_data);
     std::size_t line_counter = 0;
 
     // The file path.
@@ -2551,7 +2566,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(Terminal::StyleG
     {
         std::size_t column = common_data.code_indentation;
 
-        const text::TextCanvas::CellInfo assertion_macro_cell_info = {.style = common_data.style_failed_macro, .important = true};
+        const output::TextCanvas::CellInfo assertion_macro_cell_info = {.style = common_data.style_failed_macro, .important = true};
 
         for (int i = 0;; i++)
         {
@@ -2559,7 +2574,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(Terminal::StyleG
             if (std::holds_alternative<std::monostate>(var))
                 break;
 
-            std::visit(Overload{
+            std::visit(meta::Overload{
                 [&](std::monostate) {},
                 [&](const BasicAssertionInfo::DecoFixedString &deco)
                 {
@@ -2567,14 +2582,14 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(Terminal::StyleG
                 },
                 [&](const BasicAssertionInfo::DecoExpr &deco)
                 {
-                    column += text::expr::DrawToCanvas(canvas, line_counter, column, deco.string);
+                    column += output::expr::DrawToCanvas(canvas, line_counter, column, deco.string);
                 },
                 [&](const BasicAssertionInfo::DecoExprWithArgs &deco)
                 {
                     column += common_data.spaces_in_macro_call_parentheses;
                     expr = deco.expr;
                     expr_column = column;
-                    column += text::expr::DrawToCanvas(canvas, line_counter, column, deco.expr->Expr());
+                    column += output::expr::DrawToCanvas(canvas, line_counter, column, deco.expr->Expr());
                     column += common_data.spaces_in_macro_call_parentheses;
                 },
             }, var);
@@ -2631,7 +2646,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(Terminal::StyleG
                 if (value_x > std::size_t(-1) / 2)
                     value_x = 0;
 
-                const text::TextCanvas::CellInfo this_cell_info = {.style = style_arguments[color_index++ % style_arguments.size()], .important = true};
+                const output::TextCanvas::CellInfo this_cell_info = {.style = style_arguments[color_index++ % style_arguments.size()], .important = true};
 
                 if (!this_info.need_bracket)
                 {
@@ -2642,7 +2657,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(Terminal::StyleG
                     // Color the contents.
                     for (std::size_t i = 0; i < this_info.expr_size; i++)
                     {
-                        TextStyle &style = canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + i).style;
+                        output::TextStyle &style = canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + i).style;
                         style.color = this_cell_info.style.color;
                         style.bold = true;
                     }
@@ -2728,7 +2743,7 @@ void ta_test::modules::LogPrinter::OnPostRunSingleTest(const RunSingleTestResult
     unscoped_log_pos = 0;
 }
 
-bool ta_test::modules::LogPrinter::PrintLogEntries(Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log)
+bool ta_test::modules::LogPrinter::PrintLogEntries(output::Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log)
 {
     if (unscoped_log_pos > unscoped_log.size())
         HardError("Less entires in the unscoped log than expected.");
@@ -2783,7 +2798,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 
     auto cur_style = terminal.MakeStyleGuard();
 
-    text::PrintLog(cur_style);
+    output::PrintLog(cur_style);
 
     terminal.Print(cur_style, "{}{}\n",
         common_data.style_error,
@@ -2793,7 +2808,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
     PrintException(terminal, cur_style, e);
     terminal.Print("\n");
 
-    text::PrintContext(cur_style);
+    output::PrintContext(cur_style);
 }
 
 // --- modules::MustThrowPrinter ---
@@ -2804,12 +2819,12 @@ void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo 
 
     auto cur_style = terminal.MakeStyleGuard();
 
-    text::PrintLog(cur_style);
+    output::PrintLog(cur_style);
     PrintFrame(cur_style, *data.static_info, data.dynamic_info, nullptr, true);
-    text::PrintContext(cur_style, &data);
+    output::PrintContext(cur_style, &data);
 }
 
-bool ta_test::modules::MustThrowPrinter::PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
+bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
 {
     if (auto ptr = dynamic_cast<const BasicModule::MustThrowInfo *>(&frame))
     {
@@ -2826,7 +2841,7 @@ bool ta_test::modules::MustThrowPrinter::PrintContextFrame(Terminal::StyleGuard 
 }
 
 void ta_test::modules::MustThrowPrinter::PrintFrame(
-    Terminal::StyleGuard &cur_style,
+    output::Terminal::StyleGuard &cur_style,
     const BasicModule::MustThrowStaticInfo &static_info,
     const BasicModule::MustThrowDynamicInfo *dynamic_info,
     const BasicModule::CaughtExceptionInfo *caught,
@@ -2872,12 +2887,12 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
     }
     terminal.Print("\n\n");
 
-    text::TextCanvas canvas(&common_data);
+    output::TextCanvas canvas(&common_data);
     std::size_t column = common_data.code_indentation;
     column += canvas.DrawString(0, column, static_info.macro_name, {.style = common_data.style_failed_macro, .important = true});
     column += canvas.DrawString(0, column, "(", {.style = common_data.style_failed_macro, .important = true});
     column += common_data.spaces_in_macro_call_parentheses;
-    column += text::expr::DrawToCanvas(canvas, 0, column, static_info.expr);
+    column += output::expr::DrawToCanvas(canvas, 0, column, static_info.expr);
     column += common_data.spaces_in_macro_call_parentheses;
     column += canvas.DrawString(0, column, ")", {.style = common_data.style_failed_macro, .important = true});
     canvas.InsertLineBefore(canvas.NumLines());
@@ -2886,11 +2901,11 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
 
 // --- modules::TracePrinter ---
 
-bool ta_test::modules::TracePrinter::PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
+bool ta_test::modules::TracePrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
 {
     if (auto ptr = dynamic_cast<const BasicTrace *>(&frame))
     {
-        text::TextCanvas canvas(&common_data);
+        output::TextCanvas canvas(&common_data);
 
         // Path.
         canvas.DrawString(0, 0, common_data.LocationToString(ptr->GetLocation()), {.style = common_data.style_path, .important = true});
@@ -2940,7 +2955,7 @@ bool ta_test::modules::TracePrinter::PrintContextFrame(Terminal::StyleGuard &cur
             expr += ')';
         }
 
-        text::expr::DrawToCanvas(canvas, 1, column, expr);
+        output::expr::DrawToCanvas(canvas, 1, column, expr);
 
         canvas.InsertLineBefore(canvas.NumLines());
         canvas.Print(terminal, cur_style);
