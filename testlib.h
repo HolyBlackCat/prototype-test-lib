@@ -65,7 +65,7 @@
 // C++ version number.
 #ifndef CFG_TA_CXX_STANDARD
 #if CFG_TA_CXX_STANDARD_DATE >= 202302
-#define CFG_TA_CXX_STANDARD 20
+#define CFG_TA_CXX_STANDARD 23
 #elif CFG_TA_CXX_STANDARD_DATE >= 202002
 #define CFG_TA_CXX_STANDARD 20
 #else
@@ -200,12 +200,26 @@
 #endif
 
 // Warning pragmas to ignore warnings about unused values.
-#ifndef CFG_IGNORE_UNUSED_VALUE
+#ifndef CFG_TA_IGNORE_UNUSED_VALUE
 #ifdef __GNUC__
-#define CFG_IGNORE_UNUSED_VALUE(...) _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wunused-value\"") __VA_ARGS__ _Pragma("GCC diagnostic pop")
+#define CFG_TA_IGNORE_UNUSED_VALUE(...) _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wunused-value\"") __VA_ARGS__ _Pragma("GCC diagnostic pop")
 #else
-#define CFG_IGNORE_UNUSED_VALUE(...)
+#define CFG_TA_IGNORE_UNUSED_VALUE(...)
 #endif
+#endif
+
+#ifndef CFG_TA_NODISCARD_LAMBDA
+#  if CFG_TA_CXX_STANDARD >= 23
+#    define CFG_TA_NODISCARD_LAMBDA [[nodiscard]]
+#  elif __clang__
+// Clang rejects this in C++20 mode, but just switching to C++23 isn't always an option, since Clang 16 chokes on libstdc++ 13's `<ranges>` only in C++23 mode.
+#    define CFG_TA_NODISCARD_LAMBDA _Pragma("clang diagnostic push") _Pragma("clang diagnostic ignored \"-Wc++2b-extensions\"") [[nodiscard]] _Pragma("clang diagnostic pop")
+#  elif __GNUC__
+// GCC accepts this even in C++20 mode, so whatever.
+#    define CFG_TA_NODISCARD_LAMBDA [[nodiscard]]
+#  else
+#    define CFG_TA_NODISCARD_LAMBDA
+#  endif
 #endif
 
 // --- INTERFACE MACROS ---
@@ -328,7 +342,7 @@
 #define DETAIL_TA_MUST_THROW(macro_name_, str_, ...) \
     /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
     ~::ta_test::detail::MustThrowWrapper::Make<__FILE__, __LINE__, macro_name_, str_>(\
-        [&]{CFG_IGNORE_UNUSED_VALUE(__VA_ARGS__;)},\
+        [&]{CFG_TA_IGNORE_UNUSED_VALUE(__VA_ARGS__;)},\
         []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
     )\
     .DETAIL_TA_ADD_MESSAGE
@@ -536,6 +550,67 @@ namespace ta_test
             {
                 while (IsWhitespace(*ch))
                     ch++;
+            }
+
+            // Advances `ch` until one of the characters in `sep` is found,
+            // or until an unbalanced closing bracket (one of: `)]}`), or until the second top-level opening bracket.
+            // Then gives back the trailing whitespace, if any.
+            // but we ignore the contents of "..." and '...' strings, and ignore matching characters inside of `(...)`, `[...]`, or `{...}`.
+            // We don't check the type of brackets, treating them all as equivalent, but if we find an unbalanced closing bracket, we stop immediately.
+            constexpr void TryFindUnprotectedSeparator(const char *&ch, std::string_view sep)
+            {
+                const char *const first_ch = ch;
+
+                char quote_ch = '\0';
+                int depth = 0;
+
+                bool first_paren = false;
+
+                while (*ch)
+                {
+                    if (quote_ch)
+                    {
+                        if (*ch == '\\')
+                        {
+                            ch++;
+                            if (*ch == '\0')
+                                break; // Incomplete escape at the end of string.
+                        }
+                        else if (*ch == quote_ch)
+                        {
+                            quote_ch = '\0';
+                        }
+                    }
+                    else
+                    {
+                        if (depth == 0 && sep.find(*ch) != std::string_view::npos)
+                            break; // Found separator.
+
+                        if (*ch == '"' || *ch == '\'')
+                        {
+                            quote_ch = *ch;
+                        }
+                        else if (*ch == '(' || *ch == '[' || *ch == '{')
+                        {
+                            if (first_paren)
+                                break; // Second top-level opening bracket.
+                            first_paren = true;
+                            depth++;
+                        }
+                        else if (*ch == ')' || *ch == ']' || *ch == '}')
+                        {
+                            depth--;
+                            if (depth < 0)
+                                break; // Unbalanced bracket.
+                        }
+                    }
+
+                    ch++;
+                }
+
+                // Unskip trailing whitespace.
+                while (ch > first_ch && IsWhitespace(ch[-1]))
+                    ch--;
             }
         }
 
@@ -803,7 +878,7 @@ namespace ta_test
                 // `max_digits` is how many digits we can consume, or `-1` to consume as many as possible, or `-2` to wait for a `}`.
                 // `max_value` is the max value we're allowing, inclusive.
                 // Writes the resulting number to `result`. Returns the error on failure, or an empty string on success.
-                auto ConsumeDigits = [&](char32_t &result, bool hex, int max_digits, char32_t max_value) -> std::string
+                auto ConsumeDigits = [&] CFG_TA_NODISCARD_LAMBDA (char32_t &result, bool hex, int max_digits, char32_t max_value) -> std::string
                 {
                     result = 0;
 
@@ -1475,27 +1550,6 @@ namespace ta_test
                 { FromStringTraits<T>{}(target, string) } -> std::same_as<std::string>;
             };
 
-        // Writes an error message to `error` on failure, then returns null.
-        // On failure `string` will point to the offending character. On success, it will point to the end of string.
-        template <SupportsFromString T>
-        [[nodiscard]] std::optional<T> FromString(const char *&string, std::string &error)
-        {
-            std::optional<T> ret(std::in_place);
-            error = FromStringTraits<T>{}(*ret, string);
-            if (!error.empty())
-            {
-                ret.reset();
-                return ret;
-            }
-            if (*string != '\0')
-            {
-                error = "Expected end of string.";
-                ret.reset();
-                return ret;
-            }
-            return ret;
-        }
-
 
         // --- FROM STRING SPECIALIZATIONS ---
 
@@ -1503,12 +1557,12 @@ namespace ta_test
         template <ScalarConvertibleFromString T>
         struct DefaultFromStringTraits<T>
         {
-            std::string operator()(T &target, const char *&string) const
+            [[nodiscard]] std::string operator()(T &target, const char *&string) const
             {
                 const char *end = string;
                 target = (strto<T>)(string, &end, 0);
                 if (end == string)
-                    return CFG_TA_FMT_NAMESPACE::format("Invalid {}.", text::TypeName<T>());
+                    return CFG_TA_FMT_NAMESPACE::format("Expected {}.", text::TypeName<T>());
                 string = end;
                 return "";
             }
@@ -1518,7 +1572,7 @@ namespace ta_test
         template <>
         struct DefaultFromStringTraits<char>
         {
-            std::string operator()(char &target, const char *&string) const
+            [[nodiscard]] std::string operator()(char &target, const char *&string) const
             {
                 return text::escape::UnescapeString(string, '\'', &target, true);
             }
@@ -1597,7 +1651,7 @@ namespace ta_test
         template <RangeSupportingFromString T>
         struct DefaultFromStringTraits<T>
         {
-            std::string operator()(T &target, const char *&string) const
+            [[nodiscard]] std::string operator()(T &target, const char *&string) const
             {
                 if constexpr (from_string_range_format_kind<T> == RangeKind::string)
                 {
@@ -1644,7 +1698,7 @@ namespace ta_test
 
                         using Elem = typename AdjustRangeElemToConvertFromString<std::ranges::range_value_t<T>>::type;
 
-                        auto ConsumeElem = [&](Elem &target) -> std::string
+                        auto ConsumeElem = [&] CFG_TA_NODISCARD_LAMBDA (Elem &target) -> std::string
                         {
                             if constexpr (from_string_range_format_kind<T> == RangeKind::map)
                             {
@@ -1714,7 +1768,7 @@ namespace ta_test
         template <TupleLike T>
         struct DefaultFromStringTraits<T>
         {
-            std::string operator()(T &target, const char *&string) const
+            [[nodiscard]] std::string operator()(T &target, const char *&string) const
             {
                 if (*string != '(')
                     return "Expected opening `(`.";
@@ -2164,29 +2218,50 @@ namespace ta_test
             // Calling `GetValue()` in that case will crash.
             [[nodiscard]] virtual bool HasValue() const = 0;
 
-            // Whether `ToString()` works for this generated type.
-            [[nodiscard]] virtual bool ValueSupportsToString() const = 0;
-            // Converts the current `GetValue()` to a string, or returns an empty string if `ValueSupportsToString()` is false.
+            // Whether `string_conv::ToString()` works for this generated type.
+            [[nodiscard]] virtual bool ValueConvertibleToString() const = 0;
+            // Converts the current `GetValue()` to a string, or returns an empty string if `ValueConvertibleToString()` is false.
             [[nodiscard]] virtual std::string ValueToString() const = 0;
 
             // This is incremented every time a new value is generated.
             // You can treat this as a 1-based value index.
             [[nodiscard]] int NumGeneratedValues() const {return num_generated_values;}
 
-            // For internal use. Generates the next value and updates `repeat`.
+            // Mostly for internal use. Generates the next value and updates `repeat`.
             virtual void Generate() = 0;
+
+            // Inserting custom values:
+
+            // Whether the value type can be created from a string using `string_conv::FromStringTraits`.
+            [[nodiscard]] virtual bool ValueConvertibleFromString() const = 0;
+
+            // Replaces the current value with the one parsed from the string.
+            // Returns the error message on failure, or an empty string on success.
+            // Advances `string` to the next unused character, or to the failure position on error.
+            // If `ValueConvertibleFromString() == false`, will always return an error.
+            // On failure, can corrupt the current object. You should probably abort everything in that case.
+            [[nodiscard]] virtual std::string ReplaceValueFromString(const char *&string) = 0;
 
           protected:
             // `Generate()` updates this to indicate whether more values will follow.
             bool repeat = true;
             int num_generated_values = 0;
 
-            // `BasicTypedGenerator` uses this to wrap a reference to store it in a `std::optional`.
+            // Optional.
+            BasicModule *overriding_module = nullptr;
+
+            // `BasicTypedGenerator` needs to wrap references to store them in a `std::variant`.
+            // This also nicely disambiguates types in the variant, generated values from custom values.
             template <typename T>
-            struct ReferenceWrapper
+            struct ValueWrapper
             {
-                T ref_value;
-                ReferenceWrapper(T ref_value) : ref_value(std::forward<T>(ref_value)) {}
+                T value;
+
+                // This lets us copy-elide the construction from a lambda return value.
+                template <typename U>
+                ValueWrapper(U &&func, bool &repeat)
+                    : value(std::forward<U>(func)(repeat))
+                {}
             };
         };
 
@@ -2195,16 +2270,28 @@ namespace ta_test
         template <typename ReturnType>
         struct BasicTypedGenerator : BasicGenerator
         {
-            // Need a struct wrapper for references.
-            std::optional<
-                std::conditional_t<
-                    std::is_reference_v<ReturnType>,
-                    ReferenceWrapper<ReturnType>,
-                    ReturnType
-                >
-            >
-            storage;
+          protected:
+            // Perhaps we could use two optionals instead of a single variant to make failed custom value parse not clobber the existing value,
+            // but we don't really need this now (we don't recover from parse errors, and we shouldn't have a useful value in storage when parsing anyway).
 
+            using StorageVariant = std::variant<
+                // 0. Nothing.
+                std::monostate,
+                // 1. Naturally generated value. A pointer if the type is a reference, or a value otherwise.
+                ValueWrapper<ReturnType>,
+                // 2. A custom value. Stores the object.
+                std::remove_cvref_t<ReturnType>
+            >;
+
+            // This must be mutable because we have custom value overrides. They are stored by value here,
+            // and we might need to return them by a non-const reference from a const function.
+            mutable StorageVariant storage;
+
+            static constexpr bool supports_from_string =
+                std::default_initializable<std::remove_cvref_t<ReturnType>> &&
+                string_conv::SupportsFromString<std::remove_cvref_t<ReturnType>>;
+
+          public:
             [[nodiscard]] std::type_index GetType() const override final
             {
                 return typeid(ReturnType);
@@ -2220,10 +2307,10 @@ namespace ta_test
 
             [[nodiscard]] bool HasValue() const override final
             {
-                return storage.has_value();
+                return storage.index() == 1 || storage.index() == 2;
             }
 
-            [[nodiscard]] bool ValueSupportsToString() const override final
+            [[nodiscard]] bool ValueConvertibleToString() const override final
             {
                 return string_conv::SupportsToString<ReturnType>;
             }
@@ -2238,13 +2325,59 @@ namespace ta_test
 
             [[nodiscard]] const ReturnType &GetValue() const
             {
-                if (!storage)
-                    HardError("The generator somehow holds no value."); // This should never happen.
+                return std::visit(meta::Overload{
+                    [](std::monostate) -> const ReturnType &
+                    {
+                        HardError("The generator somehow holds no value."); // This shouldn't normally happen.
+                    },
+                    [](const ValueWrapper<ReturnType> &value) -> const ReturnType &
+                    {
+                        return value.value;
+                    },
+                    [](std::remove_cvref_t<ReturnType> &value) -> const ReturnType &
+                    {
+                        return value;
+                    }
+                }, storage);
+            }
 
-                if constexpr (std::is_reference_v<ReturnType>)
-                    return storage->ref_value;
+            // Inserting custom values:
+
+            [[nodiscard]] bool ValueConvertibleFromString() const override final
+            {
+                return supports_from_string;
+            }
+
+            [[nodiscard]] std::string ReplaceValueFromString(const char *&string) override final
+            {
+                if constexpr (supports_from_string)
+                {
+                    struct Guard
+                    {
+                        BasicTypedGenerator &self;
+                        bool ok = false;
+
+                        ~Guard()
+                        {
+                            if (!ok)
+                                self.storage.template emplace<0>();
+                        }
+                    };
+
+                    auto &target = storage.template emplace<2>();
+                    Guard guard{.self = *this};
+
+                    std::string error = string_conv::FromStringTraits<std::remove_cvref_t<ReturnType>>{}(target, string);
+                    if (!error.empty())
+                        return error;
+
+                    guard.ok = true;
+                    return "";
+                }
                 else
-                    return *storage;
+                {
+                    return "This type doesn't have a conversion from a string.";
+                }
             }
         };
 
@@ -2298,13 +2431,20 @@ namespace ta_test
             const BasicGenerator *generator = nullptr;
 
             // Whether we're generating a new value, or just reusing the existing one.
-            bool geneating_new_value = false;
+            bool generating_new_value = false;
         };
 
-        // This is called before every `TA_GENERATE(...)`.
-        virtual void OnPreGenerate(const GeneratorCallInfo &data) {(void)data;}
         // This is called after every `TA_GENERATE(...)`.
         virtual void OnPostGenerate(const GeneratorCallInfo &data) {(void)data;}
+
+        // Return true if you want this module to have special control over this generator.
+        // If you do this, you must override `OnGeneratorOverride()`, see below.
+        // This also changes the behavior of `TA_GENERATE(...)` slightly, it will generate new values between tests and
+        // not when the control flow reaches it (except for the first time it's reached).
+        virtual bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) {(void)test; (void)generator; return false;}
+        // If you returned true from `OnRegisterGeneratorOverride()`, this function will be called instead of `generator.Generate()`.
+        // You must call `generator.Generate()` (possibly several times to skip values) or `generator.ReplaceValueFromString()`.
+        virtual void OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) {(void)test; (void)generator;}
 
         // --- FAILING TESTS ---
 
@@ -2479,8 +2619,9 @@ namespace ta_test
             x(OnPostRunTests) \
             x(OnPreRunSingleTest) \
             x(OnPostRunSingleTest) \
-            x(OnPreGenerate) \
             x(OnPostGenerate) \
+            x(OnRegisterGeneratorOverride) \
+            /* `OnOverrideGenerator` isn't needed */ \
             x(OnPreFailTest) \
             x(OnAssertionFailed) \
             x(OnUncaughtException) \
@@ -3826,6 +3967,8 @@ namespace ta_test
         template <meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter, typename ReturnType, typename F>
         struct SpecificGenerator : BasicModule::BasicTypedGenerator<ReturnType>
         {
+            using BasicModule::BasicGenerator::overriding_module;
+
             F func;
 
             template <typename G>
@@ -3853,7 +3996,7 @@ namespace ta_test
             {
                 // We could try to somehow conditionally assign here if possible.
                 // I tried, got some weird build error in some edge case, and decided not to bother.
-                this->storage.emplace(func(this->repeat));
+                this->storage.template emplace<1>(func, this->repeat);
 
                 this->num_generated_values++;
             }
@@ -3886,6 +4029,8 @@ namespace ta_test
 
             GeneratorType *this_generator = nullptr;
 
+            bool creating_new_generator = false;
+
             if (thread_state.current_test->generator_index < thread_state.current_test->generator_stack.size())
             {
                 // Revisiting a generator.
@@ -3912,29 +4057,44 @@ namespace ta_test
             {
                 // Visiting a generator for the first time.
 
+                creating_new_generator = true;
+
                 if (thread_state.current_test->generator_index != thread_state.current_test->generator_stack.size())
                     HardError("Something is wrong with the generator index."); // This should never happen.
 
                 auto new_generator = std::make_unique<GeneratorType>(std::forward<F>(func));
                 this_generator = new_generator.get();
+
+                // Possibly accept an override.
+                for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<BasicModule::InterfaceFunction::OnRegisterGeneratorOverride>())
+                {
+                    if (m->OnRegisterGeneratorOverride(*thread_state.current_test, *new_generator))
+                    {
+                        this_generator->overriding_module = m;
+                        break;
+                    }
+                }
+
                 thread_state.current_test->generator_stack.push_back(std::move(new_generator));
             }
 
             const bool next_value = thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size();
 
-            // Pre callback.
+            // Advance the generator if needed.
+            if (next_value && (!this_generator->overriding_module || creating_new_generator))
+            {
+                if (this_generator->overriding_module)
+                    this_generator->overriding_module.OnOverrideGenerator(*thread_state.current_test, *new_generator);
+                else
+                    this_generator->Generate();
+            }
+
+            // Post callback.
             BasicModule::GeneratorCallInfo callback_data{
                 .test = thread_state.current_test,
                 .generator = this_generator,
-                .geneating_new_value = next_value,
+                .generating_new_value = next_value,
             };
-            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreGenerate>(callback_data);
-
-            // Advance the generator if needed.
-            if (next_value)
-                this_generator->Generate();
-
-            // Post callback.
             thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
 
             thread_state.current_test->generator_index++;
@@ -4618,6 +4778,12 @@ namespace ta_test
             void OnPreRunTests(const RunTestsInfo &data) override;
 
             CFG_TA_API static flags::StringFlag::Callback GetFlagCallback(bool exclude);
+        };
+
+        // Responds to `--generate` to override the generated values.
+        struct GeneratorSelector : BasicModule
+        {
+
         };
 
         // Responds to various command line flags to configure the output of all printing modules.

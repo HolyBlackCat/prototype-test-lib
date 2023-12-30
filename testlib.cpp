@@ -2006,7 +2006,7 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(output::Terminal::Sty
     );
 
     // The value as a string.
-    if (generator.ValueSupportsToString())
+    if (generator.ValueConvertibleToString())
     {
         // The equals sign.
         terminal.Print(cur_style, "{}{}{}",
@@ -2272,7 +2272,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
             failed_generator_stack.push_back({
                 .name = std::string(gen->GetName()),
                 .index = gen->NumGeneratedValues(),
-                .value = gen->ValueSupportsToString() ? std::optional(gen->ValueToString()) : std::nullopt,
+                .value = gen->ValueConvertibleToString() ? std::optional(gen->ValueToString()) : std::nullopt,
                 .location = gen->GetLocation(),
             });
         }
@@ -2393,8 +2393,8 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
 void ta_test::modules::ProgressPrinter::OnPostGenerate(const GeneratorCallInfo &data)
 {
     auto cur_style = terminal.MakeStyleGuard();
-    if (data.geneating_new_value || state.per_test.per_repetition.prev_rep_failed)
-        PrintGeneratorInfo(cur_style, *data.test, *data.generator, !data.geneating_new_value);
+    if (data.generating_new_value || state.per_test.per_repetition.prev_rep_failed)
+        PrintGeneratorInfo(cur_style, *data.test, *data.generator, !data.generating_new_value);
 }
 
 void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgress &data)
