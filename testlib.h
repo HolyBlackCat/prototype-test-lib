@@ -385,12 +385,12 @@ namespace ta_test
     class ModuleLists;
 
     // The exit codes we're using. This is mostly for reference.
-    enum class ExitCodes
+    enum class ExitCode
     {
         ok = 0,
         test_failed = 1, // One or more tests failed.
         bad_command_line_arguments = 2, // A generic issue with command line arguments.
-        bad_test_name_pattern = 3, // `--include` or `--exclude` didn't match any tests.
+        no_test_name_match = 3, // `--include` or `--exclude` didn't match any tests.
     };
 
     // We try to classify the hard errors into interal ones and user-induced ones, but this is only an approximation.
@@ -1239,6 +1239,10 @@ namespace ta_test
                 }
             }
         }
+
+        // Returns true if the test name `name` matches regex `regex`.
+        // Currently this matches the whole name or any prefix ending at `/` (including or excluding `/`).
+        [[nodiscard]] CFG_TA_API bool TestNameMatchesRegex(std::string_view name, const std::regex &regex);
     }
 
     // String conversions.
@@ -2212,6 +2216,7 @@ namespace ta_test
             [[nodiscard]] CFG_TA_API std::string GetTypeName() const;
 
             // Whether the last generated value is the last one for this generator.
+            // Note that when the generator is operating under a module override, the system doesn't respect this variable (see below).
             [[nodiscard]] bool IsLastValue() const {return !repeat;}
 
             // This is false when the generator is reached for the first time and didn't generate a value yet.
@@ -2223,12 +2228,32 @@ namespace ta_test
             // Converts the current `GetValue()` to a string, or returns an empty string if `ValueConvertibleToString()` is false.
             [[nodiscard]] virtual std::string ValueToString() const = 0;
 
+            // Whether this value is custom (as in from `--generate ...gen=value`), as opposed to being naturally generated.
+            [[nodiscard]] bool IsCustomValue() const {return this_value_is_custom;}
+
             // This is incremented every time a new value is generated.
             // You can treat this as a 1-based value index.
-            [[nodiscard]] int NumGeneratedValues() const {return num_generated_values;}
+            [[nodiscard]] std::size_t NumGeneratedValues() const {return num_generated_values;}
+            // This is incremented every time a new custom value is inserted (as in by `--generate ...gen=value`).
+            // You can treat this as a 1-based value index.
+            [[nodiscard]] std::size_t NumCustomValues() const {return num_custom_values;}
 
             // Mostly for internal use. Generates the next value and updates `repeat`.
             virtual void Generate() = 0;
+
+            enum class OverrideStatus
+            {
+                // This generator doesn't have an override attached to it.
+                no_override,
+                // Override invoked successfully.
+                success,
+                // Override invoked, but there are no move values to be generated.
+                // Unlike `HasValue()`, this lets you dynamically back out from a generation.
+                no_more_values,
+            };
+
+            // For internal use. Calls an override registered with `OnRegisterGeneratorOverride()`, if any.
+            [[nodiscard]] CFG_TA_API OverrideStatus RunGeneratorOverride();
 
             // Inserting custom values:
 
@@ -2242,10 +2267,24 @@ namespace ta_test
             // On failure, can corrupt the current object. You should probably abort everything in that case.
             [[nodiscard]] virtual std::string ReplaceValueFromString(const char *&string) = 0;
 
+            // Returns true if the type has overloaded `==` and `ValueConvertibleFromString() == true`.
+            [[nodiscard]] virtual bool ValueEqualityComparableToString() const = 0;
+            // Parses the value from a string, then compares it with the current value using `==`, writing the result to `equal`.
+            // Returns the parsing error if any. Also returns an error if `ValueEqualityComparableToString()` is false.
+            // Writes `equal = false` on any failure, including if the generator holds no value.
+            [[nodiscard]] virtual std::string ValueEqualsToString(const char *&string, bool &equal) const = 0;
+
           protected:
             // `Generate()` updates this to indicate whether more values will follow.
             bool repeat = true;
-            int num_generated_values = 0;
+
+            // Whether the current value is custom, as opposed to being naturally generated.
+            bool this_value_is_custom = false;
+
+            // How many values were naturally generated.
+            std::size_t num_generated_values = 0;
+            // How many custom values were used.
+            std::size_t num_custom_values = 0;
 
             // Optional.
             BasicModule *overriding_module = nullptr;
@@ -2290,6 +2329,13 @@ namespace ta_test
             static constexpr bool supports_from_string =
                 std::default_initializable<std::remove_cvref_t<ReturnType>> &&
                 string_conv::SupportsFromString<std::remove_cvref_t<ReturnType>>;
+
+            static constexpr bool supports_from_string_and_equality = []{
+                if constexpr (supports_from_string)
+                    return std::equality_comparable<std::remove_cvref_t<ReturnType>>;
+                else
+                    return false;
+            }();
 
           public:
             [[nodiscard]] std::type_index GetType() const override final
@@ -2372,11 +2418,45 @@ namespace ta_test
                         return error;
 
                     guard.ok = true;
+
+                    this->this_value_is_custom = true;
+                    this->num_custom_values++;
                     return "";
                 }
                 else
                 {
-                    return "This type doesn't have a conversion from a string.";
+                    return "This type can't be deserialized from a string.";
+                }
+            }
+
+            [[nodiscard]] virtual bool ValueEqualityComparableToString() const override
+            {
+                return supports_from_string_and_equality;
+            }
+
+            [[nodiscard]] virtual std::string ValueEqualsToString(const char *&string, bool &equal) const override
+            {
+                equal = false;
+                if constexpr (supports_from_string_and_equality)
+                {
+                    if (!HasValue())
+                        return "";
+
+                    std::remove_cvref_t<ReturnType> value{};
+                    std::string error = string_conv::FromStringTraits<std::remove_cvref_t<ReturnType>>{}(value, string);
+                    if (!error.empty())
+                        return error;
+
+                    equal = value == GetValue();
+                    return "";
+                }
+                else if constexpr (supports_from_string)
+                {
+                    return "This type doesn't overload the equality comparison.";
+                }
+                else
+                {
+                    return "This type can't be deserialized from a string.";
                 }
             }
         };
@@ -2444,7 +2524,10 @@ namespace ta_test
         virtual bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) {(void)test; (void)generator; return false;}
         // If you returned true from `OnRegisterGeneratorOverride()`, this function will be called instead of `generator.Generate()`.
         // You must call `generator.Generate()` (possibly several times to skip values) or `generator.ReplaceValueFromString()`.
-        virtual void OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) {(void)test; (void)generator;}
+        // Returning true from this means that there's no more values (unlike non-overridden generators, we can back out from a generation without knowing
+        //   which value is the last one beforehand).
+        // You must return true from this when the generator is exhausted, `IsLastValue()` is ignored when an override is active.
+        virtual bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) {(void)test; (void)generator; return false;}
 
         // --- FAILING TESTS ---
 
@@ -3998,6 +4081,7 @@ namespace ta_test
                 // I tried, got some weird build error in some edge case, and decided not to bother.
                 this->storage.template emplace<1>(func, this->repeat);
 
+                this->this_value_is_custom = false;
                 this->num_generated_values++;
             }
         };
@@ -4068,7 +4152,7 @@ namespace ta_test
                 // Possibly accept an override.
                 for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<BasicModule::InterfaceFunction::OnRegisterGeneratorOverride>())
                 {
-                    if (m->OnRegisterGeneratorOverride(*thread_state.current_test, *new_generator))
+                    if (m->OnRegisterGeneratorOverride(*thread_state.current_test, *this_generator))
                     {
                         this_generator->overriding_module = m;
                         break;
@@ -4083,10 +4167,24 @@ namespace ta_test
             // Advance the generator if needed.
             if (next_value && (!this_generator->overriding_module || creating_new_generator))
             {
-                if (this_generator->overriding_module)
-                    this_generator->overriding_module.OnOverrideGenerator(*thread_state.current_test, *new_generator);
-                else
+                switch (this_generator->RunGeneratorOverride())
+                {
+                  case BasicModule::BasicGenerator::OverrideStatus::no_override:
                     this_generator->Generate();
+                    break;
+                  case BasicModule::BasicGenerator::OverrideStatus::success:
+                    // Nothing.
+                    break;
+                  case BasicModule::BasicGenerator::OverrideStatus::no_more_values:
+                    HardError(
+                        CFG_TA_FMT_NAMESPACE::format(
+                            "Generator `{}` was overriden to generate no values. This is not supported, you must avoid reaching the generator in the first place.",
+                            this_generator->GetName()
+                        ),
+                        HardErrorKind::user
+                    );
+                    break;
+                }
             }
 
             // Post callback.
@@ -4747,7 +4845,7 @@ namespace ta_test
             // We could detect this automatically, but A: that's more work, and B: then very long flags would cause worse formatting for all other flags.
             int expected_flag_width = 0;
 
-            flags::SimpleFlag help_flag;
+            flags::SimpleFlag flag_help;
 
             CFG_TA_API HelpPrinter();
             std::vector<flags::BasicFlag *> GetFlags() override;
@@ -4781,9 +4879,148 @@ namespace ta_test
         };
 
         // Responds to `--generate` to override the generated values.
-        struct GeneratorSelector : BasicModule
+        struct GeneratorOverridder : BasicPrintingModule
         {
+            // A sequence of generator overrides coming from a `--generate`.
+            struct GeneratorOverrideSeq
+            {
+                struct Entry
+                {
+                    std::string_view generator_name;
 
+                    // If false, don't generate anything by default unless explicitly enabled.
+                    bool enable_values_by_default = true;
+
+                    struct CustomValue
+                    {
+                        std::string_view value;
+
+                        std::shared_ptr<GeneratorOverrideSeq> custom_generator_seq;
+
+                        // Next rule index in `rules` (or its size if no next rule).
+                        std::size_t next_rule = 0;
+                    };
+
+                    // Custom values provided by the user, using the `=...`syntax.
+                    // Anything listed here is skipped during natural generation, and none of the rules below apply to those.
+                    std::vector<CustomValue> custom_values;
+
+                    // Add or remove a certain index range.
+                    // This corresponds to `#...` and `-#...` syntax.
+                    struct RuleIndex
+                    {
+                        bool add = true;
+
+                        // 0-based, half-open range.
+                        std::size_t begin = 0;
+                        std::size_t end = std::size_t(-1);
+
+                        // Need default constructor here to make `std::variant` (`RuleVar`) understand that it's default-constructible.
+                        constexpr RuleIndex() {}
+                    };
+                    // Remove a certain value.
+                    // This corresponds to the `-=...` syntax.
+                    struct RuleRemoveValue
+                    {
+                        std::string_view value;
+
+                        // Need default constructor here to make `std::variant` (`RuleVar`) understand that it's default-constructible.
+                        constexpr RuleRemoveValue() {}
+                    };
+                    using RuleVar = std::variant<RuleIndex, RuleRemoveValue>;
+
+                    struct Rule
+                    {
+                        RuleVar var;
+
+                        // If not null, this replaces the rest of the program for those values.
+                        std::shared_ptr<GeneratorOverrideSeq> custom_generator_seq;
+                    };
+
+                    std::vector<Rule> rules;
+                };
+
+                std::vector<Entry> entries;
+            };
+
+            struct Entry
+            {
+                std::regex test_regex;
+
+                // Don't read from this, call `OriginalArgument()` instead.
+                // The storage for `OriginalArgument()`. We must store it, because a parsed `GeneratorOverrideSeq` depends on it,
+                // (because this allows us to print nice errors by knowing relative positions of the `std::string_view`s in original string).
+                // We must use `std::vector<char>` instead of `std::string` to avoid dangling references when reallocating the vector of entries.
+                std::vector<char> original_argument_storage;
+
+                GeneratorOverrideSeq seq;
+
+                // The string that was given as a parameter to `--generate`.
+                // This is null-terminated and points to `original_argument_storage`.
+                [[nodiscard]] CFG_TA_API std::string_view OriginalArgument() const;
+            };
+
+            flags::StringFlag flag_override;
+            flags::SimpleFlag flag_local_help;
+
+            std::vector<Entry> entries;
+
+            struct TestState
+            {
+                const Entry *entry = nullptr;
+
+                std::span<const GeneratorOverrideSeq::Entry> remaining_program;
+
+                struct Elem
+                {
+                    std::size_t generator_index = 0;
+                    // The first element here is the one that was consumed by this generator.
+                    std::span<const GeneratorOverrideSeq::Entry> remaining_program;
+
+                    // How many custom values we've already inserted.
+                    std::size_t num_used_custom_values = 0;
+                };
+                // Some of those can get stale, but we prune the trailing elements every time we create a new generator.
+                std::vector<Elem> elems;
+
+                // Need this for `std::optional<TestState>` to register the default-constructibility.
+                TestState() {}
+            };
+            std::optional<TestState> test_state;
+
+            CFG_TA_API GeneratorOverridder();
+
+            CFG_TA_API std::vector<flags::BasicFlag *> GetFlags() override;
+
+            void OnPreRunTests(const RunTestsInfo &data) override;
+            void OnPostRunSingleTest(const RunSingleTestResults &data) override;
+            bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) override;
+            bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) override;
+
+            // Parses a `GeneratorOverrideSeq` object. `target` must initially be empty.
+            // Returns the error on failure, or an empty string on success.
+            // The `string` must remain alive, we're storing pointers into it.
+            // `is_nested` should be false by default, and will be set to true when parsing nested sequences.
+            // This consumes the trailing space.
+            [[nodiscard]] CFG_TA_API std::string ParseGeneratorOverrideSeq(GeneratorOverrideSeq &target, const char *&string, bool is_nested);
+
+            struct FlagErrorDetails
+            {
+                struct Elem
+                {
+                    std::string marker;
+                    const char *location = nullptr;
+                };
+                std::vector<Elem> elems;
+
+                FlagErrorDetails() {}
+                FlagErrorDetails(const char *location) : elems{{.marker = "^", .location = location}} {}
+                FlagErrorDetails(std::vector<Elem> elems) : elems(std::move(elems)) {}
+            };
+
+            // Fails with a hard error, and points to a specific location in this flag.
+            // `location` must point into `entry.OriginalArgument()`.
+            [[noreturn]] CFG_TA_API void HardErrorInFlag(std::string_view message, const Entry &entry, FlagErrorDetails details, HardErrorKind kind);
         };
 
         // Responds to various command line flags to configure the output of all printing modules.
@@ -4823,6 +5060,8 @@ namespace ta_test
             std::string chars_repetition_counter_separator_diagonal;
             // The prefix for the generated value index, which is per generator.
             std::string chars_generator_index_prefix = "[";
+            // This is added before the generator index if it's a custom value inserted via `--generator ...gen=value`.
+            std::string chars_generator_custom_index_prefix = "*";
             // The suffix for the generated value index, which is per generator.
             std::string chars_generator_index_suffix = "]";
             // Separates the generated value (if any) from the generator name and the prefix.
@@ -4888,13 +5127,15 @@ namespace ta_test
             output::TextStyle style_repetition_border = {.color = output::TextColorGrayscale24(10)};
             struct StyleGenerator
             {
-                // The prefix before the name of the generated variable.
+                // The prefix before the generator name.
                 output::TextStyle prefix = {.color = output::TextColor::light_blue};
-                // The name of the generated variable.
+                // The generator name.
                 output::TextStyle name = {.color = output::TextColor::dark_white};
-                // The index of the generated variable.
+                // The index of the value.
                 output::TextStyle index = {.color = output::TextColor::light_white, .bold = true};
-                // The brackets around this index.
+                // The index of the value when it's inserted by a command-line flag.
+                output::TextStyle index_custom = {.color = output::TextColor::light_green, .bold = true};
+                // The brackets around the index.
                 output::TextStyle index_brackets = {.color = output::TextColor::light_black};
                 // Separates the generated value from the generator name and index.
                 output::TextStyle value_separator = {.color = output::TextColor::light_black};
@@ -4910,6 +5151,7 @@ namespace ta_test
                 .prefix = {.color = output::TextColor::light_black},
                 .name = {.color = output::TextColor::light_black, .bold = true},
                 .index = {.color = output::TextColor::light_black, .bold = true},
+                .index_custom = {.color = output::TextColor::light_black, .bold = true},
                 .index_brackets = {.color = output::TextColor::light_black},
                 .value_separator = {.color = output::TextColor::light_black},
                 .value = {.color = output::TextColor::light_black, .bold = true},
@@ -4920,6 +5162,7 @@ namespace ta_test
                 .prefix = {.color = output::TextColor::dark_red},
                 .name = {.color = output::TextColor::light_red},
                 .index = {.color = output::TextColor::light_red, .bold = true},
+                .index_custom = {.color = output::TextColor::light_red, .bold = true},
                 .index_brackets = {.color = output::TextColor::dark_red},
                 .value_separator = {.color = output::TextColor::dark_red},
                 .value = {.color = output::TextColor::light_red, .bold = true},
@@ -4972,7 +5215,7 @@ namespace ta_test
                     struct FailedGenerator
                     {
                         std::string name;
-                        int index = 0; // 1-based
+                        std::size_t index = 0; // 1-based
                         std::optional<std::string> value;
                         SourceLocWithCounter location;
 

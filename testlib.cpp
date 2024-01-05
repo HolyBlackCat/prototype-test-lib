@@ -78,6 +78,33 @@ const char *ta_test::text::Demangler::operator()(const char *name)
     #endif
 }
 
+bool ta_test::text::TestNameMatchesRegex(std::string_view name, const std::regex &regex)
+{
+    // Try matching the whole name.
+    if (std::regex_match(name.begin(), name.end(), regex))
+        return true;
+
+    // Try prefixes.
+    while (!name.empty())
+    {
+        name.remove_suffix(1);
+
+        if (name.ends_with('/'))
+        {
+            // Try matching with the slash.
+            if (std::regex_match(name.begin(), name.end(), regex))
+                return true;
+
+            // Try again without slash.
+            name.remove_suffix(1);
+            if (std::regex_match(name.begin(), name.end(), regex))
+                return true;
+        }
+    }
+
+    return false;
+}
+
 std::string ta_test::string_conv::DefaultFallbackToStringTraits<char>::operator()(char value) const
 {
     char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
@@ -250,6 +277,21 @@ std::string ta_test::BasicModule::BasicGenerator::GetTypeName() const
     }
 
     return ret;
+}
+
+ta_test::BasicModule::BasicGenerator::OverrideStatus ta_test::BasicModule::BasicGenerator::RunGeneratorOverride()
+{
+    if (overriding_module)
+    {
+        auto &thread_state = detail::ThreadState();
+        if (!thread_state.current_test)
+            HardError("Can't operate a generator when no test is running.");
+        return overriding_module->OnOverrideGenerator(*thread_state.current_test, *this) ? OverrideStatus::no_more_values : OverrideStatus::success;
+    }
+    else
+    {
+        return OverrideStatus::no_override;
+    }
 }
 
 // Gracefully fails the current test, if not already failed.
@@ -1302,6 +1344,7 @@ void ta_test::Runner::SetDefaultModules()
     // Those are ordered in a certain way to print the `--help` page in the nice order: [
     modules.push_back(MakeModule<modules::HelpPrinter>());
     modules.push_back(MakeModule<modules::TestSelector>());
+    modules.push_back(MakeModule<modules::GeneratorOverridder>());
     modules.push_back(MakeModule<modules::PrintingConfigurator>());
     // ]
     modules.push_back(MakeModule<modules::ProgressPrinter>());
@@ -1326,7 +1369,7 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
         if (ok)
             *ok = false;
         else
-            std::exit(int(ExitCodes::bad_command_line_arguments));
+            std::exit(int(ExitCode::bad_command_line_arguments));
     };
 
     while (true)
@@ -1516,8 +1559,6 @@ int ta_test::Runner::Run()
             if (guard.state.failed)
                 any_repetition_failed = true;
 
-            guard.state.is_last_generator_repetition = std::all_of(guard.state.generator_stack.begin(), guard.state.generator_stack.end(), [](const auto &g){return g->IsLastValue();});
-
             // Check for non-deterministic use of generators.
             // This is one of the two determinism checks, the second one is in generator's `Generate()` to make sure we're not visiting generators out of order.
             if (!guard.state.failed && guard.state.generator_index < guard.state.generator_stack.size())
@@ -1535,21 +1576,56 @@ int ta_test::Runner::Run()
                 ), HardErrorKind::user);
             }
 
+            // Prune finished generators, and advance overridden generators.
+            // Overridden generators are advanced here rather than in the test body, because we don't know which value is the last one beforehand,
+            //   so we need to actually generate the values to decide if we should reenter the test or not.
+            // We do all of this here, before calling `OnPostRunSingleTest()`,
+            //   because we need this to detect the last test repetition, which the callback wants to know.
+            [&]() noexcept
+            {
+                // Also remove unvisited generators. Note that we show a warning/error for this condition above.
+                // This shouldn't normally happen.
+                guard.state.generator_stack.resize(guard.state.generator_index);
+
+                // Prune finished generators.
+                while (!guard.state.generator_stack.empty())
+                {
+                    auto &last_generator = *guard.state.generator_stack.back();
+
+                    bool should_pop = false;
+
+                    // The callback needs to see this index.
+                    guard.state.generator_index = guard.state.generator_stack.size() - 1;
+
+                    switch (const_cast<BasicModule::BasicGenerator &>(last_generator).RunGeneratorOverride())
+                    {
+                      case BasicModule::BasicGenerator::OverrideStatus::no_override:
+                        should_pop = last_generator.IsLastValue();
+                        break;
+                      case BasicModule::BasicGenerator::OverrideStatus::success:
+                        // Nothing.
+                        break;
+                      case BasicModule::BasicGenerator::OverrideStatus::no_more_values:
+                        should_pop = true;
+                        break;
+                    }
+
+                    if (should_pop)
+                        guard.state.generator_stack.pop_back();
+                    else
+                        break;
+                }
+
+                // Since we touched the index and resized the stack, reset the index to a meaningful value for the callback that will be called below.
+                guard.state.generator_index = guard.state.generator_stack.size();
+            }();
+
+            guard.state.is_last_generator_repetition = guard.state.generator_stack.empty();
+
             module_lists.Call<&BasicModule::OnPostRunSingleTest>(guard.state);
 
             if (guard.state.should_break)
                 test->Breakpoint();
-
-            // Prune finished generators.
-            // We do this after `OnPostRunSingleTest` in case the modules want to observe the stack before pruning. Not sure how useful this is.
-            [&]() noexcept
-            {
-                // Remove unvisited generators. Note that we show a warning/error for this condition above.
-                guard.state.generator_stack.resize(guard.state.generator_index);
-
-                while (!guard.state.generator_stack.empty() && guard.state.generator_stack.back()->IsLastValue())
-                    guard.state.generator_stack.pop_back();
-            }();
 
             next_generator_stack = std::move(guard.state.generator_stack);
         }
@@ -1561,7 +1637,7 @@ int ta_test::Runner::Run()
 
     module_lists.Call<&BasicModule::OnPostRunTests>(results);
 
-    return results.failed_tests.size() > 0 ? int(ExitCodes::test_failed) : 0;
+    return results.failed_tests.size() > 0 ? int(ExitCode::test_failed) : 0;
 }
 
 // --- modules::BasicExceptionContentsPrinter ---
@@ -1612,8 +1688,8 @@ void ta_test::modules::BasicExceptionContentsPrinter::PrintException(
 // --- modules::HelpPrinter ---
 
 ta_test::modules::HelpPrinter::HelpPrinter()
-    : expected_flag_width(16),
-    help_flag("help", "Show usage.", [](const Runner &runner, BasicModule &this_module)
+    : expected_flag_width(17),
+    flag_help("help", "Show usage.", [](const Runner &runner, BasicModule &this_module)
     {
         std::vector<flags::BasicFlag *> flags;
         for (const auto &m : runner.modules) // Can't use `ModuleLists` here yet.
@@ -1622,26 +1698,26 @@ ta_test::modules::HelpPrinter::HelpPrinter()
             flags.insert(flags.end(), more_flags.begin(), more_flags.end());
         }
 
-        // The case shoudl never fail.
+        // The case should never fail.
         HelpPrinter &self = dynamic_cast<HelpPrinter &>(this_module);
 
         self.terminal.Print("This is a test runner based on ta_test.\nAvailable options:\n");
         for (flags::BasicFlag *flag : flags)
-            self.terminal.Print("  {:<{}} - {}\n", self.expected_flag_width, flag->HelpFlagSpelling(), flag->help_desc);
+            self.terminal.Print("  {:<{}} - {}\n", flag->HelpFlagSpelling(), self.expected_flag_width, flag->help_desc);
 
-        std::exit(0);
+        std::exit(int(ExitCode::ok));
     })
 {}
 
 std::vector<ta_test::flags::BasicFlag *> ta_test::modules::HelpPrinter::GetFlags()
 {
-    return {&help_flag};
+    return {&flag_help};
 }
 
 void ta_test::modules::HelpPrinter::OnUnknownFlag(std::string_view flag, bool &abort)
 {
     (void)abort;
-    terminal.Print("Unknown flag `{}`, run with `{}` for usage.\n", flag, help_flag.HelpFlagSpelling());
+    terminal.Print("Unknown flag `{}`, run with `{}` for usage.\n", flag, flag_help.HelpFlagSpelling());
     // Don't exit, rely on `abort`.
 }
 
@@ -1649,7 +1725,7 @@ void ta_test::modules::HelpPrinter::OnMissingFlagArgument(std::string_view flag,
 {
     (void)flag_obj;
     (void)abort;
-    terminal.Print("Flag `{}` wasn't given enough arguments, run with `{}` for usage.\n", flag, help_flag.HelpFlagSpelling());
+    terminal.Print("Flag `{}` wasn't given enough arguments, run with `{}` for usage.\n", flag, flag_help.HelpFlagSpelling());
     // Don't exit, rely on `abort`.
 }
 
@@ -1687,40 +1763,10 @@ void ta_test::modules::TestSelector::OnFilterTest(const BasicTestInfo &test, boo
         if (enable != pattern.exclude)
             continue; // The test is already enabled/disabled.
 
-        std::string_view name_prefix = test.Name();
-
-        auto TryMatchPrefix = [&]() -> bool
+        if (ta_test::text::TestNameMatchesRegex(test.Name(), pattern.regex))
         {
-            if (std::regex_match(name_prefix.begin(), name_prefix.end(), pattern.regex))
-            {
-                pattern.was_used = true;
+            pattern.was_used = true;
                 enable = !pattern.exclude;
-                return true;
-            }
-
-            return false;
-        };
-
-        // Try matching the whole name.
-        if (TryMatchPrefix())
-            continue;
-
-        // Try prefixes.
-        while (!name_prefix.empty())
-        {
-            name_prefix.remove_suffix(1);
-
-            if (name_prefix.ends_with('/'))
-            {
-                // Try matching with the slash.
-                if (TryMatchPrefix())
-                    continue;
-
-                // Try again without slash.
-                name_prefix.remove_suffix(1);
-                if (TryMatchPrefix())
-                    continue;
-            }
         }
     }
 }
@@ -1756,7 +1802,656 @@ void ta_test::modules::TestSelector::OnPreRunTests(const RunTestsInfo &data)
         }
     }
     if (fail)
-        std::exit(int(ExitCodes::bad_test_name_pattern));
+        std::exit(int(ExitCode::no_test_name_match));
+}
+
+// --- modules::GeneratorOverridder ---
+
+std::string_view ta_test::modules::GeneratorOverridder::Entry::OriginalArgument() const
+{
+    if (original_argument_storage.empty())
+        return {};
+    else
+        return {original_argument_storage.data(), original_argument_storage.size() - 1};
+}
+
+ta_test::modules::GeneratorOverridder::GeneratorOverridder()
+    : flag_override("generate", 'g',
+        "Changes the behavior of `TA_GENERATE(...)`. The argument is a test name regex (as in `--include`), "
+        "followed by `//`, then a comma-separated list of generator overrides, such as `name=value`. See `--help-generate` for a detailed explanation.",
+        [](const Runner &runner, BasicModule &this_module, std::string_view input)
+        {
+            (void)runner;
+
+            auto &self = dynamic_cast<GeneratorOverridder &>(this_module);
+
+            Entry &new_entry = self.entries.emplace_back();
+
+            // Copy the input string into a vector, which gives it a persistent address.
+            // The parsed `GeneratorOverrideSeq` will point into it.
+            new_entry.original_argument_storage.reserve(input.size() + 1);
+            new_entry.original_argument_storage.assign(input.data(), input.data() + input.size());
+            new_entry.original_argument_storage.push_back('\0');
+
+            static constexpr std::string_view separator = "//";
+
+            auto sep_pos = input.find(separator);
+            if (sep_pos == std::string_view::npos)
+            {
+                self.HardErrorInFlag(
+                    "Expected `//` after the test name regex.",
+                    new_entry, new_entry.original_argument_storage.data() + input.size(),
+                    HardErrorKind::user
+                );
+            }
+
+            new_entry.test_regex = std::regex(input.begin(), input.begin() + sep_pos);
+
+
+            const char *string = new_entry.original_argument_storage.data() + sep_pos + separator.size();
+
+            text::chars::SkipWhitespace(string);
+
+            std::string error = self.ParseGeneratorOverrideSeq(new_entry.seq, string, false);
+            if (!error.empty())
+                self.HardErrorInFlag(error, new_entry, string, HardErrorKind::user);
+        }
+    ),
+    flag_local_help("help-generate", CFG_TA_FMT_NAMESPACE::format("Show detailed help about `--{}`.", flag_override.flag),
+        [](const Runner &runner, BasicModule &this_module)
+        {
+            (void)runner;
+            (void)this_module;
+            dynamic_cast<GeneratorOverridder &>(this_module).terminal.Print("{}", &R"(
+The argument of `--generate` is a name regex (as in `--include`), followed by `//`, then a comma-separated list of generator overrides.
+Each test can be affected by at most one such parameter (the last matching one).
+Some examples: (here `x`,`y` are generator names as passed to `TA_GENERATE(name, ...)`)
+* -g 'foo/bar//x=42'         - generate only this value.
+* -g 'foo/bar//x=42,y=43'    - override several generators (the order matters; you can omit some of the generators).
+* -g 'foo/bar//x{=10,=20}'   - several values per generator.
+* -g 'foo/bar//x-=10         - skip specific value.
+* -g 'foo/bar//x#10'         - only generate the value at the specified index (1-based).
+* -g 'foo/bar//x#10..12'     - same, but with a range of indices (inclusive). One of the numbers can be omitted: `..10`, `10..`.
+* -g 'foo/bar//x-#10'        - skip the value at the specific index. This also accepts ranges.
+Multiple operators can be combined:
+* -g 'foo/bar//x{#..10,=42}' - generate only 10 first values, and a custom value `42`.
+Operators are applied left to right. If the first operator is `=` or `#`, all values are disabled by default. But you can reenable them manually:
+* -g 'foo/bar//x{#1..,=42}'  - generate all values, and a custom one.
+Operators `=` and `#` can be followed by a parenthesized list of generator overrides, which are used in place of the remaining string for those values:
+* -g 'foo/bar//x{#1..,#5(y=20)},y=10' - override `y=20` for 5th value of `x`, and `y=10` for all other values of `x`.
+If multiple operators match the same value, parentheses from the last match are used.
+Parentheses apply to only one operator by default. To apply them to multiple operators, separate operators with `&` instead of `,`:
+* -g 'foo/bar//x{#1..,#5&=42(y=20)},y=10' - override `y=20` for 5th value of `x` and for a custom value `x=42`, for all other values of `x` use `y=10`.
+Some notes:
+* This flag changes the generator semantics slightly, making subsequent calls to the generator lambda between the test repetitions, as opposed to
+    when the control flow reaches the `TA_GENERATE(...)` call, to avoid entering the test when all future values are disabled.
+    This shouldn't affect you, unless you're intentionally throwing from the generator function.
+* Not all types can be deserialized from strings, but index-based operators will always work.
+    We support scalars, strings (with standard escape sequences), containers (as printed by `std::format()`: {...} sets, {a:b, c:d} maps, [...] other containers, and (...) tuples).
+    Custom type support can be added by specializing `ta_test::string_conv::FromStringTraits`.
+* `-=` requires overloaded `==` to work.
+* Values added with `=` have no index, so `#` and `-#` don't affect them.
+)"[1]);
+            std::exit(int(ExitCode::ok));
+        }
+    )
+{}
+
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::GeneratorOverridder::GetFlags()
+{
+    return {&flag_override, &flag_local_help};
+}
+
+void ta_test::modules::GeneratorOverridder::OnPreRunTests(const RunTestsInfo &data)
+{
+    (void)data;
+    test_state = {};
+}
+
+void ta_test::modules::GeneratorOverridder::OnPostRunSingleTest(const RunSingleTestResults &data)
+{
+    if (data.is_last_generator_repetition && test_state)
+    {
+        test_state = {};
+    }
+}
+
+bool ta_test::modules::GeneratorOverridder::OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator)
+{
+    // If we don't have an active `--generate` flag, try to find one.
+    if (!test_state)
+    {
+        for (auto it = entries.rbegin(); it != entries.rend(); ++it)
+        {
+            const Entry &entry = *it;
+
+            if (text::TestNameMatchesRegex(test.test->Name(), entry.test_regex))
+            {
+                test_state.emplace();
+                test_state->entry = &entry;
+                test_state->remaining_program = entry.seq.entries;
+                break;
+            }
+        }
+    }
+
+    // If we do have an active `--generate` flag, use it.
+    if (test_state && !test_state->remaining_program.empty())
+    {
+        { // Prune generator with larger (or equal) indices.
+            auto iter = std::partition_point(test_state->elems.begin(), test_state->elems.end(), [&](const TestState::Elem &elem){return elem.generator_index < test.generator_index;});
+            if (iter != test_state->elems.end())
+            {
+                test_state->remaining_program = iter->remaining_program;
+                test_state->elems.erase(iter, test_state->elems.end());
+            }
+        }
+
+        const GeneratorOverrideSeq::Entry &entry = test_state->remaining_program.front();
+
+        if (entry.generator_name == generator.GetName())
+        {
+            test_state->elems.push_back({.generator_index = test.generator_index, .remaining_program = test_state->remaining_program});
+            test_state->remaining_program = test_state->remaining_program.subspan(1);
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ta_test::modules::GeneratorOverridder::OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator)
+{
+    if (!test_state)
+        HardError("A generator override is requested, but we don't have an active state.");
+
+    auto iter = std::partition_point(test_state->elems.begin(), test_state->elems.end(), [&](const TestState::Elem &elem){return elem.generator_index < test.generator_index;});
+
+    if (iter == test_state->elems.end() || iter->generator_index != test.generator_index)
+        HardError("A generator override is requested, but the state doesn't contain information about this generator.");
+
+    const GeneratorOverrideSeq::Entry &command = iter->remaining_program.front();
+
+    // Generate the values until one passes the conditions...
+    while (true)
+    {
+        // A helper to check the result of `ReplaceValueFromString()` or `ValueEqualsToString()`. Raises a hard error on any failure.
+        // `error` is the parsing error, if any, returned from the function being checked.
+        // `string` is string pointer after parsing.
+        // `expected_end` is where we expected the string pointer to be.
+        auto CheckValueParsingResult = [&](std::string_view error, const char *string, const char *expected_end)
+        {
+            if (string > expected_end)
+            {
+                HardErrorInFlag(
+                    "Parsing the value consumed more characters than expected. "
+                    "Expected the parsing to end at (1), but it ended at (2).",
+                    *test_state->entry, {{
+                        FlagErrorDetails::Elem{.marker = "1^", .location = expected_end - 2},
+                        FlagErrorDetails::Elem{.marker = "^2", .location = string - 1},
+                    }}, HardErrorKind::user
+                );
+            }
+            if (!error.empty())
+                HardErrorInFlag(error, *test_state->entry, string, HardErrorKind::user);
+            if (string < expected_end)
+            {
+                HardErrorInFlag(
+                    "Junk characters after the value. The values ends at (1), junk ends at (2).",
+                    *test_state->entry, {{
+                        FlagErrorDetails::Elem{.marker = "1^", .location = string - 2},
+                        FlagErrorDetails::Elem{.marker = "^2", .location = expected_end - 1},
+                    }}, HardErrorKind::user
+                );
+            }
+        };
+
+        // Insert the next custom value, if any.
+
+        std::size_t rule_index = 0;
+        bool using_custom_value = false;
+        if (iter->num_used_custom_values < command.custom_values.size())
+        {
+            const auto &this_value = command.custom_values[iter->num_used_custom_values];
+
+            if (!generator.ValueConvertibleFromString())
+            {
+                HardErrorInFlag(
+                    CFG_TA_FMT_NAMESPACE::format(
+                        "The generated type `{}` can't be deserialized from a string, so `=` can't be used with it. "
+                        "But you can filter certain generated values by their indices using `#`, see `--help-generate` for details.",
+                        generator.GetTypeName()
+                    ),
+                    *test_state->entry, this_value.value.data(), HardErrorKind::user
+                );
+            }
+
+            const char *string = this_value.value.data();
+            std::string error = generator.ReplaceValueFromString(string);
+            CheckValueParsingResult(error, string, this_value.value.data() + this_value.value.size());
+
+            iter->num_used_custom_values++;
+
+            using_custom_value = true;
+            rule_index = this_value.next_rule;
+        }
+
+        // Generate the next natural value, if any.
+
+        if (!using_custom_value)
+        {
+            if (generator.IsLastValue())
+                return true; // No more values.
+            generator.Generate();
+        }
+
+        // Process the rules.
+
+        bool value_passes = using_custom_value || command.enable_values_by_default;
+
+        for (; rule_index < command.rules.size(); rule_index++)
+        {
+            const GeneratorOverrideSeq::Entry::Rule &rule = command.rules[rule_index];
+
+            std::visit(meta::Overload{
+                [&](const GeneratorOverrideSeq::Entry::RuleIndex &rule)
+                {
+                    if (using_custom_value)
+                        return;
+
+                    if (generator.NumGeneratedValues() >= rule.begin + 1 && generator.NumGeneratedValues() - 1 < rule.end)
+                        value_passes = rule.add;
+                },
+                [&](const GeneratorOverrideSeq::Entry::RuleRemoveValue &rule)
+                {
+                    if (!generator.ValueConvertibleFromString())
+                    {
+                        HardErrorInFlag(
+                            CFG_TA_FMT_NAMESPACE::format(
+                                "The generated type `{}` can't be deserialized from a string, so `-=` can't be used with it. "
+                                "But you can filter certain generated values by their indices using `-#`, see `--help-generate` for details.",
+                                generator.GetTypeName()
+                            ),
+                            *test_state->entry, rule.value.data(), HardErrorKind::user
+                        );
+                    }
+                    if (!generator.ValueEqualityComparableToString())
+                    {
+                        HardErrorInFlag(
+                            CFG_TA_FMT_NAMESPACE::format(
+                                "The generated type `{}` doesn't overload equality comparison, so `-=` can't be used with it. "
+                                "But you can filter certain generated values by their indices using `-#`, see `--help-generate` for details.",
+                                generator.GetTypeName()
+                            ),
+                            *test_state->entry, rule.value.data(), HardErrorKind::user
+                        );
+                    }
+
+                    const char *string = rule.value.data();
+                    bool equal = false;
+                    std::string error = generator.ValueEqualsToString(string, equal);
+                    CheckValueParsingResult(error, string, rule.value.data() + rule.value.size());
+
+                    if (equal)
+                        value_passes = false;
+                },
+            }, rule.var);
+        }
+
+        if (value_passes)
+            return false; // Generate the value.
+
+        // Otherwise try generating the next value.
+    }
+}
+
+std::string ta_test::modules::GeneratorOverridder::ParseGeneratorOverrideSeq(GeneratorOverrideSeq &target, const char *&string, bool is_nested)
+{
+    bool first_generator = true;
+
+    // For each generator.
+    while (true)
+    {
+        if (first_generator)
+        {
+            first_generator = false;
+        }
+        else
+        {
+            if (*string == '\0' || (is_nested && *string == ')'))
+                break;
+
+            text::chars::SkipWhitespace(string);
+
+            if (*string != ',')
+                return "Expected `,`.";
+            string++;
+
+            text::chars::SkipWhitespace(string);
+        }
+
+        GeneratorOverrideSeq::Entry new_entry;
+
+        { // Parse the name.
+            if (!text::chars::IsIdentifierCharStrict(*string) || text::chars::IsDigit(*string))
+                return "Expected a generator name.";
+
+            const char *name_begin = string;
+
+            do
+            {
+                string++;
+            }
+            while (text::chars::IsIdentifierCharStrict(*string));
+
+            new_entry.generator_name = {name_begin, string};
+        }
+
+        bool is_first_rule = true;
+        bool last_rule_is_positive = false;
+
+        std::shared_ptr<GeneratorOverrideSeq> sub_override;
+
+        auto ParseRule = [&] CFG_TA_NODISCARD_LAMBDA () -> std::string
+        {
+            auto TrimValue = [](std::string_view value) -> std::string_view
+            {
+                // We only trim the leading whitespace, because `TryFindUnprotectedSeparator()`
+                // automatically rejects trailing whitespace.
+                while (!value.empty() && text::chars::IsWhitespace(value.front()))
+                    value.remove_prefix(1);
+                return value;
+            };
+
+            auto BeginPositiveRule = [&]
+            {
+                if (is_first_rule)
+                    new_entry.enable_values_by_default = false;
+            };
+
+            auto BeginNegativeRule = [&] CFG_TA_NODISCARD_LAMBDA () -> std::string
+            {
+                if (is_first_rule)
+                    new_entry.enable_values_by_default = true;
+
+                if (sub_override)
+                    return "`&` can't appear before a negative rule, since those can't be followed by `(...)`.";
+
+                return "";
+            };
+
+            auto FinishPositiveRule = [&] CFG_TA_NODISCARD_LAMBDA (std::shared_ptr<GeneratorOverrideSeq> &ptr) -> std::string
+            {
+                text::chars::SkipWhitespace(string);
+
+                bool is_and = *string == '&';
+                bool is_open = *string == '(';
+
+                if (is_and || is_open)
+                {
+                    if (!sub_override)
+                        sub_override = std::make_shared<GeneratorOverrideSeq>();
+                    ptr = sub_override;
+                }
+                else
+                {
+                    if (sub_override)
+                        return "Expected `&` or `(` after a list of `&`-separated rules.";
+                }
+
+                if (is_open)
+                {
+                    string++;
+                    text::chars::SkipWhitespace(string);
+
+                    if (*string == ')')
+                    {
+                        // Nothing. We allow empty `()`.
+                    }
+                    else
+                    {
+                        std::string error = ParseGeneratorOverrideSeq(*sub_override, string, true);
+                        if (!error.empty())
+                            return error;
+                    }
+
+                    sub_override = nullptr;
+
+                    // No need to skip whitespace here, `ParseGeneratorOverrideSeq()` should do it for us.
+
+                    if (*string != ')')
+                        return "Expected closing `)`.";
+                    string++;
+
+                    text::chars::SkipWhitespace(string);
+                }
+
+                last_rule_is_positive = true;
+
+                return "";
+            };
+
+            auto FinishNegativeRule = [&] CFG_TA_NODISCARD_LAMBDA () -> std::string
+            {
+                text::chars::SkipWhitespace(string);
+
+                if (*string == '(')
+                    return "`(...)` can't appear after negative rules.";
+                if (*string == '&')
+                    return "`&` can't appear after a negative rule, since those can't be followed by `(...)`.";;
+
+                last_rule_is_positive = false;
+
+                return "";
+            };
+
+            static constexpr std::string_view separators = ",&(";
+
+            if (*string == '=')
+            {
+                BeginPositiveRule();
+
+                string++;
+
+                const char *value_begin = string;
+                text::chars::TryFindUnprotectedSeparator(string, separators);
+                GeneratorOverrideSeq::Entry::CustomValue new_value{.value = TrimValue({value_begin, string}), .next_rule = new_entry.rules.size()};
+                if (new_value.value.empty())
+                    return "Expected a value.";
+
+                std::string error = FinishPositiveRule(new_value.custom_generator_seq);
+                if (!error.empty())
+                    return error;
+                new_entry.custom_values.push_back(std::move(new_value));
+            }
+            else if (*string == '-' && string[1] == '=')
+            {
+                std::string error = BeginNegativeRule();
+                if (!error.empty())
+                    return error;
+
+                string += 2;
+
+                const char *value_begin = string;
+                text::chars::TryFindUnprotectedSeparator(string, separators);
+
+                GeneratorOverrideSeq::Entry::RuleVar new_rule;
+
+                auto &value = new_rule.emplace<GeneratorOverrideSeq::Entry::RuleRemoveValue>().value;
+                value = TrimValue({value_begin, string});
+                if (value.empty())
+                    return "Expected a value.";
+
+                new_entry.rules.push_back({.var = std::move(new_rule)});
+
+                error = FinishNegativeRule();
+                if (!error.empty())
+                    return error;
+            }
+            else if (*string == '#' || (*string == '-' && string[1] == '#'))
+            {
+                GeneratorOverrideSeq::Entry::Rule new_rule;
+                GeneratorOverrideSeq::Entry::RuleIndex &new_rule_index = new_rule.var.emplace<GeneratorOverrideSeq::Entry::RuleIndex>();
+
+                new_rule_index.add = *string == '#';
+
+                if (new_rule_index.add)
+                {
+                    BeginPositiveRule();
+                    string++;
+                }
+                else
+                {
+                    std::string error = BeginNegativeRule();
+                    if (!error.empty())
+                        return error;
+
+                    string += 2;
+                }
+
+                if (*string != '.' && !text::chars::IsDigit(*string))
+                    return "Expected an integer or `..`.";
+
+                bool have_first_number = *string != '.';
+
+                auto CheckNumberLimits = [] CFG_TA_NODISCARD_LAMBDA (std::size_t n) -> std::string
+                {
+                    if (n < 1)
+                        return "The index must be 1 or greater.";
+                    if (n == std::size_t(-1))
+                        return "The index must be less than the max value of `size_t`.";
+                    return "";
+                };
+
+                // Parse the first number, if any.
+                if (have_first_number)
+                {
+                    std::string error = string_conv::FromStringTraits<decltype(new_rule_index.begin)>{}(new_rule_index.begin, string);
+                    if (!error.empty())
+                        return error;
+                    error = CheckNumberLimits(new_rule_index.begin);
+                    if (!error.empty())
+                        return error;
+                    new_rule_index.begin--;
+                }
+
+                // Check for `..`.
+                if (*string != '.' || string[1] != '.')
+                {
+                    // If we didn't have the first number, we must have `..`.
+                    if (have_first_number)
+                        new_rule_index.end = new_rule_index.begin + 1;
+                    else
+                        return "Expected `..`.";
+                }
+                else
+                {
+                    // Skip `..`.
+                    string += 2;
+
+                    // Parse the second number (optional if there was no first number).
+                    if (!have_first_number || text::chars::IsDigit(*string))
+                    {
+                        std::string error = string_conv::FromStringTraits<decltype(new_rule_index.end)>{}(new_rule_index.end, string);
+                        if (!error.empty())
+                            return error;
+                        error = CheckNumberLimits(new_rule_index.end);
+                        if (!error.empty())
+                            return error;
+                        if (new_rule_index.end < new_rule_index.begin + 1)
+                            return "The second index must be greater or equal to the first one.";
+                    }
+                }
+
+                std::string error;
+                if (new_rule_index.add)
+                    error = FinishPositiveRule(new_rule.custom_generator_seq);
+                else
+                    error = FinishNegativeRule();
+                if (!error.empty())
+                    return error;
+
+                new_entry.rules.push_back(std::move(new_rule));
+            }
+            else
+            {
+                return "Expected one of: `=`, `-=`, `#`, `-#`.";
+            }
+
+            is_first_rule = false;
+
+            return "";
+        };
+
+        text::chars::SkipWhitespace(string);
+
+        // Parse the rules.
+
+        if (*string == '{')
+        {
+            string++;
+
+            text::chars::SkipWhitespace(string);
+
+            while (true)
+            {
+                if (!is_first_rule)
+                {
+                    if (*string == '}')
+                    {
+                        string++;
+                        break;
+                    }
+
+                    if (last_rule_is_positive)
+                    {
+                        if (*string != ',' && *string != '&' && *string != '&')
+                            return "Expected `,` or `&` or `(`.";
+                    }
+                    else
+                    {
+                        if (*string != ',')
+                            return "Expected `,`.";
+                    }
+                    string++;
+
+                    text::chars::SkipWhitespace(string);
+                }
+
+                // This skips the trailing whitespace.
+                std::string error = ParseRule();
+                if (!error.empty())
+                    return error;
+            }
+        }
+        else
+        {
+            std::string error = ParseRule();
+            if (!error.empty())
+                return error;
+        }
+
+        target.entries.push_back(std::move(new_entry));
+    }
+
+    return "";
+}
+
+void ta_test::modules::GeneratorOverridder::HardErrorInFlag(std::string_view message, const Entry &entry, FlagErrorDetails details, HardErrorKind kind)
+{
+    std::string markers;
+    for (const FlagErrorDetails::Elem &elem : details.elems)
+    {
+        std::size_t offset = 2 + flag_override.flag.size() + 1 + std::size_t(elem.location - entry.original_argument_storage.data());
+        std::size_t needed_size = offset + elem.marker.size();
+        if (markers.size() < needed_size)
+            markers.resize(needed_size, ' ');
+
+        std::copy(elem.marker.begin(), elem.marker.end(), markers.begin() + std::ptrdiff_t(offset));
+    }
+
+    HardError(CFG_TA_FMT_NAMESPACE::format("In flag:\n--{} {}\n{}\n{}\n", flag_override.flag, entry.OriginalArgument(), markers, message), kind);
 }
 
 // --- modules::PrintingConfigurator ---
@@ -1987,7 +2682,7 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(output::Terminal::Sty
     const auto &st_gen = repeating_info ? style_generator_repeated : style_generator;
 
     // The generator name and the value index.
-    terminal.Print(cur_style, "{}{}{}{}{}{}{}{}{}{}",
+    terminal.Print(cur_style, "{}{}{}{}{}{}{}{}{}{}{}",
         // The bullet point.
         st_gen.prefix,
         repeating_info ? chars_test_prefix_continuing : chars_test_prefix,
@@ -1997,9 +2692,13 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(output::Terminal::Sty
         // Opening bracket.
         st_gen.index_brackets,
         chars_generator_index_prefix,
-        // The index.
-        st_gen.index,
-        generator.NumGeneratedValues(),
+        // Index:
+        //   Index style.
+        generator.IsCustomValue() ? st_gen.index_custom : st_gen.index,
+        //   Prefix for custom values, if any.
+        generator.IsCustomValue() ? chars_generator_custom_index_prefix : "",
+        //   The index itself.
+        generator.IsCustomValue() ? generator.NumCustomValues() : generator.NumGeneratedValues(),
         // Closing bracket.
         st_gen.index_brackets,
         chars_generator_index_suffix

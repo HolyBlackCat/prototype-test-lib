@@ -3,397 +3,7 @@
 
 #include "testlib.h"
 
-#error optional generator increment between tests (after a test in a lambda)
-
-// The parameter is the test name regex (as in `--include`), followed by `//`, then a comma-separated list of generator overrides.
-// Each test can be affected by at most one such parameter (the last matching one).
-// Some examples: (here `x`,`y` are generator names as passed to `TA_GENERATE(name, ...)`)
-// * -g 'foo/bar//x=42'         - generate only this value.
-// * -g 'foo/bar//x=42,y=43'    - override several generators (the order matters; you can omit some of the generators).
-// * -g 'foo/bar//x{=10,=20}'   - several values per generator.
-// * -g 'foo/bar//x-=10         - skip specific value.
-// * -g 'foo/bar//x#10'         - only generate the value at the specified index (1-based).
-// * -g 'foo/bar//x#10..12'     - same, but with a range of indices (inclusive). One of the numbers can be omitted: `..10`, `10..`.
-// * -g 'foo/bar//x-#10'        - skip the value at the specific index. This also accepts ranges.
-// Multiple operators can be combined:
-// * -g 'foo/bar//x{#..10,=42}' - generate only 10 first values, and a custom value `42`.
-// Operators are applied left to right. If the first operator is `=` or `#`, all values are disabled by default. But you can reenable them manually:
-// * -g 'foo/bar//x{#1..,=42}'  - generate all values, and a custom one.
-// Operators `=` and `#` can be followed by a parenthesized list of generator overrides, which are used in place of the remaining string for those values:
-// * -g 'foo/bar//x{#1..,#5(y=20)},y=10' - override `y=20` for 5th value of `x`, and `y=10` for all other values of `x`.
-// If multiple operators match the same value, parentheses from the last match are used.
-// Parentheses apply to only one operator by default. To apply them to multiple operators, separate operators with `&` instead of `,`:
-// * -g 'foo/bar//x{#1..,#5&=42(y=20)},y=10' - override `y=20` for 5th value of `x` and for a custom value `x=42`, for all other values of `x` use `y=10`.
-// Some notes:
-// * This flag changes the generator semantics slightly, making subsequent calls to the generator lambda between the test repetitions, as opposed to
-//     when the control flow reaches the `TA_GENERATE(...)` call, to avoid entering the test when all future values are disabled.
-//     This shouldn't affect you, unless you're doing something really weird.
-// * Not all types can be created from strings, but index-based operators will always work.
-//     We support scalars, strings (with standard escape sequences), containers (as printed by `std::format()`: {...} sets, {a:b, c:d} maps, [...] other containers, and (...) tuples).
-//     Custom type support can be added by specializing `ta_test::string_conv::FromStringTraits`.
-// * `-=` requires overloaded `==` (and better also `<`) to work.
-// * `-=` can't remove values added with `=`, because it's useless and simplifies implementation.
-// * Values added with `=` have no index. We try to remove them from normal generation if the type is comparable.
-
-
-namespace ta_test
-{
-    struct GeneratorOverrideSeq
-    {
-        struct Entry
-        {
-            std::string_view generator_name;
-
-            // If false, don't generate anything by default unless explicitly enabled.
-            bool enable_values_by_default = true;
-
-            struct CustomValue
-            {
-                std::string_view value;
-
-                std::shared_ptr<GeneratorOverrideSeq> custom_generator_seq;
-            };
-
-            // Custom values provided by the user, using the `=...`syntax.
-            // Anything listed here is skipped during natural generation, and none of the rules below apply to those.
-            std::vector<CustomValue> custom_values;
-
-            // Add or remove a certain index range.
-            // This corresponds to `#...` and `-#...` syntax.
-            struct RuleIndex
-            {
-                bool add = true;
-
-                // 0-based, half-open range.
-                std::size_t begin = 0;
-                std::size_t end = std::size_t(-1);
-
-                // Need default constructor here to make `std::variant` (`RuleVar`) understand that it's default-constructible.
-                constexpr RuleIndex() {}
-            };
-            // Remove a certain value.
-            // This corresponds to the `-=...` syntax.
-            struct RuleRemoveValue
-            {
-                std::string_view value;
-
-                // Need default constructor here to make `std::variant` (`RuleVar`) understand that it's default-constructible.
-                constexpr RuleRemoveValue() {}
-            };
-            using RuleVar = std::variant<RuleIndex, RuleRemoveValue>;
-
-            struct Rule
-            {
-                RuleVar var;
-
-                // If not null, this replaces the rest of the program for those values.
-                std::shared_ptr<GeneratorOverrideSeq> custom_generator_seq;
-            };
-
-            std::vector<Rule> rules;
-        };
-
-        std::vector<Entry> entries;
-    };
-
-    // Parses a `GeneratorOverrideSeq` object. `target` must initially be empty.
-    // Returns the error on failure, or an empty string on success.
-    // The `string` must remain alive, we're storing pointers into it.
-    // `is_nested` should be false by default, and will be set to true when parsing nested sequences.
-    // This consumes the trailing space.
-    [[nodiscard]] std::string ParseGeneratorOverrideSeq(GeneratorOverrideSeq &target, const char *&string, bool is_nested)
-    {
-        bool first_generator = true;
-
-        // For each generator.
-        while (true)
-        {
-            if (first_generator)
-            {
-                first_generator = false;
-            }
-            else
-            {
-                if (*string == '\0' || (is_nested && *string == ')'))
-                    break;
-
-                text::chars::SkipWhitespace(string);
-
-                if (*string != ',')
-                    return "Expected `,`.";
-                string++;
-
-                text::chars::SkipWhitespace(string);
-            }
-
-            GeneratorOverrideSeq::Entry new_entry;
-
-            { // Parse the name.
-                if (!text::chars::IsIdentifierCharStrict(*string) || text::chars::IsDigit(*string))
-                    return "Expected a generator name.";
-
-                const char *name_begin = string;
-
-                do
-                {
-                    string++;
-                }
-                while (text::chars::IsIdentifierCharStrict(*string));
-
-                new_entry.generator_name = {name_begin, string};
-            }
-
-            bool is_first_rule = true;
-            bool last_rule_is_positive = false;
-
-            std::shared_ptr<GeneratorOverrideSeq> sub_override;
-
-            auto ParseRule = [&] CFG_TA_NODISCARD_LAMBDA () -> std::string
-            {
-                auto TrimValue = [](std::string_view value) -> std::string_view
-                {
-                    // We only trim the leading whitespace, because `TryFindUnprotectedSeparator()`
-                    // automatically rejects trailing whitespace.
-                    while (!value.empty() && text::chars::IsWhitespace(value.front()))
-                        value.remove_prefix(1);
-                    return value;
-                };
-
-                auto BeginPositiveRule = [&]
-                {
-                    if (is_first_rule)
-                        new_entry.enable_values_by_default = false;
-                };
-
-                auto BeginNegativeRule = [&] CFG_TA_NODISCARD_LAMBDA () -> std::string
-                {
-                    if (is_first_rule)
-                        new_entry.enable_values_by_default = true;
-
-                    if (sub_override)
-                        return "`&` can't appear before a negative rule, since those can't be followed by `(...)`.";
-
-                    return "";
-                };
-
-                auto FinishPositiveRule = [&] CFG_TA_NODISCARD_LAMBDA (std::shared_ptr<GeneratorOverrideSeq> &ptr) -> std::string
-                {
-                    text::chars::SkipWhitespace(string);
-
-                    bool is_and = *string == '&';
-                    bool is_open = *string == '(';
-
-                    if (is_and || is_open)
-                    {
-                        if (!sub_override)
-                            sub_override = std::make_shared<GeneratorOverrideSeq>();
-                        ptr = sub_override;
-                    }
-                    else
-                    {
-                        if (sub_override)
-                            return "Expected `&` or `(` after a list of `&`-separated rules.";
-                    }
-
-                    if (is_open)
-                    {
-                        string++;
-                        text::chars::SkipWhitespace(string);
-                        std::string error = ParseGeneratorOverrideSeq(*sub_override, string, true);
-                        if (!error.empty())
-                            return error;
-
-                        sub_override = nullptr;
-
-                        // No need to skip whitespace here, `ParseGeneratorOverrideSeq()` should do it for us.
-
-                        if (*string != ')')
-                            return "Expected closing `)`.";
-                        string++;
-
-                        text::chars::SkipWhitespace(string);
-                    }
-
-                    last_rule_is_positive = true;
-
-                    return "";
-                };
-
-                auto FinishNegativeRule = [&] CFG_TA_NODISCARD_LAMBDA () -> std::string
-                {
-                    text::chars::SkipWhitespace(string);
-
-                    if (*string == '(')
-                        return "`(...)` can't appear after negative rules.";
-                    if (*string == '&')
-                        return "`&` can't appear after a negative rule, since those can't be followed by `(...)`.";;
-
-                    last_rule_is_positive = false;
-
-                    return "";
-                };
-
-                static constexpr std::string_view separators = ",&(";
-
-                if (*string == '=')
-                {
-                    BeginPositiveRule();
-
-                    string++;
-
-                    const char *value_begin = string;
-                    text::chars::TryFindUnprotectedSeparator(string, separators);
-                    GeneratorOverrideSeq::Entry::CustomValue new_value{.value = TrimValue({value_begin, string})};
-
-                    std::string error = FinishPositiveRule(new_value.custom_generator_seq);
-                    if (!error.empty())
-                        return error;
-                    new_entry.custom_values.push_back(std::move(new_value));
-                }
-                else if (*string == '-' && string[1] == '=')
-                {
-                    std::string error = BeginNegativeRule();
-                    if (!error.empty())
-                        return error;
-
-                    string += 2;
-
-                    const char *value_begin = string;
-                    text::chars::TryFindUnprotectedSeparator(string, separators);
-
-                    GeneratorOverrideSeq::Entry::RuleVar new_rule;
-                    new_rule.emplace<GeneratorOverrideSeq::Entry::RuleRemoveValue>().value = TrimValue({value_begin, string});
-                    new_entry.rules.push_back({.var = std::move(new_rule)});
-
-                    error = FinishNegativeRule();
-                    if (!error.empty())
-                        return error;
-                }
-                else if (*string == '#' || (*string == '-' && string[1] == '#'))
-                {
-                    GeneratorOverrideSeq::Entry::Rule new_rule;
-                    GeneratorOverrideSeq::Entry::RuleIndex &new_rule_index = new_rule.var.emplace<GeneratorOverrideSeq::Entry::RuleIndex>();
-
-                    new_rule_index.add = *string == '#';
-
-                    if (new_rule_index.add)
-                    {
-                        BeginPositiveRule();
-                        string++;
-                    }
-                    else
-                    {
-                        std::string error = BeginNegativeRule();
-                        if (!error.empty())
-                            return error;
-
-                        string += 2;
-                    }
-
-                    if (*string != '.' && !text::chars::IsDigit(*string))
-                        return "Expected an integer or `..`.";
-
-                    bool have_first_number = *string != '.';
-
-                    if (have_first_number)
-                    {
-                        std::string error = string_conv::FromStringTraits<decltype(new_rule_index.begin)>{}(new_rule_index.begin, string);
-                        if (!error.empty())
-                            return error;
-                        if (new_rule_index.begin < 1)
-                            return "The index must be 1 or greater.";
-                        new_rule_index.begin--;
-                    }
-
-                    if (*string != '.' || string[1] != '.')
-                        return "Expected `..`.";
-                    string += 2;
-
-                    if (!have_first_number || text::chars::IsDigit(*string))
-                    {
-                        std::string error = string_conv::FromStringTraits<decltype(new_rule_index.end)>{}(new_rule_index.end, string);
-                        if (!error.empty())
-                            return error;
-                        if (new_rule_index.end < 1)
-                            return "The index must be 1 or greater.";
-                        if (new_rule_index.end < new_rule_index.begin + 1)
-                            return "The second index must be greater or equal to the first one.";
-                    }
-
-                    std::string error;
-                    if (new_rule_index.add)
-                        error = FinishPositiveRule(new_rule.custom_generator_seq);
-                    else
-                        error = FinishNegativeRule();
-                    if (!error.empty())
-                        return error;
-
-                    new_entry.rules.push_back(std::move(new_rule));
-                }
-                else
-                {
-                    return "Expected one of: `=`, `-=`, `#`, `-#`.";
-                }
-
-                is_first_rule = false;
-
-                return "";
-            };
-
-            text::chars::SkipWhitespace(string);
-
-            // Parse the rules.
-
-            if (*string == '{')
-            {
-                string++;
-
-                text::chars::SkipWhitespace(string);
-
-                while (true)
-                {
-                    if (!is_first_rule)
-                    {
-                        if (*string == '}')
-                        {
-                            string++;
-                            break;
-                        }
-
-                        if (last_rule_is_positive)
-                        {
-                            if (*string != ',' && *string != '&' && *string != '&')
-                                return "Expected `,` or `&` or `(`.";
-                        }
-                        else
-                        {
-                            if (*string != ',')
-                                return "Expected `,`.";
-                        }
-                        string++;
-
-                        text::chars::SkipWhitespace(string);
-                    }
-
-                    // This skips the trailing whitespace.
-                    std::string error = ParseRule();
-                    if (!error.empty())
-                        return error;
-                }
-            }
-            else
-            {
-                std::string error = ParseRule();
-                if (!error.empty())
-                    return error;
-            }
-
-            target.entries.push_back(std::move(new_entry));
-        }
-
-        return "";
-    }
-}
+// Allow --include to introduce a generator override
 
 #if 0
 foo=42,bar[2],baz=56
@@ -531,50 +141,13 @@ TA_TEST(foof/generators)
     // static int i = 0;
     // std::cout << "### " << i++ << '\n';
 
-    [[maybe_unused]] auto a = TA_GENERATE_FUNC(foo, [i = 0](bool &repeat) mutable {if (i == 3) repeat = false; return i++;});
-    // std::cout << a << '\n';
-
-    [[maybe_unused]] auto b = TA_GENERATE_FUNC(blahh, [i = 20](bool &repeat) mutable {if (i == 23) repeat = false; return i++;});
-    // std::cout << b << '\n';
-
-    static int i = 0;
-    if (i++ == 10)
-        TA_FAIL;
-
-    [[maybe_unused]] int &c = TA_GENERATE(hah, {1,2,3,4});
-}
-
-TA_TEST(foo/baz)
-{
-    auto e = TA_MUST_THROW(
-        try
-        {
-            throw std::runtime_error("Hello!");
-        }
-        catch (...)
-        {
-            std::throw_with_nested(std::runtime_error("Nested!"));
-        }
-    );
-
-    // e.CheckMessage("Hello!");
-    TA_CHECK(R"123(foof)123" && false);
+    [[maybe_unused]] auto a = TA_GENERATE(foo, {1,2,3});
+    // [[maybe_unused]] auto b = TA_GENERATE(bar, {4,5,6});
 }
 
 int main(int argc, char **argv)
 {
-    ta_test::GeneratorOverrideSeq seq;
-
-    const char *str = "foo  {  =  42  &  =  43  &  =  44  (  foo  =  42  )  ,  #1..2  ,  #..1  ,  -#1..  }  ,  bar  =  43  ", *old_str = str;
-
-    std::string error = ta_test::ParseGeneratorOverrideSeq(seq, str, false);
-    if (error.empty())
-        std::cout << "ok\n";
-    else
-        std::cout << "error: " << error << '\n';
-    std::cout << std::format("{}\n{:{}}^", old_str, "", str - old_str);
-
-    // return ta_test::RunSimple(argc, argv);
+    return ta_test::RunSimple(argc, argv);
 }
 
 
@@ -589,6 +162,7 @@ int main(int argc, char **argv)
 // Overriding generator values?
 
 // Soft assertions?
+// sturct to hold a bool condition and the softness enum, use it as an assertion parameter (templated constructor to properly convert types to bool)
 
 // TA_FOR_TYPES, sane something for values
 
@@ -817,6 +391,24 @@ TA_CHECK:
     Overall try two scenarios: failing last repetition and failing some other ones. Make sure everything prints sanely.
 
     Overriding values:
+        =
+            (...)
+        -=
+            -= can negate the = values, but only if -= comes after =.
+        #
+            (...)
+        -#
+
+        Empty {} are illegal.
+
+        Test types convertible from string but not eq-comparable (and not convertible to string)
+        Test types both convertible from string and eq-comparable (and not convertible to string)
+
+        Common tests:
+            (#1,=42) - # disables values by default, we don't want it to disable =42
+            =42,-=42 - no values
+            -=42,=42 - generates 42
+
         What if inserting a user value throws?
         What if generating outside of a test throws?
         User indices:
@@ -825,6 +417,7 @@ TA_CHECK:
         Removing all values = error
 
         As usual, try everything without spaces and with spaces everywhere
+            Except #a..b allows no whitespaces (which is good?)
 
         & before a negative rule
         & after a negative rule
@@ -834,25 +427,53 @@ TA_CHECK:
             as the last rule
 
         Bad indices:
+            #-1
+            #0
             #..
             #0..
             #..0
             #2..1
+            #18446744073709551615
+            #18446744073709551615..
+            #..18446744073709551615
         Good indices:
+            #1
             #1..1
             #2..3
             #1..
             #..1
 
+        Make sure the upper bound isn't too big (at least one repetition needs to reach the bann
+
         Outright invalid character after a generator name.
 
-        Empty string as value.
-        Whitespaces as value.
-        Various containers and tuples as values, including (a,b,c)(override).
+        Empty string as value = early error
+        Whitespaces as value = early error
+
+        Various containers and tuples as values, including (a,b,c), (a,b,c)(override).
 
         zero rules per generator = error
 
         Accepting trailing whitespace after different kinds of rules.
+
+        Nice error on a bad test regex.
+
+        Allow --include to introduce a generator override
+
+        Check overriding a nested generator (the same override should be reused multiple times)
+
+        Empty () must be legal
+
+        Jank parsed types that land before and after (test both) the expected value bounds.
+            Try 1-char difference to make sure the markers don't overlap.
+            Test for both = and -=
+
+        Error if a regex matched no tests at the end of program.
+
+        Unconsumed program at the end of any test run = NOT an error
+        But any unused thing in the flag is an error at the end of the program
+
+        Specifying an outright wrong generator name
 
 --- TA_GENERATE
     Braced lists:
@@ -920,7 +541,6 @@ Good test names:
     Try duplicating $(...) with a macro, what then?
 
 --- Formatting errors shouldn't compile.
-    formatting containers might not be supported in the standard library yet, check it in libfmt for strings and numbers.
 
 --- Various flag styles:
     --include foo
@@ -928,6 +548,11 @@ Good test names:
     -ifoo
     -i foo
     But not -i=foo
+
+--- Command line flags
+    Nice error on bad --include regex, same for `--generate` regex
+
+    --help shouldn't crash.
 
 --- Control characters are replaced with their symbolic representations in:
     Stringified arguments
