@@ -3,6 +3,8 @@
 
 #include "testlib.h"
 
+// Figure out how to support (...)
+
 // Allow --include to introduce a generator override
 
 #if 0
@@ -142,7 +144,7 @@ TA_TEST(foof/generators)
     // std::cout << "### " << i++ << '\n';
 
     [[maybe_unused]] auto a = TA_GENERATE(foo, {1,2,3});
-    // [[maybe_unused]] auto b = TA_GENERATE(bar, {4,5,6});
+    [[maybe_unused]] auto b = TA_GENERATE(bar, {4,5,6});
 }
 
 int main(int argc, char **argv)
@@ -393,6 +395,9 @@ TA_CHECK:
     Overriding values:
         =
             (...)
+            Repeating = adds the same value multiple times.
+            REMOVES this value from the normal generation
+                BUT ONLY IF it's equality-comparable
         -=
             -= can negate the = values, but only if -= comes after =.
         #
@@ -400,6 +405,8 @@ TA_CHECK:
         -#
 
         Empty {} are illegal.
+
+        Empty () are legal.
 
         Test types convertible from string but not eq-comparable (and not convertible to string)
         Test types both convertible from string and eq-comparable (and not convertible to string)
@@ -443,7 +450,7 @@ TA_CHECK:
             #1..
             #..1
 
-        Make sure the upper bound isn't too big (at least one repetition needs to reach the bann
+        Make sure the upper bound isn't too big (at least one repetition needs to reach the max value for it to be ok)
 
         Outright invalid character after a generator name.
 
@@ -460,6 +467,9 @@ TA_CHECK:
 
         Allow --include to introduce a generator override
 
+        LAST matching -g is used.
+
+
         Check overriding a nested generator (the same override should be reused multiple times)
 
         Empty () must be legal
@@ -472,6 +482,15 @@ TA_CHECK:
 
         Unconsumed program at the end of any test run = NOT an error
         But any unused thing in the flag is an error at the end of the program
+            Rules are "used" when they match something, OR when they provide a (...), OR when they negate a previous ().
+                But if they negate a program that'a already zeroed, they are NOT used.
+
+        Last matching positive rule provides the `(...)`.
+            !!! If the last matching positive rule has no `(...)`, it undoes the previous ones.
+                Test this for both = and #
+
+            * -g 'foo/bar//x{#1..,#5()},y=10' - override `y=10` for all values of `x` except the 5-th one.
+            * -g 'foo/bar//x{#1..(y=10),#5}' - same effect as above.
 
         Specifying an outright wrong generator name
 

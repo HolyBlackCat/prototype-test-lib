@@ -431,6 +431,7 @@ void ta_test::output::Terminal::StyleGuard::ResetStyle()
 {
     if (terminal.enable_color)
         terminal.Print("{}", terminal.AnsiResetString().data());
+    cur_style = {};
 }
 
 std::string_view ta_test::output::Terminal::AnsiResetString() const
@@ -1611,9 +1612,14 @@ int ta_test::Runner::Run()
                     }
 
                     if (should_pop)
+                    {
+                        module_lists.Call<&BasicModule::OnPrePruneLastGenerator>(guard.state);
                         guard.state.generator_stack.pop_back();
+                    }
                     else
+                    {
                         break;
+                    }
                 }
 
                 // Since we touched the index and resized the stack, reset the index to a meaningful value for the callback that will be called below.
@@ -1864,7 +1870,7 @@ ta_test::modules::GeneratorOverridder::GeneratorOverridder()
             (void)this_module;
             dynamic_cast<GeneratorOverridder &>(this_module).terminal.Print("{}", &R"(
 The argument of `--generate` is a name regex (as in `--include`), followed by `//`, then a comma-separated list of generator overrides.
-Each test can be affected by at most one such parameter (the last matching one).
+Each test can be affected by at most one such flag (the last matching one).
 Some examples: (here `x`,`y` are generator names as passed to `TA_GENERATE(name, ...)`)
 * -g 'foo/bar//x=42'         - generate only this value.
 * -g 'foo/bar//x=42,y=43'    - override several generators (the order matters; you can omit some of the generators).
@@ -1880,8 +1886,11 @@ Operators are applied left to right. If the first operator is `=` or `#`, all va
 Operators `=` and `#` can be followed by a parenthesized list of generator overrides, which are used in place of the remaining string for those values:
 * -g 'foo/bar//x{#1..,#5(y=20)},y=10' - override `y=20` for 5th value of `x`, and `y=10` for all other values of `x`.
 If multiple operators match the same value, parentheses from the last match are used.
-Parentheses apply to only one operator by default. To apply them to multiple operators, separate operators with `&` instead of `,`:
+Parentheses apply only to the single preceding operator by default. To apply them to multiple operators, separate operators with `&` instead of `,`:
 * -g 'foo/bar//x{#1..,#5&=42(y=20)},y=10' - override `y=20` for 5th value of `x` and for a custom value `x=42`, for all other values of `x` use `y=10`.
+More examples:
+* -g 'foo/bar//x{#1..,#5()},y=10' - override `y=10` for all values of `x` except the 5-th one.
+* -g 'foo/bar//x{#1..(y=10),#5}' - same effect as above.
 Some notes:
 * This flag changes the generator semantics slightly, making subsequent calls to the generator lambda between the test repetitions, as opposed to
     when the control flow reaches the `TA_GENERATE(...)` call, to avoid entering the test when all future values are disabled.
@@ -1938,21 +1947,11 @@ bool ta_test::modules::GeneratorOverridder::OnRegisterGeneratorOverride(const Ru
     // If we do have an active `--generate` flag, use it.
     if (test_state && !test_state->remaining_program.empty())
     {
-        { // Prune generator with larger (or equal) indices.
-            auto iter = std::partition_point(test_state->elems.begin(), test_state->elems.end(), [&](const TestState::Elem &elem){return elem.generator_index < test.generator_index;});
-            if (iter != test_state->elems.end())
-            {
-                test_state->remaining_program = iter->remaining_program;
-                test_state->elems.erase(iter, test_state->elems.end());
-            }
-        }
-
         const GeneratorOverrideSeq::Entry &entry = test_state->remaining_program.front();
 
         if (entry.generator_name == generator.GetName())
         {
             test_state->elems.push_back({.generator_index = test.generator_index, .remaining_program = test_state->remaining_program});
-            test_state->remaining_program = test_state->remaining_program.subspan(1);
 
             return true;
         }
@@ -1966,12 +1965,14 @@ bool ta_test::modules::GeneratorOverridder::OnOverrideGenerator(const RunSingleT
     if (!test_state)
         HardError("A generator override is requested, but we don't have an active state.");
 
-    auto iter = std::partition_point(test_state->elems.begin(), test_state->elems.end(), [&](const TestState::Elem &elem){return elem.generator_index < test.generator_index;});
-
-    if (iter == test_state->elems.end() || iter->generator_index != test.generator_index)
+    // Our generator should be the last one in the stack at this point.
+    if (test_state->elems.empty() || test_state->elems.back().generator_index != test.generator_index)
         HardError("A generator override is requested, but the state doesn't contain information about this generator.");
 
-    const GeneratorOverrideSeq::Entry &command = iter->remaining_program.front();
+    TestState::Elem &this_elem = test_state->elems.back();
+    const GeneratorOverrideSeq::Entry &command = this_elem.remaining_program.front();
+
+    const auto default_remaining_program = this_elem.remaining_program.subspan(1);
 
     // Generate the values until one passes the conditions...
     while (true)
@@ -2007,13 +2008,16 @@ bool ta_test::modules::GeneratorOverridder::OnOverrideGenerator(const RunSingleT
             }
         };
 
+        // Reset the remaining program first.
+        test_state->remaining_program = default_remaining_program;
+
         // Insert the next custom value, if any.
 
         std::size_t rule_index = 0;
         bool using_custom_value = false;
-        if (iter->num_used_custom_values < command.custom_values.size())
+        if (this_elem.num_used_custom_values < command.custom_values.size())
         {
-            const auto &this_value = command.custom_values[iter->num_used_custom_values];
+            const auto &this_value = command.custom_values[this_elem.num_used_custom_values];
 
             if (!generator.ValueConvertibleFromString())
             {
@@ -2031,10 +2035,16 @@ bool ta_test::modules::GeneratorOverridder::OnOverrideGenerator(const RunSingleT
             std::string error = generator.ReplaceValueFromString(string);
             CheckValueParsingResult(error, string, this_value.value.data() + this_value.value.size());
 
-            iter->num_used_custom_values++;
+            this_elem.num_used_custom_values++;
 
             using_custom_value = true;
             rule_index = this_value.next_rule;
+
+            // Replace the remaining program.
+            if (this_value.custom_generator_seq)
+                test_state->remaining_program = this_value.custom_generator_seq->entries;
+            else
+                test_state->remaining_program = default_remaining_program;
         }
 
         // Generate the next natural value, if any.
@@ -2046,13 +2056,35 @@ bool ta_test::modules::GeneratorOverridder::OnOverrideGenerator(const RunSingleT
             generator.Generate();
         }
 
+        // Outright reject natural values if they overlap with `=`.
+        // But if the type isn't equality-comparable, just don't do anything.
+
+        if (!using_custom_value && generator.ValueEqualityComparableToString())
+        {
+            bool skip = false;
+            for (const auto &custom_value : command.custom_values)
+            {
+                const char *string = custom_value.value.data();
+                bool equal = false;
+                std::string error = generator.ValueEqualsToString(string, equal);
+                CheckValueParsingResult(error, string, custom_value.value.data() + custom_value.value.size());
+                if (equal)
+                {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip)
+                continue; // Generate the next value.
+        }
+
         // Process the rules.
 
         bool value_passes = using_custom_value || command.enable_values_by_default;
 
         for (; rule_index < command.rules.size(); rule_index++)
         {
-            const GeneratorOverrideSeq::Entry::Rule &rule = command.rules[rule_index];
+            const GeneratorOverrideSeq::Entry::Rule &generic_rule = command.rules[rule_index];
 
             std::visit(meta::Overload{
                 [&](const GeneratorOverrideSeq::Entry::RuleIndex &rule)
@@ -2061,7 +2093,18 @@ bool ta_test::modules::GeneratorOverridder::OnOverrideGenerator(const RunSingleT
                         return;
 
                     if (generator.NumGeneratedValues() >= rule.begin + 1 && generator.NumGeneratedValues() - 1 < rule.end)
+                    {
                         value_passes = rule.add;
+
+                        // Replace the remaining program.
+                        if (rule.add)
+                        {
+                            if (generic_rule.custom_generator_seq)
+                                test_state->remaining_program = generic_rule.custom_generator_seq->entries;
+                            else
+                                test_state->remaining_program = default_remaining_program;
+                        }
+                    }
                 },
                 [&](const GeneratorOverrideSeq::Entry::RuleRemoveValue &rule)
                 {
@@ -2096,13 +2139,28 @@ bool ta_test::modules::GeneratorOverridder::OnOverrideGenerator(const RunSingleT
                     if (equal)
                         value_passes = false;
                 },
-            }, rule.var);
+            }, generic_rule.var);
         }
 
         if (value_passes)
             return false; // Generate the value.
 
         // Otherwise try generating the next value.
+    }
+}
+
+void ta_test::modules::GeneratorOverridder::OnPrePruneLastGenerator(const RunSingleTestProgress &test)
+{
+    if (test.generator_stack.back()->OverridingModule() == this)
+    {
+        if (!test_state)
+            HardError("We're pruning our overridden generator, but have no state for some reason.");
+
+        if (test_state->elems.empty() || test_state->elems.back().generator_index != test.generator_stack.size() - 1)
+            HardError("We're pruning our overridden generator, but its index doesn't match what we have.");
+
+        test_state->remaining_program = test_state->elems.back().remaining_program;
+        test_state->elems.pop_back();
     }
 }
 

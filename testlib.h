@@ -2255,6 +2255,9 @@ namespace ta_test
             // For internal use. Calls an override registered with `OnRegisterGeneratorOverride()`, if any.
             [[nodiscard]] CFG_TA_API OverrideStatus RunGeneratorOverride();
 
+            // Returns the module that's currently controlling this generator, if any.
+            [[nodiscard]] const BasicModule *OverridingModule() const {return overriding_module;}
+
             // Inserting custom values:
 
             // Whether the value type can be created from a string using `string_conv::FromStringTraits`.
@@ -2520,7 +2523,7 @@ namespace ta_test
         // Return true if you want this module to have special control over this generator.
         // If you do this, you must override `OnGeneratorOverride()`, see below.
         // This also changes the behavior of `TA_GENERATE(...)` slightly, it will generate new values between tests and
-        // not when the control flow reaches it (except for the first time it's reached).
+        //   not when the control flow reaches it (except for the first time it's reached).
         virtual bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) {(void)test; (void)generator; return false;}
         // If you returned true from `OnRegisterGeneratorOverride()`, this function will be called instead of `generator.Generate()`.
         // You must call `generator.Generate()` (possibly several times to skip values) or `generator.ReplaceValueFromString()`.
@@ -2528,6 +2531,8 @@ namespace ta_test
         //   which value is the last one beforehand).
         // You must return true from this when the generator is exhausted, `IsLastValue()` is ignored when an override is active.
         virtual bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) {(void)test; (void)generator; return false;}
+        // This is called right before the final generator in the stack is pruned, because it has no more values.
+        virtual void OnPrePruneLastGenerator(const RunSingleTestProgress &test) {(void)test;}
 
         // --- FAILING TESTS ---
 
@@ -2705,6 +2710,7 @@ namespace ta_test
             x(OnPostGenerate) \
             x(OnRegisterGeneratorOverride) \
             /* `OnOverrideGenerator` isn't needed */ \
+            x(OnPrePruneLastGenerator) \
             x(OnPreFailTest) \
             x(OnAssertionFailed) \
             x(OnUncaughtException) \
@@ -4996,6 +5002,7 @@ namespace ta_test
             void OnPostRunSingleTest(const RunSingleTestResults &data) override;
             bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) override;
             bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) override;
+            void OnPrePruneLastGenerator(const RunSingleTestProgress &test) override;
 
             // Parses a `GeneratorOverrideSeq` object. `target` must initially be empty.
             // Returns the error on failure, or an empty string on success.
