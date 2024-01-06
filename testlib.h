@@ -552,19 +552,19 @@ namespace ta_test
                     ch++;
             }
 
-            // Advances `ch` until one of the characters in `sep` is found,
-            // or until an unbalanced closing bracket (one of: `)]}`), or until the second top-level opening bracket.
+            // Advances `ch` until one of the characters in `sep` is found, or until an unbalanced closing bracket (one of: `)]}`).
             // Then gives back the trailing whitespace, if any.
-            // but we ignore the contents of "..." and '...' strings, and ignore matching characters inside of `(...)`, `[...]`, or `{...}`.
+            // But we ignore the contents of "..." and '...' strings, and ignore matching characters inside of `(...)`, `[...]`, or `{...}`.
+            // We also refuse to break on an opening bracket if it's the first non-whitespace chracter.
             // We don't check the type of brackets, treating them all as equivalent, but if we find an unbalanced closing bracket, we stop immediately.
             constexpr void TryFindUnprotectedSeparator(const char *&ch, std::string_view sep)
             {
                 const char *const first_ch = ch;
+                SkipWhitespace(ch);
+                const char *const first_nonwhitespace_ch = ch;
 
                 char quote_ch = '\0';
                 int depth = 0;
-
-                bool first_paren = false;
 
                 while (*ch)
                 {
@@ -584,7 +584,13 @@ namespace ta_test
                     else
                     {
                         if (depth == 0 && sep.find(*ch) != std::string_view::npos)
-                            break; // Found separator.
+                        {
+                            // Found separator.
+
+                            // Refuse to break if it's the first non-whitespace character and an opening bracket.
+                            if (!(first_nonwhitespace_ch == ch && (*ch == '(' || *ch == '[' || *ch == '{')))
+                                break;
+                        }
 
                         if (*ch == '"' || *ch == '\'')
                         {
@@ -592,9 +598,6 @@ namespace ta_test
                         }
                         else if (*ch == '(' || *ch == '[' || *ch == '{')
                         {
-                            if (first_paren)
-                                break; // Second top-level opening bracket.
-                            first_paren = true;
                             depth++;
                         }
                         else if (*ch == ')' || *ch == ']' || *ch == '}')

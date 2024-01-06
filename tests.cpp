@@ -138,13 +138,10 @@ bool fof()
 }
 #endif
 
-TA_TEST(foof/generators)
+TA_TEST(foo/test)
 {
-    // static int i = 0;
-    // std::cout << "### " << i++ << '\n';
-
-    [[maybe_unused]] auto a = TA_GENERATE(foo, {1,2,3});
-    [[maybe_unused]] auto b = TA_GENERATE(bar, {4,5,6});
+    (void)ta_test::string_conv::ToString(TA_GENERATE(foo, {std::vector<int>{}}));
+    (void)TA_GENERATE(bar, {1,2,3});
 }
 
 int main(int argc, char **argv)
