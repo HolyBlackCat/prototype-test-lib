@@ -4,70 +4,6 @@
 #include "testlib.h"
 
 #if 0
-foo=42,bar[2],baz=56
-    |      |      |
-   [1]     42    [3]
-
--i foo/bar//x=1 // Double slash indicates start of generator overrides
-== -i foo/bar -s foo/bar//x=1
-
--s foo/bar//x=1
-
-foo=42(bar=43(baz=44))
-foo{=42&=43(foo=42),}
-
-
-
-foo#1
-foo#1..2
-foo-#1
-foo-#1..2
-foo-=42
-foo+=42 // Adds to a set of skipped values. Not cancelable by -= or anything else, trying to do so will error -= as unused.
-
-
-// Only specific indices:
-foo{=42,#4..5,-#1..2}
-foo=1..10,-5,{42,43}
-foo#1..
-foo#..3
-foo#.. // Only all.
-
-
-foo=5 // Set value
-foo+=5 // Add value // = and += conflict with each other
-
-foo?#4 // Check index
-foo?-#4 // Check not index
-foo?=42 // Check value
-foo?-=42 // Check value
-
-foo#1,bar=2,baz#3..5
-foo
-foo+=2 // not combinable with = nor #
-foo{#1,=2}
-foo={1,2}
-foo#{1,3-5,7}
-foo{#{1,3..5,7},=42}
-
-foo=42
-foo={42,43,44}
-foo[1,3..5,10]
-foo[1,3..5,10],=42
-foo[1,3..5,10],={42,43,44}
-// ={ is always a list, if your value starts with {, use double braces for a single-element list
-
-Running tests...
-    │  ● foo/
-1/2 │  ·   ● bar
-    │ 1 │  ·   ● x[1] = 42
-    │   │  ·   ·   ● y[1] = 42
-    │ 2 │  ·   ·   ● y[2] = 42
-    │ 3 [1] │  ● x[2]
-    │       │  ·   ● z[1]
-    │ 4 [2] │  ·   ● z[2]
-
-
 bool fof()
 {
     TA_CONTEXT("Hello {}", []{std::cout << "A\n"; return 42;}());
@@ -136,7 +72,7 @@ bool fof()
 
 TA_TEST(foo/test)
 {
-    (void)TA_GENERATE(foo, {1,2,3});
+    (void)TA_GENERATE(foo, {std::string{"fooooooooooooooooooooooooooooooooooooooooooooooooooo"}});
     (void)TA_GENERATE(bar, {4,5,6});
     TA_CHECK(false);
 }
@@ -145,9 +81,6 @@ int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
-
-
-// Roundtrip check when printing a reproduction string.
 
 // Report how many repetitions per test failed/passed/total.
 // Different global summary style: (3 columns? tests, repetitions(?), asserts)
@@ -381,6 +314,11 @@ TA_CHECK:
     Summary after all repetitions
         Check that we're not printing more than N repetitions.
     Overall try two scenarios: failing last repetition and failing some other ones. Make sure everything prints sanely.
+
+    On test failure, print the generator summary after the test name, to simplify reproduction.
+        If the roundtrip passes AND the string is short (<= 20 chars, since that's max for [u]uint64_t), THEN printed as `=...`.
+        Otherwise if the value doesn't come from `=...` flag, THEN print the index `#...`.
+        Otherwise the whole summary is replaced with `...`.
 
     Overriding values:
         =

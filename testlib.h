@@ -2229,7 +2229,8 @@ namespace ta_test
             // Whether `string_conv::ToString()` works for this generated type.
             [[nodiscard]] virtual bool ValueConvertibleToString() const = 0;
             // Converts the current `GetValue()` to a string, or returns an empty string if `ValueConvertibleToString()` is false.
-            [[nodiscard]] virtual std::string ValueToString() const = 0;
+            // Adding `noexcept` here for general sanity.
+            [[nodiscard]] virtual std::string ValueToString() const noexcept = 0;
 
             // Whether this value is custom (as in from `--generate ...gen=value`), as opposed to being naturally generated.
             [[nodiscard]] bool IsCustomValue() const {return this_value_is_custom;}
@@ -2271,14 +2272,16 @@ namespace ta_test
             // Advances `string` to the next unused character, or to the failure position on error.
             // If `ValueConvertibleFromString() == false`, will always return an error.
             // On failure, can corrupt the current object. You should probably abort everything in that case.
-            [[nodiscard]] virtual std::string ReplaceValueFromString(const char *&string) = 0;
+            // Adding `noexcept` here for general sanity.
+            [[nodiscard]] virtual std::string ReplaceValueFromString(const char *&string) noexcept = 0;
 
             // Returns true if the type has overloaded `==` and `ValueConvertibleFromString() == true`.
             [[nodiscard]] virtual bool ValueEqualityComparableToString() const = 0;
             // Parses the value from a string, then compares it with the current value using `==`, writing the result to `equal`.
             // Returns the parsing error if any. Also returns an error if `ValueEqualityComparableToString()` is false.
             // Writes `equal = false` on any failure, including if the generator holds no value.
-            [[nodiscard]] virtual std::string ValueEqualsToString(const char *&string, bool &equal) const = 0;
+            // Adding `noexcept` here for general sanity.
+            [[nodiscard]] virtual std::string ValueEqualsToString(const char *&string, bool &equal) const noexcept = 0;
 
           protected:
             // `Generate()` updates this to indicate whether more values will follow.
@@ -2367,7 +2370,7 @@ namespace ta_test
                 return string_conv::SupportsToString<ReturnType>;
             }
 
-            [[nodiscard]] std::string ValueToString() const override final
+            [[nodiscard]] std::string ValueToString() const noexcept override final
             {
                 if constexpr (string_conv::SupportsToString<ReturnType>)
                     return string_conv::ToString(GetValue());
@@ -2400,7 +2403,7 @@ namespace ta_test
                 return supports_from_string;
             }
 
-            [[nodiscard]] std::string ReplaceValueFromString(const char *&string) override final
+            [[nodiscard]] std::string ReplaceValueFromString(const char *&string) noexcept override final
             {
                 if constexpr (supports_from_string)
                 {
@@ -2440,7 +2443,7 @@ namespace ta_test
                 return supports_from_string_and_equality;
             }
 
-            [[nodiscard]] virtual std::string ValueEqualsToString(const char *&string, bool &equal) const override
+            [[nodiscard]] virtual std::string ValueEqualsToString(const char *&string, bool &equal) const noexcept override
             {
                 equal = false;
                 if constexpr (supports_from_string_and_equality)
@@ -5077,6 +5080,11 @@ namespace ta_test
         // Prints the test names as they're being run.
         struct ProgressPrinter : BasicPrintingModule
         {
+            // When printing a generator summary for a failed test, how many characters max will be printed per generator value.
+            // If this limit is exceeded (of if the type can't be serialized), the `#` index is printed instead.
+            // Or, if it's exceeded with custom values (that have no index), we don't print anything at all.
+            std::size_t max_generator_summary_value_length = 20; // 20 characters is enough to print 2^64, or 2^63 with sign.
+
             // This goes right before each test/group name.
             std::string chars_test_prefix;
             // This is used when reentering a group/test after a failed test.
@@ -5218,6 +5226,8 @@ namespace ta_test
             output::TextStyle style_failed_name = {.color = output::TextColor::light_yellow, .bold = true};
             // The name of a group of a failed test, printed when the test fails.
             output::TextStyle style_failed_group_name = {.color = output::TextColor::light_yellow};
+            // The generator summary for a failed test.
+            output::TextStyle style_failed_generator_summary = {.color = output::TextColor::dark_yellow};
             // The style for a horizontal line that's printed after a test failure message, before any details.
             output::TextStyle style_test_failed_separator = {.color = output::TextColor::dark_red};
             // This line is printed after all details on the test failure.
@@ -5360,6 +5370,10 @@ namespace ta_test
             // `repeating_info == true` means that we're printing this not because a new value got generated,
             // but because we're providing the context again after an error.
             CFG_TA_API void PrintGeneratorInfo(output::Terminal::StyleGuard &cur_style, const RunSingleTestProgress &test, const BasicGenerator &generator, bool repeating_info);
+
+            // Returns a string describing the current generators, that's suitable for passing to `--generate` (after `test//`).
+            // Returns an empty string if no generators are active.
+            [[nodiscard]] CFG_TA_API std::string MakeGeneratorSummary(const RunSingleTestProgress &test) const;
 
           public:
             CFG_TA_API ProgressPrinter();

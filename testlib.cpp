@@ -2984,6 +2984,64 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(output::Terminal::Sty
     terminal.Print("\n");
 }
 
+std::string ta_test::modules::ProgressPrinter::MakeGeneratorSummary(const RunSingleTestProgress &test) const
+{
+    std::string ret;
+
+    for (std::size_t i = 0; i < test.generator_index; i++)
+    {
+        const BasicGenerator &gen = *test.generator_stack[i];
+
+        // Print the value as a string.
+        if (gen.ValueConvertibleToString() && gen.ValueConvertibleFromString())
+        {
+            std::string value = gen.ValueToString();
+
+            if (value.size() <= max_generator_summary_value_length)
+            {
+                // Check roundtrip string conversion.
+                bool roundtrip_ok = false;
+                {
+                    const char *string = value.c_str();
+                    std::string error = gen.ValueEqualsToString(string, roundtrip_ok);
+                    if (!error.empty() || string != value.data() + value.size())
+                        roundtrip_ok = false;
+                }
+
+                if (roundtrip_ok)
+                {
+                    if (!ret.empty())
+                        ret += ',';
+
+                    ret += gen.GetName();
+                    ret += '=';
+                    ret += value;
+                    continue;
+                }
+            }
+        }
+
+        // Print the value index.
+        if (!gen.IsCustomValue())
+        {
+            if (!ret.empty())
+                ret += ',';
+
+            ret += gen.GetName();
+            ret += '#';
+            ret += std::to_string(gen.NumGeneratedValues());
+            continue;
+        }
+
+        { // Fall back to a stub.
+            ret = "...";
+            return ret;
+        }
+    }
+
+    return ret;
+}
+
 ta_test::modules::ProgressPrinter::ProgressPrinter()
 {
     EnableUnicode(true);
@@ -3351,6 +3409,7 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
     // Avoid printing the diagnoal separator on the next progress line. It's unnecessary after a bulky failure message.
     state.per_test.last_repetition_counters_width = std::size_t(-1);
 
+    // Find group and test name.
     std::string_view group;
     std::string_view name = data.test->Name();
     auto sep = name.find_last_of('/');
@@ -3360,8 +3419,15 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
         name = name.substr(sep + 1);
     }
 
+    std::string generator_summary = MakeGeneratorSummary(data);
+
     std::size_t separator_segment_width = text::uni::CountFirstBytes(chars_test_failed_separator);
-    std::size_t separator_needed_width = separator_line_width - text::uni::CountFirstBytes(chars_test_failed) - data.test->Name().size() - 1/*space before separator*/;
+    std::size_t separator_needed_width =
+        separator_line_width
+        - text::uni::CountFirstBytes(chars_test_failed)
+        - data.test->Name().size()
+        - generator_summary.size() - 2 * !generator_summary.empty()
+        - 1/*space before separator*/;
     std::string separator;
     for (std::size_t i = 0; i + separator_segment_width - 1 < separator_needed_width; i += separator_segment_width)
         separator += chars_test_failed_separator;
@@ -3369,7 +3435,7 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
     auto cur_style = terminal.MakeStyleGuard();
 
     // The test failure message, and a separator after that.
-    terminal.Print(cur_style, "\n{}{}:\n{}{}{}{}{}{} {}{}\n",
+    terminal.Print(cur_style, "\n{}{}:\n{}{}{}{}{}{}{}{}{} {}{}\n",
         common_data.style_path,
         common_data.LocationToString(data.test->Location()),
         common_data.style_error,
@@ -3378,6 +3444,9 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
         group,
         style_failed_name,
         name,
+        style_failed_generator_summary,
+        !generator_summary.empty() ? "//" : "",
+        generator_summary,
         style_test_failed_separator,
         separator
     );
