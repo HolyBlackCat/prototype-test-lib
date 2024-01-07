@@ -1345,7 +1345,7 @@ void ta_test::Runner::SetDefaultModules()
     // Those are ordered in a certain way to print the `--help` page in the nice order: [
     modules.push_back(MakeModule<modules::HelpPrinter>());
     modules.push_back(MakeModule<modules::TestSelector>());
-    modules.push_back(MakeModule<modules::GeneratorOverridder>());
+    modules.push_back(MakeModule<modules::GeneratorOverrider>());
     modules.push_back(MakeModule<modules::PrintingConfigurator>());
     // ]
     modules.push_back(MakeModule<modules::ProgressPrinter>());
@@ -1741,7 +1741,8 @@ ta_test::modules::TestSelector::TestSelector()
     : flag_include("include", 'i',
         "Enable tests matching a pattern. The pattern must either match the whole test name, or its prefix up to and possibly including a slash. "
         "The pattern can be a regex. This flag can be repeated multiple times, and the order with respect to `--exclude` matters. "
-        "If the first time this flag appears is before `--exclude`, all tests start disabled by default.",
+        "If the first time this flag appears is before `--exclude`, all tests start disabled by default. "
+        "If the pattern contains `//`, then `--include A//B` acts as a shorthand for `--include A --generate A//B`.",
         GetFlagCallback(false)
     ),
     flag_exclude("exclude", 'e',
@@ -1781,8 +1782,23 @@ ta_test::flags::StringFlag::Callback ta_test::modules::TestSelector::GetFlagCall
 {
     return [exclude](const Runner &runner, BasicModule &this_module, std::string_view pattern)
     {
-        (void)runner;
         TestSelector &self = dynamic_cast<TestSelector &>(this_module); // This cast should never fail.
+
+        // Check for `//` in the pattern.
+        if (auto sep = pattern.find("//"); sep != std::string::npos)
+        {
+            if (exclude)
+                HardError("Separator `//` can appear only in `--include`, not in `--exclude`.");
+
+            bool found = runner.FindModule<GeneratorOverrider>([&](GeneratorOverrider &overrider)
+            {
+                overrider.flag_override.callback(runner, overrider, pattern);
+                pattern = pattern.substr(0, sep);
+                return true;
+            });
+            if (!found)
+                HardError("There's no `GeneratorOverrider` module, can't process `//` in `--include`.");
+        }
 
         Pattern new_pattern{
             .exclude = exclude,
@@ -1811,9 +1827,9 @@ void ta_test::modules::TestSelector::OnPreRunTests(const RunTestsInfo &data)
         std::exit(int(ExitCode::no_test_name_match));
 }
 
-// --- modules::GeneratorOverridder ---
+// --- modules::GeneratorOverrider ---
 
-std::string_view ta_test::modules::GeneratorOverridder::Entry::OriginalArgument() const
+std::string_view ta_test::modules::GeneratorOverrider::Entry::OriginalArgument() const
 {
     if (original_argument_storage.empty())
         return {};
@@ -1821,7 +1837,7 @@ std::string_view ta_test::modules::GeneratorOverridder::Entry::OriginalArgument(
         return {original_argument_storage.data(), original_argument_storage.size() - 1};
 }
 
-ta_test::modules::GeneratorOverridder::GeneratorOverridder()
+ta_test::modules::GeneratorOverrider::GeneratorOverrider()
     : flag_override("generate", 'g',
         "Changes the behavior of `TA_GENERATE(...)`. The argument is a test name regex (as in `--include`), "
         "followed by `//`, then a comma-separated list of generator overrides, such as `name=value`. See `--help-generate` for a detailed explanation.",
@@ -1829,7 +1845,7 @@ ta_test::modules::GeneratorOverridder::GeneratorOverridder()
         {
             (void)runner;
 
-            auto &self = dynamic_cast<GeneratorOverridder &>(this_module);
+            auto &self = dynamic_cast<GeneratorOverrider &>(this_module);
 
             Entry &new_entry = self.entries.emplace_back();
 
@@ -1851,7 +1867,7 @@ ta_test::modules::GeneratorOverridder::GeneratorOverridder()
                 );
             }
 
-            new_entry.test_regex = std::regex(input.begin(), input.begin() + sep_pos);
+            new_entry.test_regex = std::regex(input.begin(), input.begin() + sep_pos, std::regex_constants::ECMAScript/*the default syntax*/ | std::regex_constants::optimize);
 
 
             const char *string = new_entry.original_argument_storage.data() + sep_pos + separator.size();
@@ -1868,7 +1884,7 @@ ta_test::modules::GeneratorOverridder::GeneratorOverridder()
         {
             (void)runner;
             (void)this_module;
-            dynamic_cast<GeneratorOverridder &>(this_module).terminal.Print("{}", &R"(
+            dynamic_cast<GeneratorOverrider &>(this_module).terminal.Print("{}", &R"(
 The argument of `--generate` is a name regex (as in `--include`), followed by `//`, then a comma-separated list of generator overrides.
 Each test can be affected by at most one such flag (the last matching one).
 Some examples: (here `x`,`y` are generator names as passed to `TA_GENERATE(name, ...)`)
@@ -1906,18 +1922,18 @@ Some notes:
     )
 {}
 
-std::vector<ta_test::flags::BasicFlag *> ta_test::modules::GeneratorOverridder::GetFlags()
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::GeneratorOverrider::GetFlags()
 {
     return {&flag_override, &flag_local_help};
 }
 
-void ta_test::modules::GeneratorOverridder::OnPreRunTests(const RunTestsInfo &data)
+void ta_test::modules::GeneratorOverrider::OnPreRunTests(const RunTestsInfo &data)
 {
     (void)data;
     test_state = {};
 }
 
-void ta_test::modules::GeneratorOverridder::OnPostRunSingleTest(const RunSingleTestResults &data)
+void ta_test::modules::GeneratorOverrider::OnPostRunSingleTest(const RunSingleTestResults &data)
 {
     if (data.is_last_generator_repetition && test_state)
     {
@@ -1925,7 +1941,7 @@ void ta_test::modules::GeneratorOverridder::OnPostRunSingleTest(const RunSingleT
     }
 }
 
-bool ta_test::modules::GeneratorOverridder::OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator)
+bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator)
 {
     // If we don't have an active `--generate` flag, try to find one.
     if (!test_state)
@@ -1960,7 +1976,7 @@ bool ta_test::modules::GeneratorOverridder::OnRegisterGeneratorOverride(const Ru
     return false;
 }
 
-bool ta_test::modules::GeneratorOverridder::OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator)
+bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator)
 {
     if (!test_state)
         HardError("A generator override is requested, but we don't have an active state.");
@@ -2149,7 +2165,7 @@ bool ta_test::modules::GeneratorOverridder::OnOverrideGenerator(const RunSingleT
     }
 }
 
-void ta_test::modules::GeneratorOverridder::OnPrePruneLastGenerator(const RunSingleTestProgress &test)
+void ta_test::modules::GeneratorOverrider::OnPrePruneLastGenerator(const RunSingleTestProgress &test)
 {
     if (test.generator_stack.back()->OverridingModule() == this)
     {
@@ -2164,7 +2180,7 @@ void ta_test::modules::GeneratorOverridder::OnPrePruneLastGenerator(const RunSin
     }
 }
 
-std::string ta_test::modules::GeneratorOverridder::ParseGeneratorOverrideSeq(GeneratorOverrideSeq &target, const char *&string, bool is_nested)
+std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(GeneratorOverrideSeq &target, const char *&string, bool is_nested)
 {
     bool first_generator = true;
 
@@ -2496,7 +2512,7 @@ std::string ta_test::modules::GeneratorOverridder::ParseGeneratorOverrideSeq(Gen
     return "";
 }
 
-void ta_test::modules::GeneratorOverridder::HardErrorInFlag(std::string_view message, const Entry &entry, FlagErrorDetails details, HardErrorKind kind)
+void ta_test::modules::GeneratorOverrider::HardErrorInFlag(std::string_view message, const Entry &entry, FlagErrorDetails details, HardErrorKind kind)
 {
     std::string markers;
     for (const FlagErrorDetails::Elem &elem : details.elems)

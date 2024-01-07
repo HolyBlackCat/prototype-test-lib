@@ -4888,7 +4888,7 @@ namespace ta_test
         };
 
         // Responds to `--generate` to override the generated values.
-        struct GeneratorOverridder : BasicPrintingModule
+        struct GeneratorOverrider : BasicPrintingModule
         {
             // A sequence of generator overrides coming from a `--generate`.
             struct GeneratorOverrideSeq
@@ -4997,9 +4997,9 @@ namespace ta_test
             };
             std::optional<TestState> test_state;
 
-            CFG_TA_API GeneratorOverridder();
+            CFG_TA_API GeneratorOverrider();
 
-            CFG_TA_API std::vector<flags::BasicFlag *> GetFlags() override;
+            std::vector<flags::BasicFlag *> GetFlags() override;
 
             void OnPreRunTests(const RunTestsInfo &data) override;
             void OnPostRunSingleTest(const RunSingleTestResults &data) override;

@@ -3,9 +3,7 @@
 
 #include "testlib.h"
 
-// Figure out how to support (...)
-
-// Allow --include to introduce a generator override
+// Check for unused parts of -g
 
 #if 0
 foo=42,bar[2],baz=56
