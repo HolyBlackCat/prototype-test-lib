@@ -2485,6 +2485,10 @@ namespace ta_test
         };
         struct RunSingleTestProgress : RunSingleTestInfo
         {
+            // Whether the current test has failed.
+            // When generators are involved, this refers only to the current repetition.
+            bool failed = false;
+
             // This is guaranteed to not contain any lazy log statements.
             std::vector<context::LogEntry> unscoped_log;
 
@@ -2498,10 +2502,6 @@ namespace ta_test
         };
         struct RunSingleTestResults : RunSingleTestProgress
         {
-            // Whether the current test has failed.
-            // When generators are involved, this refers only to the current repetition.
-            bool failed = false;
-
             // True if we're about to leave the test for the last time.
             // This should be equivalent to `generator_stack.empty()`. This is set right before leaving the test.
             bool is_last_generator_repetition = false;
@@ -2509,7 +2509,10 @@ namespace ta_test
         // This is called before every single test runs.
         virtual void OnPreRunSingleTest(const RunSingleTestInfo &data) {(void)data;}
         // This is called after every single test runs.
+        // The generators can be clobbered at this point.
         virtual void OnPostRunSingleTest(const RunSingleTestResults &data) {(void)data;}
+        // This is called slightly earlier than `OnPostRunSingleTest()`. It sees the generator values, but doesn't know if it's the last repetition or not.
+        virtual void OnPostRunSingleTest_BeforePruningGenerators(const RunSingleTestProgress &data) {(void)data;}
 
         struct GeneratorCallInfo
         {
@@ -2710,6 +2713,7 @@ namespace ta_test
             x(OnPostRunTests) \
             x(OnPreRunSingleTest) \
             x(OnPostRunSingleTest) \
+            x(OnPostRunSingleTest_BeforePruningGenerators) \
             x(OnPostGenerate) \
             x(OnRegisterGeneratorOverride) \
             /* `OnOverrideGenerator` isn't needed */ \
@@ -4895,19 +4899,28 @@ namespace ta_test
             {
                 struct Entry
                 {
+                    mutable bool was_used = false;
+
                     std::string_view generator_name;
+                    // How many characters this flag occupies starting from `generator_name.data()`.
+                    std::size_t total_num_characters = 0;
 
                     // If false, don't generate anything by default unless explicitly enabled.
                     bool enable_values_by_default = true;
 
                     struct CustomValue
                     {
+                        mutable bool was_used = false;
+
                         std::string_view value;
 
                         std::shared_ptr<GeneratorOverrideSeq> custom_generator_seq;
 
                         // Next rule index in `rules` (or its size if no next rule).
                         std::size_t next_rule = 0;
+
+                        // This points to the `=` before the value.
+                        const char *operator_character = nullptr;
                     };
 
                     // Custom values provided by the user, using the `=...`syntax.
@@ -4918,11 +4931,21 @@ namespace ta_test
                     // This corresponds to `#...` and `-#...` syntax.
                     struct RuleIndex
                     {
+                        // Max index that was affected by this rule (plus one). We use this to detect upper bounds being too large.
+                        mutable std::size_t max_used_end = 0;
+
                         bool add = true;
 
                         // 0-based, half-open range.
                         std::size_t begin = 0;
                         std::size_t end = std::size_t(-1);
+
+                        // This is where `end` begins in the flag, if it's specified at all.
+                        const char *end_string_location = nullptr;
+
+                        // How many characters this flag occupies starting from `operator_character` of the enclosing rule.
+                        // Only index rules have this, because in value rules we can look at the end of the value string.
+                        std::size_t total_num_characters = 0;
 
                         // Need default constructor here to make `std::variant` (`RuleVar`) understand that it's default-constructible.
                         constexpr RuleIndex() {}
@@ -4940,10 +4963,15 @@ namespace ta_test
 
                     struct Rule
                     {
+                        mutable bool was_used = false;
+
                         RuleVar var;
 
                         // If not null, this replaces the rest of the program for those values.
                         std::shared_ptr<GeneratorOverrideSeq> custom_generator_seq;
+
+                        // This points to the symbol before the value (one of: `-=`, `#`, `-#`).
+                        const char *operator_character = nullptr;
                     };
 
                     std::vector<Rule> rules;
@@ -4954,6 +4982,8 @@ namespace ta_test
 
             struct Entry
             {
+                mutable bool was_used = false;
+
                 std::regex test_regex;
 
                 // Don't read from this, call `OriginalArgument()` instead.
@@ -5002,6 +5032,7 @@ namespace ta_test
             std::vector<flags::BasicFlag *> GetFlags() override;
 
             void OnPreRunTests(const RunTestsInfo &data) override;
+            void OnPostRunTests(const RunTestsResults &data) override;
             void OnPostRunSingleTest(const RunSingleTestResults &data) override;
             bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) override;
             bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) override;
@@ -5226,13 +5257,14 @@ namespace ta_test
                     {
                         std::string name;
                         std::size_t index = 0; // 1-based
+                        bool is_custom_value = false;
                         std::optional<std::string> value;
                         SourceLocWithCounter location;
 
                         // This should be unique enough.
                         [[nodiscard]] friend bool operator==(const FailedGenerator &a, const FailedGenerator &b)
                         {
-                            return a.location == b.location && a.index == b.index;
+                            return a.location == b.location && a.index == b.index && a.is_custom_value == b.is_custom_value;
                         }
 
                         // Could add more information here, but don't currently need it.
@@ -5336,6 +5368,7 @@ namespace ta_test
             void OnPreRunTests(const RunTestsInfo &data) override;
             void OnPostRunTests(const RunTestsResults &data) override;
             void OnPreRunSingleTest(const RunSingleTestInfo &data) override;
+            void OnPostRunSingleTest_BeforePruningGenerators(const RunSingleTestProgress &data) override;
             void OnPostRunSingleTest(const RunSingleTestResults &data) override;
             void OnPostGenerate(const GeneratorCallInfo &data) override;
             void OnPreFailTest(const RunSingleTestProgress &data) override;

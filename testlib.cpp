@@ -1577,6 +1577,8 @@ int ta_test::Runner::Run()
                 ), HardErrorKind::user);
             }
 
+            module_lists.Call<&BasicModule::OnPostRunSingleTest_BeforePruningGenerators>(guard.state);
+
             // Prune finished generators, and advance overridden generators.
             // Overridden generators are advanced here rather than in the test body, because we don't know which value is the last one beforehand,
             //   so we need to actually generate the values to decide if we should reenter the test or not.
@@ -1933,6 +1935,123 @@ void ta_test::modules::GeneratorOverrider::OnPreRunTests(const RunTestsInfo &dat
     test_state = {};
 }
 
+void ta_test::modules::GeneratorOverrider::OnPostRunTests(const RunTestsResults &data)
+{
+    (void)data;
+
+    for (const Entry &entry : entries)
+    {
+        // Whole flag is unused?
+        if (!entry.was_used)
+            HardErrorInFlag("This regex didn't match any tests.", entry, FlagErrorDetails{}, HardErrorKind::user);
+
+        // Individual generators or rules are unused?
+        FlagErrorDetails errors_unused;
+
+        // Those are index ranges with upper bounds being too high.
+        FlagErrorDetails errors_high_upper_bounds;
+        // The first range in `errors_high_upper_bounds` should only go up to this number.
+        // We only show this for the first range, for simplicity.
+        std::size_t first_upper_bound = 0;
+
+        auto lambda = [&](auto &lambda, const GeneratorOverrideSeq &seq) -> void
+        {
+            for (const GeneratorOverrideSeq::Entry &override_entry : seq.entries)
+            {
+                if (!override_entry.was_used)
+                {
+                    // Whole entry is unused.
+                    errors_unused.elems.push_back({.marker = std::string(override_entry.total_num_characters, '~'), .location = override_entry.generator_name.data()});
+                }
+                else
+                {
+                    { // Custom values.
+                        const GeneratorOverrideSeq *last_seq = nullptr;
+
+                        for (const GeneratorOverrideSeq::Entry::CustomValue &value : override_entry.custom_values)
+                        {
+                            if (!value.was_used)
+                            {
+                                errors_unused.elems.push_back({
+                                    .marker = std::string(std::size_t(value.value.data() + value.value.size() - value.operator_character), '~'),
+                                    .location = value.operator_character,
+                                });
+                            }
+
+                            if (value.custom_generator_seq && value.custom_generator_seq.get() != last_seq)
+                            {
+                                lambda(lambda, *value.custom_generator_seq);
+                                last_seq = value.custom_generator_seq.get();
+                            }
+                        }
+                    }
+
+                    { // Other rules.
+                        const GeneratorOverrideSeq *last_seq = nullptr;
+
+                        for (const GeneratorOverrideSeq::Entry::Rule &basic_rule : override_entry.rules)
+                        {
+                            if (!basic_rule.was_used)
+                            {
+                                std::size_t num_chars = 0;
+
+                                std::visit(meta::Overload{
+                                    [&](const GeneratorOverrideSeq::Entry::RuleRemoveValue &rule)
+                                    {
+                                        num_chars = std::size_t(rule.value.data() + rule.value.size() - basic_rule.operator_character);
+                                    },
+                                    [&](const GeneratorOverrideSeq::Entry::RuleIndex &rule)
+                                    {
+                                        num_chars = rule.total_num_characters;
+                                    },
+                                }, basic_rule.var);
+
+                                errors_unused.elems.push_back({
+                                    .marker = std::string(num_chars, '~'),
+                                    .location = basic_rule.operator_character,
+                                });
+                            }
+                            else
+                            {
+                                // Check the range in the index rules.
+                                if (auto *rule_index = std::get_if<GeneratorOverrideSeq::Entry::RuleIndex>(&basic_rule.var))
+                                {
+                                    if (rule_index->end != std::size_t(-1) && rule_index->max_used_end < rule_index->end)
+                                    {
+                                        if (errors_high_upper_bounds.elems.empty())
+                                            first_upper_bound = rule_index->max_used_end;
+                                        errors_high_upper_bounds.elems.push_back({.marker = "^", .location = rule_index->end_string_location});
+                                    }
+                                }
+                            }
+
+                            if (basic_rule.custom_generator_seq && basic_rule.custom_generator_seq.get() != last_seq)
+                            {
+                                lambda(lambda, *basic_rule.custom_generator_seq);
+                                last_seq = basic_rule.custom_generator_seq.get();
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        lambda(lambda, entry.seq);
+
+        if (!errors_unused.elems.empty())
+            HardErrorInFlag("Those parts are unused.", entry, errors_unused, HardErrorKind::user);
+
+        if (!errors_high_upper_bounds.elems.empty())
+        {
+            HardErrorInFlag(
+                errors_high_upper_bounds.elems.size() == 1
+                ? CFG_TA_FMT_NAMESPACE::format("This upper bound is too large, the max index was {}.", first_upper_bound)
+                : CFG_TA_FMT_NAMESPACE::format("Those upper bounds are too large, e.g. max index for the first one was {}.", first_upper_bound)
+                ,
+                entry, errors_high_upper_bounds, HardErrorKind::user);
+        }
+    }
+}
+
 void ta_test::modules::GeneratorOverrider::OnPostRunSingleTest(const RunSingleTestResults &data)
 {
     if (data.is_last_generator_repetition && test_state)
@@ -1952,6 +2071,7 @@ bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const Run
 
             if (text::TestNameMatchesRegex(test.test->Name(), entry.test_regex))
             {
+                entry.was_used = true;
                 test_state.emplace();
                 test_state->entry = &entry;
                 test_state->remaining_program = entry.seq.entries;
@@ -1963,10 +2083,11 @@ bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const Run
     // If we do have an active `--generate` flag, use it.
     if (test_state && !test_state->remaining_program.empty())
     {
-        const GeneratorOverrideSeq::Entry &entry = test_state->remaining_program.front();
+        const GeneratorOverrideSeq::Entry &override_entry = test_state->remaining_program.front();
 
-        if (entry.generator_name == generator.GetName())
+        if (override_entry.generator_name == generator.GetName())
         {
+            override_entry.was_used = true;
             test_state->elems.push_back({.generator_index = test.generator_index, .remaining_program = test_state->remaining_program});
 
             return true;
@@ -2035,6 +2156,8 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
         {
             const auto &this_value = command.custom_values[this_elem.num_used_custom_values];
 
+            this_value.was_used = true;
+
             if (!generator.ValueConvertibleFromString())
             {
                 HardErrorInFlag(
@@ -2100,7 +2223,7 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
 
         for (; rule_index < command.rules.size(); rule_index++)
         {
-            const GeneratorOverrideSeq::Entry::Rule &generic_rule = command.rules[rule_index];
+            const GeneratorOverrideSeq::Entry::Rule &basic_rule = command.rules[rule_index];
 
             std::visit(meta::Overload{
                 [&](const GeneratorOverrideSeq::Entry::RuleIndex &rule)
@@ -2110,15 +2233,39 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
 
                     if (generator.NumGeneratedValues() >= rule.begin + 1 && generator.NumGeneratedValues() - 1 < rule.end)
                     {
-                        value_passes = rule.add;
+                        if (value_passes != rule.add)
+                        {
+                            value_passes = rule.add;
+
+                            basic_rule.was_used = true;
+
+                            // Note, must use `max()` here. Even though the indices are monotonous in each test, the flag can be shared by multiple tests.
+                            rule.max_used_end = std::max(rule.max_used_end, generator.NumGeneratedValues());
+                        }
 
                         // Replace the remaining program.
                         if (rule.add)
                         {
-                            if (generic_rule.custom_generator_seq)
-                                test_state->remaining_program = generic_rule.custom_generator_seq->entries;
+                            if (basic_rule.custom_generator_seq)
+                            {
+                                if (test_state->remaining_program.data() != basic_rule.custom_generator_seq->entries.data() ||
+                                    test_state->remaining_program.size() != basic_rule.custom_generator_seq->entries.size()
+                                )
+                                {
+                                    basic_rule.was_used = true;
+                                    test_state->remaining_program = basic_rule.custom_generator_seq->entries;
+                                }
+                            }
                             else
-                                test_state->remaining_program = default_remaining_program;
+                            {
+                                if (test_state->remaining_program.data() != default_remaining_program.data() ||
+                                    test_state->remaining_program.size() != default_remaining_program.size()
+                                )
+                                {
+                                    basic_rule.was_used = true;
+                                    test_state->remaining_program = default_remaining_program;
+                                }
+                            }
                         }
                     }
                 },
@@ -2152,10 +2299,13 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
                     std::string error = generator.ValueEqualsToString(string, equal);
                     CheckValueParsingResult(error, string, rule.value.data() + rule.value.size());
 
-                    if (equal)
+                    if (equal && value_passes)
+                    {
+                        basic_rule.was_used = true;
                         value_passes = false;
+                    }
                 },
-            }, generic_rule.var);
+            }, basic_rule.var);
         }
 
         if (value_passes)
@@ -2326,11 +2476,15 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
             {
                 BeginPositiveRule();
 
+                GeneratorOverrideSeq::Entry::CustomValue new_value;
+                new_value.operator_character = string;
+                new_value.next_rule = new_entry.rules.size();
+
                 string++;
 
                 const char *value_begin = string;
                 text::chars::TryFindUnprotectedSeparator(string, separators);
-                GeneratorOverrideSeq::Entry::CustomValue new_value{.value = TrimValue({value_begin, string}), .next_rule = new_entry.rules.size()};
+                new_value.value = TrimValue({value_begin, string});
                 if (new_value.value.empty())
                     return "Expected a value.";
 
@@ -2345,19 +2499,20 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
                 if (!error.empty())
                     return error;
 
+                GeneratorOverrideSeq::Entry::Rule new_rule;
+                new_rule.operator_character = string;
+
                 string += 2;
 
                 const char *value_begin = string;
                 text::chars::TryFindUnprotectedSeparator(string, separators);
 
-                GeneratorOverrideSeq::Entry::RuleVar new_rule;
-
-                auto &value = new_rule.emplace<GeneratorOverrideSeq::Entry::RuleRemoveValue>().value;
+                auto &value = new_rule.var.emplace<GeneratorOverrideSeq::Entry::RuleRemoveValue>().value;
                 value = TrimValue({value_begin, string});
                 if (value.empty())
                     return "Expected a value.";
 
-                new_entry.rules.push_back({.var = std::move(new_rule)});
+                new_entry.rules.push_back(std::move(new_rule));
 
                 error = FinishNegativeRule();
                 if (!error.empty())
@@ -2367,6 +2522,8 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
             {
                 GeneratorOverrideSeq::Entry::Rule new_rule;
                 GeneratorOverrideSeq::Entry::RuleIndex &new_rule_index = new_rule.var.emplace<GeneratorOverrideSeq::Entry::RuleIndex>();
+
+                new_rule.operator_character = string;
 
                 new_rule_index.add = *string == '#';
 
@@ -2383,6 +2540,8 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
 
                     string += 2;
                 }
+
+                text::chars::SkipWhitespace(string);
 
                 if (*string != '.' && !text::chars::IsDigit(*string))
                     return "Expected an integer or `..`.";
@@ -2427,6 +2586,8 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
                     // Parse the second number (optional if there was no first number).
                     if (!have_first_number || text::chars::IsDigit(*string))
                     {
+                        new_rule_index.end_string_location = string;
+
                         std::string error = string_conv::FromStringTraits<decltype(new_rule_index.end)>{}(new_rule_index.end, string);
                         if (!error.empty())
                             return error;
@@ -2437,6 +2598,8 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
                             return "The second index must be greater or equal to the first one.";
                     }
                 }
+
+                new_rule_index.total_num_characters = std::size_t(string - new_rule.operator_character);
 
                 std::string error;
                 if (new_rule_index.add)
@@ -2506,6 +2669,11 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
                 return error;
         }
 
+        // Figure out the total generator length in characters.
+        new_entry.total_num_characters = std::size_t(string - new_entry.generator_name.data());
+        while (new_entry.total_num_characters > 0 && text::chars::IsWhitespace(new_entry.generator_name.data()[new_entry.total_num_characters-1]))
+            new_entry.total_num_characters--;
+
         target.entries.push_back(std::move(new_entry));
     }
 
@@ -2524,8 +2692,10 @@ void ta_test::modules::GeneratorOverrider::HardErrorInFlag(std::string_view mess
 
         std::copy(elem.marker.begin(), elem.marker.end(), markers.begin() + std::ptrdiff_t(offset));
     }
+    if (!details.elems.empty())
+        markers += '\n';
 
-    HardError(CFG_TA_FMT_NAMESPACE::format("In flag:\n--{} {}\n{}\n{}\n", flag_override.flag, entry.OriginalArgument(), markers, message), kind);
+    HardError(CFG_TA_FMT_NAMESPACE::format("In flag:\n--{} {}\n{}{}\n", flag_override.flag, entry.OriginalArgument(), markers, message), kind);
 }
 
 // --- modules::PrintingConfigurator ---
@@ -3004,6 +3174,27 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestIn
     });
 }
 
+void ta_test::modules::ProgressPrinter::OnPostRunSingleTest_BeforePruningGenerators(const RunSingleTestProgress &data)
+{
+    if (data.failed)
+    {
+        // Remember the failed generator stack.
+        std::vector<State::PerTest::FailedGenerator> failed_generator_stack;
+        failed_generator_stack.reserve(data.generator_stack.size());
+        for (const auto &gen : data.generator_stack)
+        {
+            failed_generator_stack.push_back({
+                .name = std::string(gen->GetName()),
+                .index = gen->IsCustomValue() ? gen->NumCustomValues() : gen->NumGeneratedValues(),
+                .is_custom_value = gen->IsCustomValue(),
+                .value = gen->ValueConvertibleToString() ? std::optional(gen->ValueToString()) : std::nullopt,
+                .location = gen->GetLocation(),
+            });
+        }
+        state.per_test.failed_generator_stacks.push_back(std::move(failed_generator_stack));
+    }
+}
+
 void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestResults &data)
 {
     auto cur_style = terminal.MakeStyleGuard();
@@ -3035,22 +3226,6 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
     }
 
     state.per_test.repetition_counter++;
-    if (data.failed)
-    {
-        // Remember the failed generator stack.
-        std::vector<State::PerTest::FailedGenerator> failed_generator_stack;
-        failed_generator_stack.reserve(data.generator_stack.size());
-        for (const auto &gen : data.generator_stack)
-        {
-            failed_generator_stack.push_back({
-                .name = std::string(gen->GetName()),
-                .index = gen->NumGeneratedValues(),
-                .value = gen->ValueConvertibleToString() ? std::optional(gen->ValueToString()) : std::nullopt,
-                .location = gen->GetLocation(),
-            });
-        }
-        state.per_test.failed_generator_stacks.push_back(std::move(failed_generator_stack));
-    }
 
     // Print failed repetitions summary.
     // Note the weird `!<..>.front().empty()` check. This avoid the message when there was only one repetition without any generators visited.
@@ -3100,14 +3275,15 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
                     terminal.Print(cur_style, "{}{}", style_indentation_guide, chars_indentation);
 
                 // Generator name and index.
-                terminal.Print(cur_style, "{}{}{}{}{}{}{}{}{}{}",
+                terminal.Print(cur_style, "{}{}{}{}{}{}{}{}{}{}{}",
                     style_generator_failed.prefix,
                     chars_test_prefix,
                     style_generator_failed.name,
                     elem.name,
                     style_generator_failed.index_brackets,
                     chars_generator_index_prefix,
-                    style_generator_failed.index,
+                    elem.is_custom_value ? style_generator_failed.index_custom : style_generator_failed.index,
+                    elem.is_custom_value ? chars_generator_custom_index_prefix : "",
                     elem.index,
                     style_generator_failed.index_brackets,
                     chars_generator_index_suffix

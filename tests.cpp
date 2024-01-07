@@ -3,8 +3,6 @@
 
 #include "testlib.h"
 
-// Check for unused parts of -g
-
 #if 0
 foo=42,bar[2],baz=56
     |      |      |
@@ -138,8 +136,9 @@ bool fof()
 
 TA_TEST(foo/test)
 {
-    (void)ta_test::string_conv::ToString(TA_GENERATE(foo, {std::vector<int>{}}));
-    (void)TA_GENERATE(bar, {1,2,3});
+    (void)TA_GENERATE(foo, {1,2,3});
+    (void)TA_GENERATE(bar, {4,5,6});
+    TA_CHECK(false);
 }
 
 int main(int argc, char **argv)
@@ -156,8 +155,6 @@ int main(int argc, char **argv)
 //     Passed:  42
 //     FAILED:  42
 
-// Overriding generator values?
-
 // Soft assertions?
 // sturct to hold a bool condition and the softness enum, use it as an assertion parameter (templated constructor to properly convert types to bool)
 
@@ -169,8 +166,6 @@ int main(int argc, char **argv)
 //     single function to check combined message
 //     or
 //     THIS: expand ForEach to allow "any" elem to be checked; expand context to allow pointing to element
-
-// Throw away excessive use of `size_t`, switch to `int` or `ptrdiff_t`?
 
 // Quiet flag: --no-progress
 // Failing a test should print the values of generators? Or not?
@@ -419,7 +414,7 @@ TA_CHECK:
         Removing all values = error
 
         As usual, try everything without spaces and with spaces everywhere
-            Except #a..b allows no whitespaces (which is good?)
+            Except no whitespaces between .. and numbers (which is good?)
 
         & before a negative rule
         & after a negative rule
@@ -479,6 +474,14 @@ TA_CHECK:
         But any unused thing in the flag is an error at the end of the program
             Rules are "used" when they match something, OR when they provide a (...), OR when they negate a previous ().
                 But if they negate a program that'a already zeroed, they are NOT used.
+        * Whole flag is unused?
+            * If not, for each generator:
+                * Whole generator is unused? Don't highlight (...) after a generator.
+                    * If not, individual rules are unused?
+                        DO highlight (...) after a rule.
+                        Don't highlight whitespace before and after a rule - check each rule type.
+                * Also check `(...)`, regardless of anything.
+
 
         Last matching positive rule provides the `(...)`.
             !!! If the last matching positive rule has no `(...)`, it undoes the previous ones.
