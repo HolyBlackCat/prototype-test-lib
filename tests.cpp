@@ -72,9 +72,13 @@ bool fof()
 
 TA_TEST(foo/test)
 {
-    (void)TA_GENERATE(foo, {std::string{"fooooooooooooooooooooooooooooooooooooooooooooooooooo"}});
-    (void)TA_GENERATE(bar, {4,5,6});
-    TA_CHECK(false);
+    (void)TA_GENERATE(a, {1,2,3});
+    (void)TA_GENERATE(b, {4,5,6});
+}
+
+TA_TEST(foo/test2)
+{
+    (void)TA_GENERATE(a, {4,5,6});
 }
 
 int main(int argc, char **argv)
@@ -120,6 +124,8 @@ int main(int argc, char **argv)
 
 // Check that paths are clickable in Visual Studio
 
+// Optimize the calls to the `BasicPrintingModule` with the module lists too.
+
 // Later:
 //     Somehow don't evaluate the message if the assertion passes? Perhaps change the syntax to `CHECK(cond, LOG("{}", 42))`, reusing one of the log macros?
 //         Same for the arguments passed to `Trace`?
@@ -146,10 +152,8 @@ int main(int argc, char **argv)
 
 // Unclear how:
 //     Draw a fat bracket while explaining each test failure?
-//     Print user messages from assertions that didn't execute to completion.
-//     Don't show the assertion user message the second time when printing the expression
-//     Optimize the calls to the `BasicPrintingModule` with the module lists too.
 //     `$(...)` could be useful to provide context, but what if the function returns void or non-printable type?
+//     -g messes up repetition counter a bit if a generator throws (while in the after-test generator update block)
 
 // Selling points:
 //     "DESIGNING A SUPERIOR UNIT TEST FRAMEWORK"
@@ -160,6 +164,7 @@ int main(int argc, char **argv)
 //         * Point out that you can't do proper lazyness with <<, because operands are still evaluated.
 //     * No comma weirdness
 //     * Clickthrough everywhere (i.e. file paths everywhere, that should be clickable in an IDE)
+//     * Tests in headers = bad practice, but we support it without code duplication, but still check if the test names clash (different source locations)
 
 
 /* Pending tests:
@@ -230,6 +235,8 @@ TA_TEST
         No foo/
         No foo//bar
         No other stuff: - .
+    Duplicate names in the same file = compile error
+    Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
     return type is void
@@ -290,6 +297,7 @@ TA_CHECK:
         No $
         Can't start with a digit.
     What if the generator throws? Advance the current generator, destroy the future ones?
+        What if the generator lambda constructor throws?
     Hard error when called outside of a test.
     The return type, as documented.
     The lambda shouldn't be evaluated at all (capturing might have side effects) when visited repeatedly.
@@ -429,6 +437,9 @@ TA_CHECK:
             * -g 'foo/bar//x{#1..(y=10),#5}' - same effect as above.
 
         Specifying an outright wrong generator name
+
+        Parallel overrides:
+            A=1,B=2 + A=3,C=4 === A=3, then {B=2,C=4}(in any order)
 
 --- TA_GENERATE
     Braced lists:

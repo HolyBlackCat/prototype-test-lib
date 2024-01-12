@@ -1081,7 +1081,7 @@ void ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
         catch (InterruptTestException)
         {
             // We don't want any additional errors here.
-            return;
+            throw;
         }
         catch (...)
         {
@@ -1557,9 +1557,6 @@ int ta_test::Runner::Run()
                 lambda();
             }
 
-            if (guard.state.failed)
-                any_repetition_failed = true;
-
             // Check for non-deterministic use of generators.
             // This is one of the two determinism checks, the second one is in generator's `Generate()` to make sure we're not visiting generators out of order.
             if (!guard.state.failed && guard.state.generator_index < guard.state.generator_stack.size())
@@ -1577,8 +1574,6 @@ int ta_test::Runner::Run()
                 ), HardErrorKind::user);
             }
 
-            module_lists.Call<&BasicModule::OnPostRunSingleTest_BeforePruningGenerators>(guard.state);
-
             // Prune finished generators, and advance overridden generators.
             // Overridden generators are advanced here rather than in the test body, because we don't know which value is the last one beforehand,
             //   so we need to actually generate the values to decide if we should reenter the test or not.
@@ -1586,47 +1581,80 @@ int ta_test::Runner::Run()
             //   because we need this to detect the last test repetition, which the callback wants to know.
             [&]() noexcept
             {
-                // Also remove unvisited generators. Note that we show a warning/error for this condition above.
+                // Remove unvisited generators. Note that we show a warning/error for this condition above.
                 // This shouldn't normally happen.
                 guard.state.generator_stack.resize(guard.state.generator_index);
 
+                { // Remove generators that threw exceptions.
+                    auto iter = std::find_if(guard.state.generator_stack.begin(), guard.state.generator_stack.end(), [](const auto &g){return g->CallbackThrewException();});
+                    guard.state.generator_stack.erase(iter, guard.state.generator_stack.end());
+
+                    // Adjust the index, just in case.
+                    if (guard.state.generator_index > guard.state.generator_stack.size())
+                        guard.state.generator_index = guard.state.generator_stack.size();
+                }
+
                 // Prune finished generators.
-                while (!guard.state.generator_stack.empty())
+                if (!guard.state.generator_stack.empty())
                 {
-                    auto &last_generator = *guard.state.generator_stack.back();
-
-                    bool should_pop = false;
-
-                    // The callback needs to see this index.
+                    // We use this as the loop counter, and also the overriding module wants to see the correct index in the callback.
                     guard.state.generator_index = guard.state.generator_stack.size() - 1;
 
-                    switch (const_cast<BasicModule::BasicGenerator &>(last_generator).RunGeneratorOverride())
+                    // Note, we don't actually remove anything from the stack here yet.
+                    // This allows us to capture the full generator stack if the test fails while we advance overridden generators here,
+                    // from the on `OnPreFailTest()` callback.
+
+                    while (true)
                     {
-                      case BasicModule::BasicGenerator::OverrideStatus::no_override:
-                        should_pop = last_generator.IsLastValue();
-                        break;
-                      case BasicModule::BasicGenerator::OverrideStatus::success:
-                        // Nothing.
-                        break;
-                      case BasicModule::BasicGenerator::OverrideStatus::no_more_values:
-                        should_pop = true;
-                        break;
+                        auto &this_generator = *guard.state.generator_stack[guard.state.generator_index];
+
+                        bool should_pop = false;
+
+                        try
+                        {
+                            switch (const_cast<BasicModule::BasicGenerator &>(this_generator).RunGeneratorOverride())
+                            {
+                              case BasicModule::BasicGenerator::OverrideStatus::no_override:
+                                should_pop = this_generator.IsLastValue();
+                                break;
+                              case BasicModule::BasicGenerator::OverrideStatus::success:
+                                // Nothing.
+                                break;
+                              case BasicModule::BasicGenerator::OverrideStatus::no_more_values:
+                                should_pop = true;
+                                break;
+                            }
+                        }
+                        catch (...)
+                        {
+                            should_pop = true;
+                        }
+
+                        if (should_pop)
+                        {
+                            if (guard.state.generator_index == 0)
+                                break;
+                            guard.state.generator_index--;
+                        }
+                        else
+                        {
+                            guard.state.generator_index++;
+                            break;
+                        }
                     }
 
-                    if (should_pop)
+                    // Actually pop the generators.
+                    while (guard.state.generator_stack.size() > guard.state.generator_index)
                     {
                         module_lists.Call<&BasicModule::OnPrePruneLastGenerator>(guard.state);
                         guard.state.generator_stack.pop_back();
                     }
-                    else
-                    {
-                        break;
-                    }
                 }
-
-                // Since we touched the index and resized the stack, reset the index to a meaningful value for the callback that will be called below.
-                guard.state.generator_index = guard.state.generator_stack.size();
             }();
+
+            // We need this to be late, since the test can fail while pruning generators.
+            if (guard.state.failed)
+                any_repetition_failed = true;
 
             guard.state.is_last_generator_repetition = guard.state.generator_stack.empty();
 
@@ -1717,19 +1745,19 @@ ta_test::modules::HelpPrinter::HelpPrinter()
     })
 {}
 
-std::vector<ta_test::flags::BasicFlag *> ta_test::modules::HelpPrinter::GetFlags()
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::HelpPrinter::GetFlags() noexcept
 {
     return {&flag_help};
 }
 
-void ta_test::modules::HelpPrinter::OnUnknownFlag(std::string_view flag, bool &abort)
+void ta_test::modules::HelpPrinter::OnUnknownFlag(std::string_view flag, bool &abort) noexcept
 {
     (void)abort;
     terminal.Print("Unknown flag `{}`, run with `{}` for usage.\n", flag, flag_help.HelpFlagSpelling());
     // Don't exit, rely on `abort`.
 }
 
-void ta_test::modules::HelpPrinter::OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort)
+void ta_test::modules::HelpPrinter::OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort) noexcept
 {
     (void)flag_obj;
     (void)abort;
@@ -1753,12 +1781,12 @@ ta_test::modules::TestSelector::TestSelector()
     )
 {}
 
-std::vector<ta_test::flags::BasicFlag *> ta_test::modules::TestSelector::GetFlags()
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::TestSelector::GetFlags() noexcept
 {
     return {&flag_include, &flag_exclude};
 }
 
-void ta_test::modules::TestSelector::OnFilterTest(const BasicTestInfo &test, bool &enable)
+void ta_test::modules::TestSelector::OnFilterTest(const BasicTestInfo &test, bool &enable) noexcept
 {
     if (patterns.empty())
         return;
@@ -1811,7 +1839,7 @@ ta_test::flags::StringFlag::Callback ta_test::modules::TestSelector::GetFlagCall
     };
 }
 
-void ta_test::modules::TestSelector::OnPreRunTests(const RunTestsInfo &data)
+void ta_test::modules::TestSelector::OnPreRunTests(const RunTestsInfo &data) noexcept
 {
     (void)data;
 
@@ -1888,7 +1916,6 @@ ta_test::modules::GeneratorOverrider::GeneratorOverrider()
             (void)this_module;
             dynamic_cast<GeneratorOverrider &>(this_module).terminal.Print("{}", &R"(
 The argument of `--generate` is a name regex (as in `--include`), followed by `//`, then a comma-separated list of generator overrides.
-Each test can be affected by at most one such flag (the last matching one).
 Some examples: (here `x`,`y` are generator names as passed to `TA_GENERATE(name, ...)`)
 * -g 'foo/bar//x=42'         - generate only this value.
 * -g 'foo/bar//x=42,y=43'    - override several generators (the order matters; you can omit some of the generators).
@@ -1904,15 +1931,18 @@ Operators are applied left to right. If the first operator is `=` or `#`, all va
 Operators `=` and `#` can be followed by a parenthesized list of generator overrides, which are used in place of the remaining string for those values:
 * -g 'foo/bar//x{#1..,#5(y=20)},y=10' - override `y=20` for 5th value of `x`, and `y=10` for all other values of `x`.
 If multiple operators match the same value, parentheses from the last match are used.
-Parentheses apply only to the single preceding operator by default. To apply them to multiple operators, separate operators with `&` instead of `,`:
+Parentheses apply only to the single preceding operator by default. To apply them to multiple operators, separate the operators with `&` instead of `,`:
 * -g 'foo/bar//x{#1..,#5&=42(y=20)},y=10' - override `y=20` for 5th value of `x` and for a custom value `x=42`, for all other values of `x` use `y=10`.
 More examples:
 * -g 'foo/bar//x{#1..,#5()},y=10' - override `y=10` for all values of `x` except the 5-th one.
 * -g 'foo/bar//x{#1..(y=10),#5}' - same effect as above.
+More than one `--generate` flag can be active in a given test at a time. They run in parallel rather than sequentially, in the sense that each flag maintains
+  its own "instruction pointer". If multiple flags offer the same generator, the latest flag gets preference, and preceding flags skip that generator.
 Some notes:
-* This flag changes the generator semantics slightly, making subsequent calls to the generator lambda between the test repetitions, as opposed to
+* This flag changes the generator semantics slightly, making subsequent calls to the generator lambda happen between the test repetitions, as opposed to
     when the control flow reaches the `TA_GENERATE(...)` call, to avoid entering the test when all future values are disabled.
-    This shouldn't affect you, unless you're intentionally throwing from the generator function.
+    This shouldn't affect you much, unless you're doing something unusual in the generator callback, or unless you're throwing from it and trying
+    to catch the resulting `InterruptTestException`, which isn't possible when this flag controls a generator.
 * Not all types can be deserialized from strings, but index-based operators will always work.
     We support scalars, strings (with standard escape sequences), containers (as printed by `std::format()`: {...} sets, {a:b, c:d} maps, [...] other containers, and (...) tuples).
     Custom type support can be added by specializing `ta_test::string_conv::FromStringTraits`.
@@ -1924,18 +1954,18 @@ Some notes:
     )
 {}
 
-std::vector<ta_test::flags::BasicFlag *> ta_test::modules::GeneratorOverrider::GetFlags()
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::GeneratorOverrider::GetFlags() noexcept
 {
     return {&flag_override, &flag_local_help};
 }
 
-void ta_test::modules::GeneratorOverrider::OnPreRunTests(const RunTestsInfo &data)
+void ta_test::modules::GeneratorOverrider::OnPreRunTests(const RunTestsInfo &data) noexcept
 {
     (void)data;
     test_state = {};
 }
 
-void ta_test::modules::GeneratorOverrider::OnPostRunTests(const RunTestsResults &data)
+void ta_test::modules::GeneratorOverrider::OnPostRunTests(const RunTestsResults &data) noexcept
 {
     (void)data;
 
@@ -2052,7 +2082,7 @@ void ta_test::modules::GeneratorOverrider::OnPostRunTests(const RunTestsResults 
     }
 }
 
-void ta_test::modules::GeneratorOverrider::OnPostRunSingleTest(const RunSingleTestResults &data)
+void ta_test::modules::GeneratorOverrider::OnPostRunSingleTest(const RunSingleTestResults &data) noexcept
 {
     if (data.is_last_generator_repetition && test_state)
     {
@@ -2060,11 +2090,13 @@ void ta_test::modules::GeneratorOverrider::OnPostRunSingleTest(const RunSingleTe
     }
 }
 
-bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator)
+bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) noexcept
 {
     // If we don't have an active `--generate` flag, try to find one.
     if (!test_state)
     {
+        test_state.emplace();
+
         for (auto it = entries.rbegin(); it != entries.rend(); ++it)
         {
             const Entry &entry = *it;
@@ -2072,44 +2104,75 @@ bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const Run
             if (text::TestNameMatchesRegex(test.test->Name(), entry.test_regex))
             {
                 entry.was_used = true;
-                test_state.emplace();
-                test_state->entry = &entry;
-                test_state->remaining_program = entry.seq.entries;
-                break;
+                test_state->active_flags.push_back({
+                    .entry = &entry,
+                    .remaining_program = entry.seq.entries,
+                });
             }
         }
     }
 
     // If we do have an active `--generate` flag, use it.
-    if (test_state && !test_state->remaining_program.empty())
+    if (test_state)
     {
-        const GeneratorOverrideSeq::Entry &override_entry = test_state->remaining_program.front();
+        bool found = false;
 
-        if (override_entry.generator_name == generator.GetName())
+        for (ActiveFlag &flag : test_state->active_flags)
         {
-            override_entry.was_used = true;
-            test_state->elems.push_back({.generator_index = test.generator_index, .remaining_program = test_state->remaining_program});
+            if (flag.remaining_program.empty())
+                continue;
 
-            return true;
+            const GeneratorOverrideSeq::Entry &override_entry = flag.remaining_program.front();
+
+            if (override_entry.generator_name == generator.GetName())
+            {
+                if (!found)
+                    override_entry.was_used = true; // Only the first flag is marked as used.
+
+                found = true;
+                flag.elems.push_back({.generator_index = test.generator_index, .remaining_program = flag.remaining_program});
+            }
         }
+        if (found)
+            return true;
     }
 
     return false;
 }
 
-bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator)
+bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) noexcept
 {
     if (!test_state)
         HardError("A generator override is requested, but we don't have an active state.");
 
-    // Our generator should be the last one in the stack at this point.
-    if (test_state->elems.empty() || test_state->elems.back().generator_index != test.generator_index)
+    ActiveFlag *this_flag = nullptr;
+    ActiveFlag::Elem *this_elem = nullptr;
+    for (ActiveFlag &active_flag : test_state->active_flags)
+    {
+        auto iter = std::partition_point(active_flag.elems.begin(), active_flag.elems.end(), [&](const ActiveFlag::Elem &elem){return elem.generator_index < test.generator_index;});
+        if (iter != active_flag.elems.end() && iter->generator_index == test.generator_index)
+        {
+            if (!this_elem)
+            {
+                // The first match.
+                this_elem = std::to_address(iter);
+                this_flag = &active_flag;
+            }
+            else
+            {
+                // In the remaining matches, we just advance the program counter.
+                if (!active_flag.remaining_program.empty())
+                    active_flag.remaining_program = active_flag.remaining_program.subspan(1);
+            }
+        }
+    }
+    if (!this_elem)
         HardError("A generator override is requested, but the state doesn't contain information about this generator.");
 
-    TestState::Elem &this_elem = test_state->elems.back();
-    const GeneratorOverrideSeq::Entry &command = this_elem.remaining_program.front();
 
-    const auto default_remaining_program = this_elem.remaining_program.subspan(1);
+    const GeneratorOverrideSeq::Entry &command = this_elem->remaining_program.front();
+
+    const auto default_remaining_program = this_elem->remaining_program.subspan(1);
 
     // Generate the values until one passes the conditions...
     while (true)
@@ -2125,19 +2188,19 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
                 HardErrorInFlag(
                     "Parsing the value consumed more characters than expected. "
                     "Expected the parsing to end at (1), but it ended at (2).",
-                    *test_state->entry, {{
+                    *this_flag->entry, {{
                         FlagErrorDetails::Elem{.marker = "1^", .location = expected_end - 2},
                         FlagErrorDetails::Elem{.marker = "^2", .location = string - 1},
                     }}, HardErrorKind::user
                 );
             }
             if (!error.empty())
-                HardErrorInFlag(error, *test_state->entry, string, HardErrorKind::user);
+                HardErrorInFlag(error, *this_flag->entry, string, HardErrorKind::user);
             if (string < expected_end)
             {
                 HardErrorInFlag(
                     "Junk characters after the value. The values ends at (1), junk ends at (2).",
-                    *test_state->entry, {{
+                    *this_flag->entry, {{
                         FlagErrorDetails::Elem{.marker = "1^", .location = string - 2},
                         FlagErrorDetails::Elem{.marker = "^2", .location = expected_end - 1},
                     }}, HardErrorKind::user
@@ -2146,15 +2209,15 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
         };
 
         // Reset the remaining program first.
-        test_state->remaining_program = default_remaining_program;
+        this_flag->remaining_program = default_remaining_program;
 
         // Insert the next custom value, if any.
 
         std::size_t rule_index = 0;
         bool using_custom_value = false;
-        if (this_elem.num_used_custom_values < command.custom_values.size())
+        if (this_elem->num_used_custom_values < command.custom_values.size())
         {
-            const auto &this_value = command.custom_values[this_elem.num_used_custom_values];
+            const auto &this_value = command.custom_values[this_elem->num_used_custom_values];
 
             this_value.was_used = true;
 
@@ -2166,7 +2229,7 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
                         "But you can filter certain generated values by their indices using `#`, see `--help-generate` for details.",
                         generator.GetTypeName()
                     ),
-                    *test_state->entry, this_value.value.data(), HardErrorKind::user
+                    *this_flag->entry, this_value.value.data(), HardErrorKind::user
                 );
             }
 
@@ -2174,16 +2237,16 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
             std::string error = generator.ReplaceValueFromString(string);
             CheckValueParsingResult(error, string, this_value.value.data() + this_value.value.size());
 
-            this_elem.num_used_custom_values++;
+            this_elem->num_used_custom_values++;
 
             using_custom_value = true;
             rule_index = this_value.next_rule;
 
             // Replace the remaining program.
             if (this_value.custom_generator_seq)
-                test_state->remaining_program = this_value.custom_generator_seq->entries;
+                this_flag->remaining_program = this_value.custom_generator_seq->entries;
             else
-                test_state->remaining_program = default_remaining_program;
+                this_flag->remaining_program = default_remaining_program;
         }
 
         // Generate the next natural value, if any.
@@ -2192,7 +2255,15 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
         {
             if (generator.IsLastValue())
                 return true; // No more values.
-            generator.Generate();
+
+            try
+            {
+                generator.Generate();
+            }
+            catch (InterruptTestException)
+            {
+                return true; // No more values.
+            }
         }
 
         // Outright reject natural values if they overlap with `=`.
@@ -2248,22 +2319,22 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
                         {
                             if (basic_rule.custom_generator_seq)
                             {
-                                if (test_state->remaining_program.data() != basic_rule.custom_generator_seq->entries.data() ||
-                                    test_state->remaining_program.size() != basic_rule.custom_generator_seq->entries.size()
+                                if (this_flag->remaining_program.data() != basic_rule.custom_generator_seq->entries.data() ||
+                                    this_flag->remaining_program.size() != basic_rule.custom_generator_seq->entries.size()
                                 )
                                 {
                                     basic_rule.was_used = true;
-                                    test_state->remaining_program = basic_rule.custom_generator_seq->entries;
+                                    this_flag->remaining_program = basic_rule.custom_generator_seq->entries;
                                 }
                             }
                             else
                             {
-                                if (test_state->remaining_program.data() != default_remaining_program.data() ||
-                                    test_state->remaining_program.size() != default_remaining_program.size()
+                                if (this_flag->remaining_program.data() != default_remaining_program.data() ||
+                                    this_flag->remaining_program.size() != default_remaining_program.size()
                                 )
                                 {
                                     basic_rule.was_used = true;
-                                    test_state->remaining_program = default_remaining_program;
+                                    this_flag->remaining_program = default_remaining_program;
                                 }
                             }
                         }
@@ -2279,7 +2350,7 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
                                 "But you can filter certain generated values by their indices using `-#`, see `--help-generate` for details.",
                                 generator.GetTypeName()
                             ),
-                            *test_state->entry, rule.value.data(), HardErrorKind::user
+                            *this_flag->entry, rule.value.data(), HardErrorKind::user
                         );
                     }
                     if (!generator.ValueEqualityComparableToString())
@@ -2290,7 +2361,7 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
                                 "But you can filter certain generated values by their indices using `-#`, see `--help-generate` for details.",
                                 generator.GetTypeName()
                             ),
-                            *test_state->entry, rule.value.data(), HardErrorKind::user
+                            *this_flag->entry, rule.value.data(), HardErrorKind::user
                         );
                     }
 
@@ -2315,18 +2386,27 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
     }
 }
 
-void ta_test::modules::GeneratorOverrider::OnPrePruneLastGenerator(const RunSingleTestProgress &test)
+void ta_test::modules::GeneratorOverrider::OnPrePruneLastGenerator(const RunSingleTestProgress &test) noexcept
 {
     if (test.generator_stack.back()->OverridingModule() == this)
     {
         if (!test_state)
             HardError("We're pruning our overridden generator, but have no state for some reason.");
 
-        if (test_state->elems.empty() || test_state->elems.back().generator_index != test.generator_stack.size() - 1)
+        bool found = false;
+        for (ActiveFlag &active_flag : test_state->active_flags)
+        {
+            if (active_flag.elems.empty() || active_flag.elems.back().generator_index != test.generator_stack.size() - 1)
+                continue;
+            found = true;
+
+            active_flag.remaining_program = active_flag.elems.back().remaining_program;
+            active_flag.elems.pop_back();
+
+        }
+        if (!found)
             HardError("We're pruning our overridden generator, but its index doesn't match what we have.");
 
-        test_state->remaining_program = test_state->elems.back().remaining_program;
-        test_state->elems.pop_back();
     }
 }
 
@@ -2716,7 +2796,7 @@ ta_test::modules::PrintingConfigurator::PrintingConfigurator()
     )
 {}
 
-std::vector<ta_test::flags::BasicFlag *> ta_test::modules::PrintingConfigurator::GetFlags()
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::PrintingConfigurator::GetFlags() noexcept
 {
     return {&flag_color, &flag_unicode};
 }
@@ -3075,7 +3155,7 @@ void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
     }
 }
 
-void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
+void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data) noexcept
 {
     state = {};
 
@@ -3099,7 +3179,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data)
     }
 }
 
-void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &data)
+void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &data) noexcept
 {
     if (!data.failed_tests.empty())
     {
@@ -3177,7 +3257,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
     state = {};
 }
 
-void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data)
+void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data) noexcept
 {
     // Reset the state.
     if (data.is_first_generator_repetition)
@@ -3232,28 +3312,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestIn
     });
 }
 
-void ta_test::modules::ProgressPrinter::OnPostRunSingleTest_BeforePruningGenerators(const RunSingleTestProgress &data)
-{
-    if (data.failed)
-    {
-        // Remember the failed generator stack.
-        std::vector<State::PerTest::FailedGenerator> failed_generator_stack;
-        failed_generator_stack.reserve(data.generator_stack.size());
-        for (const auto &gen : data.generator_stack)
-        {
-            failed_generator_stack.push_back({
-                .name = std::string(gen->GetName()),
-                .index = gen->IsCustomValue() ? gen->NumCustomValues() : gen->NumGeneratedValues(),
-                .is_custom_value = gen->IsCustomValue(),
-                .value = gen->ValueConvertibleToString() ? std::optional(gen->ValueToString()) : std::nullopt,
-                .location = gen->GetLocation(),
-            });
-        }
-        state.per_test.failed_generator_stacks.push_back(std::move(failed_generator_stack));
-    }
-}
-
-void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestResults &data)
+void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestResults &data) noexcept
 {
     auto cur_style = terminal.MakeStyleGuard();
 
@@ -3397,15 +3456,31 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
     }
 }
 
-void ta_test::modules::ProgressPrinter::OnPostGenerate(const GeneratorCallInfo &data)
+void ta_test::modules::ProgressPrinter::OnPostGenerate(const GeneratorCallInfo &data) noexcept
 {
     auto cur_style = terminal.MakeStyleGuard();
     if (data.generating_new_value || state.per_test.per_repetition.prev_rep_failed)
         PrintGeneratorInfo(cur_style, *data.test, *data.generator, !data.generating_new_value);
 }
 
-void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgress &data)
+void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgress &data) noexcept
 {
+    // Remember the failed generator stack.
+    std::vector<State::PerTest::FailedGenerator> failed_generator_stack;
+    failed_generator_stack.reserve(data.generator_stack.size());
+    for (const auto &gen : data.generator_stack)
+    {
+        failed_generator_stack.push_back({
+            .name = std::string(gen->GetName()),
+            .index = gen->IsCustomValue() ? gen->NumCustomValues() : gen->NumGeneratedValues(),
+            .is_custom_value = gen->IsCustomValue(),
+            .value = gen->ValueConvertibleToString() ? std::optional(gen->ValueToString()) : std::nullopt,
+            .location = gen->GetLocation(),
+        });
+    }
+    state.per_test.failed_generator_stacks.push_back(std::move(failed_generator_stack));
+
+
     // Avoid printing the diagnoal separator on the next progress line. It's unnecessary after a bulky failure message.
     state.per_test.last_repetition_counters_width = std::size_t(-1);
 
@@ -3452,15 +3527,21 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
     );
 
     // Print the generator determinism warning, if needed.
-    if (data.generator_index < data.generator_stack.size())
+    if (data.generator_index < data.generator_stack.size() &&
+        // And if not all remaining generators failed due to exceptions...
+        // We still want to keep the previous condition, even if it looks redundant, in case `data.generator_index` somehow ends up larger than the stack size.
+        !std::all_of(data.generator_stack.begin() + std::ptrdiff_t(data.generator_index), data.generator_stack.end(), [](const auto &g){return g->CallbackThrewException();})
+    )
+    {
         PrintWarning(cur_style, "Non-deterministic failure. Previous runs didn't fail here with the same generated values. Some generators will be pruned.");
+    }
 
     terminal.Print("\n");
 }
 
 // --- modules::ResultsPrinter ---
 
-void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &data)
+void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &data) noexcept
 {
     auto cur_style = terminal.MakeStyleGuard();
 
@@ -3523,7 +3604,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 
 // --- modules::AssertionPrinter ---
 
-void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data)
+void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data) noexcept
 {
     auto cur_style = terminal.MakeStyleGuard();
     output::PrintLog(cur_style);
@@ -3531,7 +3612,7 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
     output::PrintContext(cur_style, &data);
 }
 
-bool ta_test::modules::AssertionPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
+bool ta_test::modules::AssertionPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept
 {
     if (auto assertion_frame = dynamic_cast<const BasicAssertionInfo *>(&frame))
     {
@@ -3748,20 +3829,20 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
 
 // --- modules::LogPrinter
 
-void ta_test::modules::LogPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data)
+void ta_test::modules::LogPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data) noexcept
 {
     (void)data;
     unscoped_log_pos = 0;
 }
 
-void ta_test::modules::LogPrinter::OnPostRunSingleTest(const RunSingleTestResults &data)
+void ta_test::modules::LogPrinter::OnPostRunSingleTest(const RunSingleTestResults &data) noexcept
 {
     // Doing it in both places (before and after a test) is redundant, but doesn't hurt.
     (void)data;
     unscoped_log_pos = 0;
 }
 
-bool ta_test::modules::LogPrinter::PrintLogEntries(output::Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log)
+bool ta_test::modules::LogPrinter::PrintLogEntries(output::Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) noexcept
 {
     if (unscoped_log_pos > unscoped_log.size())
         HardError("Less entires in the unscoped log than expected.");
@@ -3809,7 +3890,7 @@ bool ta_test::modules::LogPrinter::PrintLogEntries(output::Terminal::StyleGuard 
 
 // --- modules::ExceptionPrinter ---
 
-void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e)
+void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept
 {
     (void)test;
     (void)assertion;
@@ -3831,7 +3912,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 
 // --- modules::MustThrowPrinter ---
 
-void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data, bool &should_break)
+void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data, bool &should_break) noexcept
 {
     (void)should_break;
 
@@ -3842,7 +3923,7 @@ void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo 
     output::PrintContext(cur_style, &data);
 }
 
-bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
+bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept
 {
     if (auto ptr = dynamic_cast<const BasicModule::MustThrowInfo *>(&frame))
     {
@@ -3864,7 +3945,7 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
     const BasicModule::MustThrowDynamicInfo *dynamic_info,
     const BasicModule::CaughtExceptionInfo *caught,
     bool is_most_nested
-)
+) const
 {
     const std::string *error_message = nullptr;
     if (caught)
@@ -3919,7 +4000,7 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
 
 // --- modules::TracePrinter ---
 
-bool ta_test::modules::TracePrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
+bool ta_test::modules::TracePrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept
 {
     if (auto ptr = dynamic_cast<const BasicTrace *>(&frame))
     {
@@ -4021,7 +4102,7 @@ ta_test::modules::DebuggerDetector::DebuggerDetector()
     )
 {}
 
-std::vector<ta_test::flags::BasicFlag *> ta_test::modules::DebuggerDetector::GetFlags()
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::DebuggerDetector::GetFlags() noexcept
 {
     return {&flag_common, &flag_break, &flag_catch};
 }
@@ -4031,13 +4112,13 @@ bool ta_test::modules::DebuggerDetector::IsDebuggerAttached() const
     return platform::IsDebuggerAttached();
 }
 
-void ta_test::modules::DebuggerDetector::OnAssertionFailed(const BasicAssertionInfo &data)
+void ta_test::modules::DebuggerDetector::OnAssertionFailed(const BasicAssertionInfo &data) noexcept
 {
     if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
         data.should_break = true;
 }
 
-void ta_test::modules::DebuggerDetector::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e)
+void ta_test::modules::DebuggerDetector::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept
 {
     (void)test;
     (void)e;
@@ -4045,20 +4126,20 @@ void ta_test::modules::DebuggerDetector::OnUncaughtException(const RunSingleTest
         assertion->should_break = true;
 }
 
-void ta_test::modules::DebuggerDetector::OnMissingException(const MustThrowInfo &data, bool &should_break)
+void ta_test::modules::DebuggerDetector::OnMissingException(const MustThrowInfo &data, bool &should_break) noexcept
 {
     (void)data;
     if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
         should_break = true;
 }
 
-void ta_test::modules::DebuggerDetector::OnPreTryCatch(bool &should_catch)
+void ta_test::modules::DebuggerDetector::OnPreTryCatch(bool &should_catch) noexcept
 {
     if (catch_exceptions ? !*catch_exceptions : IsDebuggerAttached())
         should_catch = false;
 }
 
-void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const RunSingleTestResults &data)
+void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const RunSingleTestResults &data) noexcept
 {
     if (data.failed && (break_on_failure ? *break_on_failure : IsDebuggerAttached()))
         data.should_break = true;
@@ -4066,7 +4147,7 @@ void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const RunSingleTest
 
 // --- modules::DebuggerStatePrinter ---
 
-void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const RunTestsInfo &data)
+void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const RunTestsInfo &data) noexcept
 {
     data.modules->FindModule<DebuggerDetector>([this](DebuggerDetector &detector)
     {

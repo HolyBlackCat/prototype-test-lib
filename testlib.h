@@ -308,7 +308,9 @@
 
 #define DETAIL_TA_TEST(name) \
     inline void _ta_test_func(::ta_test::meta::ConstStringTag<#name>); \
-    constexpr auto _ta_registration_helper(::ta_test::meta::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
+    /* This must be non-inline, because we want to repeat registration for each TU, to detect source location mismatches. */\
+    /* But the test body is inline to reduce bloat when tests are in headers. */\
+    [[maybe_unused]] static constexpr auto _ta_registration_helper(::ta_test::meta::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
         const std::nullptr_t *, &::ta_test::detail::register_test_helper<\
             ::ta_test::detail::SpecificTest<static_cast<void(*)(\
                 ::ta_test::meta::ConstStringTag<#name>\
@@ -355,10 +357,10 @@
     ::ta_test::detail::ScopedLogGuardLazy DETAIL_TA_CAT(_ta_context,__COUNTER__)([&]{return CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__);})
 
 #define DETAIL_TA_GENERATE(name, ...) \
-    ::ta_test::detail::Generate<#name, __FILE__, __LINE__, __COUNTER__>([/*non-capturing*/]{return ::ta_test::RangeToGeneratorFunc(__VA_ARGS__);})
+    ::ta_test::detail::GenerateValue<#name, __FILE__, __LINE__, __COUNTER__>([/*non-capturing*/]{return ::ta_test::RangeToGeneratorFunc(__VA_ARGS__);})
 
 #define DETAIL_TA_GENERATE_FUNC(name, ...) \
-    ::ta_test::detail::Generate<#name, __FILE__, __LINE__, __COUNTER__>([&]{return __VA_ARGS__;})
+    ::ta_test::detail::GenerateValue<#name, __FILE__, __LINE__, __COUNTER__>([&]{return __VA_ARGS__;})
 
 // --- ENUM FLAGS MACROS ---
 
@@ -2125,12 +2127,12 @@ namespace ta_test
 
         // Should return a list of the supported command line flags.
         // Store the flags permanently in your class, those pointers are obviously non-owning.
-        [[nodiscard]] virtual std::vector<flags::BasicFlag *> GetFlags() {return {};}
+        [[nodiscard]] virtual std::vector<flags::BasicFlag *> GetFlags() noexcept {return {};}
         // This is called when an unknown flag is passed to the command line.
         // `abort` defaults to true. If it remains true after this is called on all modules, the application is terminated.
-        virtual void OnUnknownFlag(std::string_view flag, bool &abort) {(void)flag; (void)abort;}
+        virtual void OnUnknownFlag(std::string_view flag, bool &abort) noexcept {(void)flag; (void)abort;}
         // Same, but for when a flag lacks an argument.
-        virtual void OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort) {(void)flag; (void)flag_obj; (void)abort;}
+        virtual void OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort) noexcept {(void)flag; (void)flag_obj; (void)abort;}
 
         // --- RUNNING TESTS ---
 
@@ -2162,7 +2164,7 @@ namespace ta_test
         };
         // Whether the test should run.
         // This is called once for every test, with `enable` initially set to true. If it ends up false, the test is skipped.
-        virtual void OnFilterTest(const BasicTestInfo &test, bool &enable) {(void)test; (void)enable;}
+        virtual void OnFilterTest(const BasicTestInfo &test, bool &enable) noexcept {(void)test; (void)enable;}
 
         struct RunTestsInfo
         {
@@ -2180,9 +2182,9 @@ namespace ta_test
         };
         struct RunTestsResults : RunTestsProgress {};
         // This is called first, before any tests run.
-        virtual void OnPreRunTests(const RunTestsInfo &data) {(void)data;}
+        virtual void OnPreRunTests(const RunTestsInfo &data) noexcept {(void)data;}
         // This is called after all tests run.
-        virtual void OnPostRunTests(const RunTestsResults &data) {(void)data;}
+        virtual void OnPostRunTests(const RunTestsResults &data) noexcept {(void)data;}
 
         // Describes a generator created with `TA_GENERATE(...)`.
         struct BasicGenerator
@@ -2220,11 +2222,14 @@ namespace ta_test
 
             // Whether the last generated value is the last one for this generator.
             // Note that when the generator is operating under a module override, the system doesn't respect this variable (see below).
-            [[nodiscard]] bool IsLastValue() const {return !repeat;}
+            [[nodiscard]] bool IsLastValue() const {return !repeat || callback_threw_exception;}
 
             // This is false when the generator is reached for the first time and didn't generate a value yet.
             // Calling `GetValue()` in that case will crash.
             [[nodiscard]] virtual bool HasValue() const = 0;
+
+            // Returns true if the user callback threw an exception. This implies `IsLastValue()`.
+            [[nodiscard]] bool CallbackThrewException() const {return callback_threw_exception;}
 
             // Whether `string_conv::ToString()` works for this generated type.
             [[nodiscard]] virtual bool ValueConvertibleToString() const = 0;
@@ -2286,6 +2291,9 @@ namespace ta_test
           protected:
             // `Generate()` updates this to indicate whether more values will follow.
             bool repeat = true;
+
+            // This is set to true when the callback throws. Then the generator and all next ones will get pruned at the end of the test.
+            bool callback_threw_exception = false;
 
             // Whether the current value is custom, as opposed to being naturally generated.
             bool this_value_is_custom = false;
@@ -2510,12 +2518,10 @@ namespace ta_test
             bool is_last_generator_repetition = false;
         };
         // This is called before every single test runs.
-        virtual void OnPreRunSingleTest(const RunSingleTestInfo &data) {(void)data;}
+        virtual void OnPreRunSingleTest(const RunSingleTestInfo &data) noexcept {(void)data;}
         // This is called after every single test runs.
-        // The generators can be clobbered at this point.
-        virtual void OnPostRunSingleTest(const RunSingleTestResults &data) {(void)data;}
-        // This is called slightly earlier than `OnPostRunSingleTest()`. It sees the generator values, but doesn't know if it's the last repetition or not.
-        virtual void OnPostRunSingleTest_BeforePruningGenerators(const RunSingleTestProgress &data) {(void)data;}
+        // The generators can be in weird state at this point. Interact with them in `OnPostGenerate()` and in `OnPreFailTest()` instead.
+        virtual void OnPostRunSingleTest(const RunSingleTestResults &data) noexcept {(void)data;}
 
         struct GeneratorCallInfo
         {
@@ -2527,28 +2533,28 @@ namespace ta_test
         };
 
         // This is called after every `TA_GENERATE(...)`.
-        virtual void OnPostGenerate(const GeneratorCallInfo &data) {(void)data;}
+        virtual void OnPostGenerate(const GeneratorCallInfo &data) noexcept {(void)data;}
 
         // Return true if you want this module to have special control over this generator.
         // If you do this, you must override `OnGeneratorOverride()`, see below.
         // This also changes the behavior of `TA_GENERATE(...)` slightly, it will generate new values between tests and
         //   not when the control flow reaches it (except for the first time it's reached).
-        virtual bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) {(void)test; (void)generator; return false;}
+        virtual bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) noexcept {(void)test; (void)generator; return false;}
         // If you returned true from `OnRegisterGeneratorOverride()`, this function will be called instead of `generator.Generate()`.
         // You must call `generator.Generate()` (possibly several times to skip values) or `generator.ReplaceValueFromString()`.
         // Returning true from this means that there's no more values (unlike non-overridden generators, we can back out from a generation without knowing
         //   which value is the last one beforehand).
         // You must return true from this when the generator is exhausted, `IsLastValue()` is ignored when an override is active.
-        virtual bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) {(void)test; (void)generator; return false;}
+        virtual bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) noexcept {(void)test; (void)generator; return false;}
         // This is called right before the final generator in the stack is pruned, because it has no more values.
-        virtual void OnPrePruneLastGenerator(const RunSingleTestProgress &test) {(void)test;}
+        virtual void OnPrePruneLastGenerator(const RunSingleTestProgress &test) noexcept {(void)test;}
 
         // --- FAILING TESTS ---
 
         // This is called when a test fails for any reason, followed by a more specific callback (see below).
         // Note that the test can continue to run after this, if this is a delayed (soft) failure.
         // Note that this is called at most once per test, even if after a soft failure something else fails.
-        virtual void OnPreFailTest(const RunSingleTestProgress &data) {(void)data;}
+        virtual void OnPreFailTest(const RunSingleTestProgress &data) noexcept {(void)data;}
 
         struct BasicAssertionExpr
         {
@@ -2633,12 +2639,12 @@ namespace ta_test
             [[nodiscard]] virtual DecoVar GetElement(int index) const = 0;
         };
         // Called when an assertion fails.
-        virtual void OnAssertionFailed(const BasicAssertionInfo &data) {(void)data;}
+        virtual void OnAssertionFailed(const BasicAssertionInfo &data) noexcept {(void)data;}
 
         // Called when an exception falls out of an assertion or out of the entire test (in the latter case `assertion` will be null).
         // `assertion` is provided solely to allow you to do `assertion->should_break = true`. If you just want to print the failure context,
         // use `namespace context` instead, it will give you the same assertion and more.
-        virtual void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) {(void)test; (void)assertion; (void)e;}
+        virtual void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept {(void)test; (void)assertion; (void)e;}
 
         // A compile-time information about a `TA_MUST_THROW(...)` call.
         struct MustThrowStaticInfo
@@ -2681,7 +2687,7 @@ namespace ta_test
 
         // This is called when `TA_MUST_THROW` doesn't throw an exception.
         // If `should_break` ends up true (it's false by default), then a breakpoint at the call site will be triggered.
-        virtual void OnMissingException(const MustThrowInfo &data, bool &should_break) {(void)data; (void)should_break;}
+        virtual void OnMissingException(const MustThrowInfo &data, bool &should_break) noexcept {(void)data; (void)should_break;}
 
         // --- MISC ---
 
@@ -2702,7 +2708,7 @@ namespace ta_test
         // This is called before entering try/catch blocks, so you can choose between that and just executing directly. (See `--catch`.)
         // `should_catch` defaults to true.
         // This is NOT called by `TA_MUST_THROW(...)`.
-        virtual void OnPreTryCatch(bool &should_catch) {(void)should_catch;}
+        virtual void OnPreTryCatch(bool &should_catch) noexcept {(void)should_catch;}
 
 
         // All virtual functions of this interface must be listed here.
@@ -2716,7 +2722,6 @@ namespace ta_test
             x(OnPostRunTests) \
             x(OnPreRunSingleTest) \
             x(OnPostRunSingleTest) \
-            x(OnPostRunSingleTest_BeforePruningGenerators) \
             x(OnPostGenerate) \
             x(OnRegisterGeneratorOverride) \
             /* `OnOverrideGenerator` isn't needed */ \
@@ -2736,9 +2741,9 @@ namespace ta_test
             _count [[maybe_unused]],
         };
         // For internal use, don't use and don't override. Returns the mask of functions implemented by this class.
-        [[nodiscard]] virtual unsigned int Detail_ImplementedFunctionsMask() const = 0;
+        [[nodiscard]] virtual unsigned int Detail_ImplementedFunctionsMask() const noexcept = 0;
         // For internal use. Returns true if the specified function is overriden in the derived class.
-        [[nodiscard]] bool ImplementsFunction(InterfaceFunction func) const
+        [[nodiscard]] bool ImplementsFunction(InterfaceFunction func) const noexcept
         {
             return Detail_ImplementedFunctionsMask() & (1 << int(func));
         }
@@ -2786,7 +2791,7 @@ namespace ta_test
         {
             using T::T;
 
-            unsigned int Detail_ImplementedFunctionsMask() const override final
+            unsigned int Detail_ImplementedFunctionsMask() const noexcept override final
             {
                 constexpr unsigned int ret = []{
                     unsigned int value = 0;
@@ -3471,12 +3476,12 @@ namespace ta_test
         // This is called whenever the context information needs to be printed.
         // Return true if this type of context frame is known to you and you handled it, then the other modules won't receive this call.
         // Do nothing and return false if you don't know this context frame type.
-        virtual bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) {(void)cur_style; (void)frame; return false;}
+        virtual bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept {(void)cur_style; (void)frame; return false;}
         // This is called to print the log.
         // Return true to prevent other modules from receiving this call.
         // `unscoped_log` can alternatively be obtained from `BasicModule::RunSingleTestResults`.
         // `scoped_log` can alternatively be obtained from `context::CurrentScopedLog()`.
-        virtual bool PrintLogEntries(output::Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) {(void)cur_style; (void)unscoped_log; (void)scoped_log; return false;}
+        virtual bool PrintLogEntries(output::Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) noexcept {(void)cur_style; (void)unscoped_log; (void)scoped_log; return false;}
 
       protected:
         CFG_TA_API void PrintWarning(output::Terminal::StyleGuard &cur_style, std::string_view text) const;
@@ -4093,9 +4098,43 @@ namespace ta_test
 
             void Generate() override
             {
-                // We could try to somehow conditionally assign here if possible.
-                // I tried, got some weird build error in some edge case, and decided not to bother.
-                this->storage.template emplace<1>(func, this->repeat);
+                auto generate_value = [&]
+                {
+                    struct Guard
+                    {
+                        SpecificGenerator &self;
+                        bool ok = false;
+
+                        ~Guard()
+                        {
+                            if (!ok)
+                            {
+                                auto &thread_state = ThreadState();
+
+                                self.callback_threw_exception = true;
+
+                                // Kick the generator from the stack if it died before generating the first value, and if it's the last one in the stack.
+                                if (!thread_state.current_test->generator_stack.empty() && thread_state.current_test->generator_stack.back().get() == &self && !self.HasValue())
+                                    thread_state.current_test->generator_stack.pop_back();
+
+                                // Can't touch `self` beyond this point.
+                            }
+                        }
+                    };
+                    Guard guard{.self = *this};
+
+                    // We could try to somehow conditionally assign here if possible.
+                    // I tried, got some weird build error in some edge case, and decided not to bother.
+                    this->storage.template emplace<1>(func, this->repeat);
+
+                    guard.ok = true;
+                    return true;
+                };
+
+                // Using the assertion macro to nicely print exceptions, and to fail the test if this throws something.
+                // We can't rely on automatic test failure on exceptions, because this function can get called outside of the test-wide try-catch,
+                //   when `--generate` is involved.
+                TA_CHECK( generate_value() )("Generating a value in `TA_GENERATE(...)`.");
 
                 this->this_value_is_custom = false;
                 this->num_generated_values++;
@@ -4119,7 +4158,7 @@ namespace ta_test
             typename ReturnType = decltype(std::declval<UserFuncType &>()(std::declval<bool &>()))
         >
         requires IsValidGeneratorName<Name>
-        [[nodiscard]] const ReturnType &Generate(F &&func)
+        [[nodiscard]] const ReturnType &GenerateValue(F &&func)
         {
             auto &thread_state = ThreadState();
             if (!thread_state.current_test)
@@ -4127,7 +4166,37 @@ namespace ta_test
 
             using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, ReturnType, UserFuncType>;
 
-            GeneratorType *this_generator = nullptr;
+            struct Guard
+            {
+                GeneratorType *this_generator = nullptr;
+                bool next_value = false;
+
+                ~Guard()
+                {
+                    if (this_generator)
+                    {
+                        auto &thread_state = ThreadState();
+
+                        // Check that we're still in the stack in the expected position.
+                        // We could've been popped from it on a generation failure.
+                        if (thread_state.current_test->generator_index < thread_state.current_test->generator_stack.size() &&
+                            thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get() == this_generator
+                        )
+                        {
+                            // Post callback.
+                            BasicModule::GeneratorCallInfo callback_data{
+                                .test = thread_state.current_test,
+                                .generator = this_generator,
+                                .generating_new_value = next_value,
+                            };
+                            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
+
+                            thread_state.current_test->generator_index++;
+                        }
+                    }
+                }
+            };
+            Guard guard;
 
             bool creating_new_generator = false;
 
@@ -4136,12 +4205,13 @@ namespace ta_test
                 // Revisiting a generator.
                 auto *this_untyped_generator = thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get();
 
-                this_generator = const_cast<GeneratorType *>(dynamic_cast<const GeneratorType *>(this_untyped_generator));
+                // This tells the scope guard that the generator is ready.
+                guard.this_generator = const_cast<GeneratorType *>(dynamic_cast<const GeneratorType *>(this_untyped_generator));
 
                 // Make sure this is the right generator.
                 // Since the location is a part of the type, this nicely checks for the location equality.
                 // This is one of the two determinism checks, the second one is in runner's `Run()` to make sure we visited all generators.
-                if (!this_generator)
+                if (!guard.this_generator)
                 {
                     // Theoretically we can have two different generators at the same line, but I think this message is ok even in that case.
                     HardError(CFG_TA_FMT_NAMESPACE::format(
@@ -4163,14 +4233,15 @@ namespace ta_test
                     HardError("Something is wrong with the generator index."); // This should never happen.
 
                 auto new_generator = std::make_unique<GeneratorType>(std::forward<F>(func));
-                this_generator = new_generator.get();
+
+                guard.this_generator = new_generator.get();
 
                 // Possibly accept an override.
                 for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<BasicModule::InterfaceFunction::OnRegisterGeneratorOverride>())
                 {
-                    if (m->OnRegisterGeneratorOverride(*thread_state.current_test, *this_generator))
+                    if (m->OnRegisterGeneratorOverride(*thread_state.current_test, *new_generator))
                     {
-                        this_generator->overriding_module = m;
+                        new_generator->overriding_module = m;
                         break;
                     }
                 }
@@ -4178,15 +4249,15 @@ namespace ta_test
                 thread_state.current_test->generator_stack.push_back(std::move(new_generator));
             }
 
-            const bool next_value = thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size();
+            guard.next_value = thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size();
 
             // Advance the generator if needed.
-            if (next_value && (!this_generator->overriding_module || creating_new_generator))
+            if (guard.next_value && (!guard.this_generator->overriding_module || creating_new_generator))
             {
-                switch (this_generator->RunGeneratorOverride())
+                switch (guard.this_generator->RunGeneratorOverride())
                 {
                   case BasicModule::BasicGenerator::OverrideStatus::no_override:
-                    this_generator->Generate();
+                    guard.this_generator->Generate();
                     break;
                   case BasicModule::BasicGenerator::OverrideStatus::success:
                     // Nothing.
@@ -4195,7 +4266,7 @@ namespace ta_test
                     HardError(
                         CFG_TA_FMT_NAMESPACE::format(
                             "Generator `{}` was overriden to generate no values. This is not supported, you must avoid reaching the generator in the first place.",
-                            this_generator->GetName()
+                            guard.this_generator->GetName()
                         ),
                         HardErrorKind::user
                     );
@@ -4203,17 +4274,7 @@ namespace ta_test
                 }
             }
 
-            // Post callback.
-            BasicModule::GeneratorCallInfo callback_data{
-                .test = thread_state.current_test,
-                .generator = this_generator,
-                .generating_new_value = next_value,
-            };
-            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
-
-            thread_state.current_test->generator_index++;
-
-            return this_generator->GetValue();
+            return guard.this_generator->GetValue();
         }
     }
 
@@ -4234,28 +4295,30 @@ namespace ta_test
     {
         class Functor
         {
-            std::remove_cvref_t<T> range;
-            std::ranges::iterator_t<std::remove_cvref_t<T>> iter;
+            std::remove_cvref_t<T> range{};
+            std::ranges::iterator_t<std::remove_cvref_t<T>> iter{};
+            GeneratorFlags flags{};
 
           public:
             explicit Functor(T &&range, GeneratorFlags flags)
-                : range(std::forward<T>(range)), iter(this->range.begin())
+                : range(std::forward<T>(range)), iter(this->range.begin()), flags(flags)
+            {}
+
+            // `iter` might go stale on copy.
+            Functor(const Functor &) = delete;
+            Functor &operator=(const Functor &) = delete;
+
+            decltype(auto) operator()(bool &repeat)
             {
-                if (iter == this->range.end())
+                // Check for the end of the range. Not in the constructor, because that doesn't play nice with `--generate`.
+                if (iter == range.end())
                 {
                     if (bool(flags & GeneratorFlags::allow_empty_range))
                         throw InterruptTestException{};
                     else
                         HardError("Empty generator range.", HardErrorKind::user);
                 }
-            }
 
-            // `iter` would go stale on copy.
-            Functor(const Functor &) = delete;
-            Functor &operator=(const Functor &) = delete;
-
-            decltype(auto) operator()(bool &repeat)
-            {
                 decltype(auto) ret = *iter;
                 repeat = ++iter != range.end();
                 if constexpr (std::is_reference_v<decltype(ret)>)
@@ -4864,9 +4927,9 @@ namespace ta_test
             flags::SimpleFlag flag_help;
 
             CFG_TA_API HelpPrinter();
-            std::vector<flags::BasicFlag *> GetFlags() override;
-            void OnUnknownFlag(std::string_view flag, bool &abort) override;
-            void OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort) override;
+            std::vector<flags::BasicFlag *> GetFlags() noexcept override;
+            void OnUnknownFlag(std::string_view flag, bool &abort) noexcept override;
+            void OnMissingFlagArgument(std::string_view flag, const flags::BasicFlag &flag_obj, bool &abort) noexcept override;
         };
 
         // Responds to `--include` and `--exclude` to select which tests to run.
@@ -4887,9 +4950,9 @@ namespace ta_test
             std::vector<Pattern> patterns;
 
             CFG_TA_API TestSelector();
-            std::vector<flags::BasicFlag *> GetFlags() override;
-            void OnFilterTest(const BasicTestInfo &test, bool &enable) override;
-            void OnPreRunTests(const RunTestsInfo &data) override;
+            std::vector<flags::BasicFlag *> GetFlags() noexcept override;
+            void OnFilterTest(const BasicTestInfo &test, bool &enable) noexcept override;
+            void OnPreRunTests(const RunTestsInfo &data) noexcept override;
 
             CFG_TA_API static flags::StringFlag::Callback GetFlagCallback(bool exclude);
         };
@@ -5007,7 +5070,7 @@ namespace ta_test
 
             std::vector<Entry> entries;
 
-            struct TestState
+            struct ActiveFlag
             {
                 const Entry *entry = nullptr;
 
@@ -5024,6 +5087,12 @@ namespace ta_test
                 };
                 // Some of those can get stale, but we prune the trailing elements every time we create a new generator.
                 std::vector<Elem> elems;
+            };
+
+            struct TestState
+            {
+                // Those are ordered in the order they should be applied, which is in reverse compared to the flag order.
+                std::vector<ActiveFlag> active_flags;
 
                 // Need this for `std::optional<TestState>` to register the default-constructibility.
                 TestState() {}
@@ -5032,14 +5101,14 @@ namespace ta_test
 
             CFG_TA_API GeneratorOverrider();
 
-            std::vector<flags::BasicFlag *> GetFlags() override;
+            std::vector<flags::BasicFlag *> GetFlags() noexcept override;
 
-            void OnPreRunTests(const RunTestsInfo &data) override;
-            void OnPostRunTests(const RunTestsResults &data) override;
-            void OnPostRunSingleTest(const RunSingleTestResults &data) override;
-            bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) override;
-            bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) override;
-            void OnPrePruneLastGenerator(const RunSingleTestProgress &test) override;
+            void OnPreRunTests(const RunTestsInfo &data) noexcept override;
+            void OnPostRunTests(const RunTestsResults &data) noexcept override;
+            void OnPostRunSingleTest(const RunSingleTestResults &data) noexcept override;
+            bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) noexcept override;
+            bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) noexcept override;
+            void OnPrePruneLastGenerator(const RunSingleTestProgress &test) noexcept override;
 
             // Parses a `GeneratorOverrideSeq` object. `target` must initially be empty.
             // Returns the error on failure, or an empty string on success.
@@ -5074,7 +5143,7 @@ namespace ta_test
             flags::BoolFlag flag_unicode;
 
             CFG_TA_API PrintingConfigurator();
-            std::vector<flags::BasicFlag *> GetFlags() override;
+            std::vector<flags::BasicFlag *> GetFlags() noexcept override;
         };
 
         // Prints the test names as they're being run.
@@ -5379,13 +5448,12 @@ namespace ta_test
             CFG_TA_API ProgressPrinter();
 
             void EnableUnicode(bool enable) override;
-            void OnPreRunTests(const RunTestsInfo &data) override;
-            void OnPostRunTests(const RunTestsResults &data) override;
-            void OnPreRunSingleTest(const RunSingleTestInfo &data) override;
-            void OnPostRunSingleTest_BeforePruningGenerators(const RunSingleTestProgress &data) override;
-            void OnPostRunSingleTest(const RunSingleTestResults &data) override;
-            void OnPostGenerate(const GeneratorCallInfo &data) override;
-            void OnPreFailTest(const RunSingleTestProgress &data) override;
+            void OnPreRunTests(const RunTestsInfo &data) noexcept override;
+            void OnPostRunTests(const RunTestsResults &data) noexcept override;
+            void OnPreRunSingleTest(const RunSingleTestInfo &data) noexcept override;
+            void OnPostRunSingleTest(const RunSingleTestResults &data) noexcept override;
+            void OnPostGenerate(const GeneratorCallInfo &data) noexcept override;
+            void OnPreFailTest(const RunSingleTestProgress &data) noexcept override;
         };
 
         // Prints the results of a run.
@@ -5402,7 +5470,7 @@ namespace ta_test
             // Some tests passed, this part shows how many have failed.
             output::TextStyle style_num_failed = {.color = output::TextColor::light_red, .bold = true};
 
-            void OnPostRunTests(const RunTestsResults &data) override;
+            void OnPostRunTests(const RunTestsResults &data) noexcept override;
         };
 
         // Prints failed assertions.
@@ -5448,8 +5516,8 @@ namespace ta_test
             // Same, but when there's more than one subexpression. This should never happen.
             std::u32string chars_in_this_subexpr_inexact = U"in here?";
 
-            void OnAssertionFailed(const BasicAssertionInfo &data) override;
-            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
+            void OnAssertionFailed(const BasicAssertionInfo &data) noexcept override;
+            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept override;
 
             CFG_TA_API void PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const BasicAssertionInfo &data, bool is_most_nested) const;
         };
@@ -5466,9 +5534,9 @@ namespace ta_test
             // We intentionally re-print the scoped logs every time they're needed.
             std::size_t unscoped_log_pos = 0;
 
-            void OnPreRunSingleTest(const RunSingleTestInfo &data) override;
-            void OnPostRunSingleTest(const RunSingleTestResults &data) override;
-            bool PrintLogEntries(output::Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) override;
+            void OnPreRunSingleTest(const RunSingleTestInfo &data) noexcept override;
+            void OnPostRunSingleTest(const RunSingleTestResults &data) noexcept override;
+            bool PrintLogEntries(output::Terminal::StyleGuard &cur_style, std::span<const context::LogEntry> unscoped_log, std::span<const context::LogEntry *const> scoped_log) noexcept override;
         };
 
         // A generic module to analyze exceptions.
@@ -5513,7 +5581,7 @@ namespace ta_test
         {
             std::string chars_error = "Uncaught exception:";
 
-            void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) override;
+            void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept override;
         };
 
         // Prints things related to `TA_MUST_THROW()`.
@@ -5524,8 +5592,8 @@ namespace ta_test
             std::string chars_exception_contents = "While analyzing exception:";
             std::string chars_throw_location = "Thrown here:";
 
-            void OnMissingException(const MustThrowInfo &data, bool &should_break) override;
-            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
+            void OnMissingException(const MustThrowInfo &data, bool &should_break) noexcept override;
+            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept override;
 
             CFG_TA_API void PrintFrame(
                 output::Terminal::StyleGuard &cur_style,
@@ -5533,7 +5601,7 @@ namespace ta_test
                 const BasicModule::MustThrowDynamicInfo *dynamic_info, // Optional.
                 const BasicModule::CaughtExceptionInfo *caught, // Optional. If set, we're analyzing a caught exception. If null, we're looking at a macro call.
                 bool is_most_nested // Must be false if `caught` is set.
-            );
+            ) const;
         };
 
         // Prints stack traces coming from `ta_test::Trace`.
@@ -5541,7 +5609,7 @@ namespace ta_test
         {
             std::u32string chars_func_name_prefix = U"In function: ";
 
-            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) override;
+            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept override;
         };
 
         // Detects whether the debugger is attached in a platform-specific way.
@@ -5558,20 +5626,20 @@ namespace ta_test
 
             CFG_TA_API DebuggerDetector();
 
-            std::vector<flags::BasicFlag *> GetFlags() override;
+            std::vector<flags::BasicFlag *> GetFlags() noexcept override;
 
             CFG_TA_API bool IsDebuggerAttached() const;
-            void OnAssertionFailed(const BasicAssertionInfo &data) override;
-            void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) override;
-            void OnMissingException(const MustThrowInfo &data, bool &should_break) override;
-            void OnPreTryCatch(bool &should_catch) override;
-            void OnPostRunSingleTest(const RunSingleTestResults &data) override;
+            void OnAssertionFailed(const BasicAssertionInfo &data) noexcept override;
+            void OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept override;
+            void OnMissingException(const MustThrowInfo &data, bool &should_break) noexcept override;
+            void OnPreTryCatch(bool &should_catch) noexcept override;
+            void OnPostRunSingleTest(const RunSingleTestResults &data) noexcept override;
         };
 
         // A little module that examines `DebuggerDetector` and notifies you when it detected a debugger.
         struct DebuggerStatePrinter : BasicPrintingModule
         {
-            void OnPreRunTests(const RunTestsInfo &data) override;
+            void OnPreRunTests(const RunTestsInfo &data) noexcept override;
         };
     }
 }
