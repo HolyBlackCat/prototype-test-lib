@@ -3123,8 +3123,23 @@ std::string ta_test::modules::ProgressPrinter::MakeGeneratorSummary(const RunSin
 }
 
 ta_test::modules::ProgressPrinter::ProgressPrinter()
+    : flag_progress("progress", "Print test names before running them (enabled by default).",
+        [](const Runner &runner, BasicModule &this_module, bool enable)
+        {
+            (void)runner;
+
+            // The cast should never fail.
+            auto &self = dynamic_cast<ProgressPrinter &>(this_module);
+            self.show_progress = enable;
+        }
+    )
 {
     EnableUnicode(true);
+}
+
+std::vector<ta_test::flags::BasicFlag *> ta_test::modules::ProgressPrinter::GetFlags() noexcept
+{
+    return {&flag_progress};
 }
 
 void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
@@ -3273,43 +3288,46 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestIn
 
     state.per_test.per_repetition.prev_rep_failed = !state.failed_test_stack.empty();
 
-    auto cur_style = terminal.MakeStyleGuard();
-
-    { // Print the message when first starting tests, or when resuming from a failure.
-        bool is_first_test_first_repetition = state.test_counter == 0 && state.per_test.repetition_counter == 0;
-
-        if (is_first_test_first_repetition || state.per_test.prev_failed || state.per_test.per_repetition.prev_rep_failed)
-        {
-            terminal.Print(cur_style, "\n{}{}\n",
-                is_first_test_first_repetition ? style_starting_tests : style_continuing_tests,
-                is_first_test_first_repetition ? chars_starting_tests : chars_continuing_tests
-            );
-        }
-    }
-
-    // Print the current test name (and groups, if any).
-    ProduceTree(state.stack, data.test->Name(), [&](std::size_t segment_index, std::string_view segment, bool is_last_segment)
+    if (show_progress)
     {
+        auto cur_style = terminal.MakeStyleGuard();
 
-        // Whether we're reentering this group after a failed test.
-        bool is_continued = segment_index < state.failed_test_stack.size() && state.failed_test_stack[segment_index] == segment;
+        { // Print the message when first starting tests, or when resuming from a failure.
+            bool is_first_test_first_repetition = state.test_counter == 0 && state.per_test.repetition_counter == 0;
 
-        PrintContextLinePrefix(cur_style, *data.all_tests,
-            !is_last_segment ? TestCounterStyle::none :
-            is_continued     ? TestCounterStyle::repeated :
-                               TestCounterStyle::normal
-        );
-        PrintContextLineIndentation(cur_style, state.stack.size(), 0);
+            if (is_first_test_first_repetition || state.per_test.prev_failed || state.per_test.per_repetition.prev_rep_failed)
+            {
+                terminal.Print(cur_style, "\n{}{}\n",
+                    is_first_test_first_repetition ? style_starting_tests : style_continuing_tests,
+                    is_first_test_first_repetition ? chars_starting_tests : chars_continuing_tests
+                );
+            }
+        }
 
-        // Print the test name.
-        terminal.Print(cur_style, "{}{}{}{}{}\n",
-            is_continued ? style_prefix_continuing : style_prefix,
-            is_continued ? chars_test_prefix_continuing : chars_test_prefix,
-            is_continued ? style_continuing_group : is_last_segment ? style_name : style_group_name,
-            segment,
-            is_last_segment ? "" : "/"
-        );
-    });
+        // Print the current test name (and groups, if any).
+        ProduceTree(state.stack, data.test->Name(), [&](std::size_t segment_index, std::string_view segment, bool is_last_segment)
+        {
+
+            // Whether we're reentering this group after a failed test.
+            bool is_continued = segment_index < state.failed_test_stack.size() && state.failed_test_stack[segment_index] == segment;
+
+            PrintContextLinePrefix(cur_style, *data.all_tests,
+                !is_last_segment ? TestCounterStyle::none :
+                is_continued     ? TestCounterStyle::repeated :
+                                   TestCounterStyle::normal
+            );
+            PrintContextLineIndentation(cur_style, state.stack.size(), 0);
+
+            // Print the test name.
+            terminal.Print(cur_style, "{}{}{}{}{}\n",
+                is_continued ? style_prefix_continuing : style_prefix,
+                is_continued ? chars_test_prefix_continuing : chars_test_prefix,
+                is_continued ? style_continuing_group : is_last_segment ? style_name : style_group_name,
+                segment,
+                is_last_segment ? "" : "/"
+            );
+        });
+    }
 }
 
 void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestResults &data) noexcept
@@ -3458,9 +3476,12 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
 
 void ta_test::modules::ProgressPrinter::OnPostGenerate(const GeneratorCallInfo &data) noexcept
 {
-    auto cur_style = terminal.MakeStyleGuard();
-    if (data.generating_new_value || state.per_test.per_repetition.prev_rep_failed)
-        PrintGeneratorInfo(cur_style, *data.test, *data.generator, !data.generating_new_value);
+    if (show_progress)
+    {
+        auto cur_style = terminal.MakeStyleGuard();
+        if (data.generating_new_value || state.per_test.per_repetition.prev_rep_failed)
+            PrintGeneratorInfo(cur_style, *data.test, *data.generator, !data.generating_new_value);
+    }
 }
 
 void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgress &data) noexcept

@@ -104,9 +104,6 @@ int main(int argc, char **argv)
 //     or
 //     THIS: expand ForEach to allow "any" elem to be checked; expand context to allow pointing to element
 
-// Quiet flag: --no-progress
-// Failing a test should print the values of generators? Or not?
-
 // Test without exceptions.
 // Test without RTTI. What about exception type names?
 
@@ -120,7 +117,6 @@ int main(int argc, char **argv)
 // Split the runner (with all modules) into a separate header? Including most utility functions too.
 
 // Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
-// Sort declarations, then sort definitions.
 
 // Check that paths are clickable in Visual Studio
 

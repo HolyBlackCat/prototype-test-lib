@@ -5315,6 +5315,10 @@ namespace ta_test
             // The source locations of the failed tests.
             output::TextStyle style_summary_path = {.color = output::TextColor::none};
 
+            // Whether to print the progress.
+            bool show_progress = true;
+            flags::BoolFlag flag_progress;
+
           protected:
             struct State
             {
@@ -5446,6 +5450,8 @@ namespace ta_test
 
           public:
             CFG_TA_API ProgressPrinter();
+
+            std::vector<flags::BasicFlag *> GetFlags() noexcept override;
 
             void EnableUnicode(bool enable) override;
             void OnPreRunTests(const RunTestsInfo &data) noexcept override;
