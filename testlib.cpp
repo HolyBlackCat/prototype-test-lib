@@ -1670,8 +1670,12 @@ int ta_test::Runner::Run()
             }();
 
             // We need this to be late, since the test can fail while pruning generators.
+            results.num_tests_with_repetitions_total++;
             if (guard.state.failed)
+            {
                 any_repetition_failed = true;
+                results.num_tests_with_repetitions_failed++;
+            }
 
             guard.state.is_last_generator_repetition = guard.state.generator_stack.empty();
 
@@ -3589,6 +3593,10 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
     std::size_t num_tests_passed = data.num_tests - data.failed_tests.size();
     std::size_t num_tests_failed = data.failed_tests.size();
 
+    std::size_t num_reps_passed = data.num_tests_with_repetitions_total - data.num_tests_with_repetitions_failed;
+    std::size_t num_reps_failed = data.num_tests_with_repetitions_failed;
+    bool print_reps = data.num_tests_with_repetitions_total > data.num_tests;
+
     std::size_t num_checks_passed = data.num_checks_total - data.num_checks_failed;
     std::size_t num_checks_failed = data.num_checks_failed;
 
@@ -3620,6 +3628,8 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
         // The header.
         RowHeader(style_table_header, "");
         Cell(chars_col_tests);
+        if (print_reps)
+            Cell(chars_col_repetitions);
         Cell(chars_col_checks);
         terminal.Print("\n");
 
@@ -3645,6 +3655,8 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
         {
             RowHeader(style_total, chars_total_executed);
             Cell(num_tests_passed + num_tests_failed);
+            if (print_reps)
+                Cell(num_reps_passed + num_reps_failed);
             Cell(num_checks_passed + num_checks_failed);
             terminal.Print("\n");
         }
@@ -3655,6 +3667,8 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
             bool is_primary = num_tests_failed == 0;
             RowHeader(is_primary ? style_passed_primary : style_passed, is_primary ? chars_passed_primary : chars_passed);
             Cell(num_tests_passed);
+            if (print_reps)
+                Cell(num_reps_passed);
             Cell(num_checks_passed);
             terminal.Print("\n");
         }
@@ -3664,6 +3678,8 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
         {
             RowHeader(style_failed_primary, chars_failed_primary);
             Cell(num_tests_failed);
+            if (print_reps)
+                Cell(num_reps_failed);
             Cell(num_checks_failed);
             terminal.Print("\n");
         }

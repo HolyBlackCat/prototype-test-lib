@@ -3,9 +3,6 @@
 
 #include "testlib.h"
 
-// Print the number of variants in the summary, if they exist.
-
-
 #if 0
 
             Tests  Variants    Checks
@@ -100,12 +97,6 @@ int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
-
-// Report how many repetitions per test failed/passed/total.
-// Different global summary style: (3 columns? tests, repetitions(?), asserts)
-//     Skipped: 42
-//     Passed:  42
-//     FAILED:  42
 
 // TA_FOR_TYPES, sane something for values
 

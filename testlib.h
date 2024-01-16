@@ -2221,6 +2221,11 @@ namespace ta_test
             std::size_t num_checks_total = 0;
             // This counts only the failed checks.
             std::size_t num_checks_failed = 0;
+
+            // How many tests ran in total, counting each generator repetition separately.
+            std::size_t num_tests_with_repetitions_total = 0;
+            // How many tests failed, counting each generator repetition separately.
+            std::size_t num_tests_with_repetitions_failed = 0;
         };
         struct RunTestsResults : RunTestsProgress {};
         // This is called first, before any tests run.
@@ -5534,7 +5539,7 @@ namespace ta_test
 
             // Columns.
             std::string chars_col_tests = "Tests";
-            // std::string chars_col_repetitions = "Variants";
+            std::string chars_col_repetitions = "Variants";
             std::string chars_col_checks = "Checks"; // This covers assertions, `TA_MUST_THROW`, `TA_FAIL`.
 
             // No tests are registered at all.
