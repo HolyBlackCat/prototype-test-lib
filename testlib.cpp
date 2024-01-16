@@ -1097,7 +1097,7 @@ void ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
     }
 
     // Fail if the condition is false.
-    if (self.condition_value_known && !self.condition_value)
+    if (self.condition_value_known && !self.condition_value.value)
     {
         thread_state.FailCurrentTest();
         thread_state.current_test->all_tests->modules->Call<&BasicModule::OnAssertionFailed>(self);
@@ -1107,9 +1107,20 @@ void ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
     if (self.should_break)
         self.break_func();
 
+    // Increment total checks counter. I'd do it before running the callback, but we need to know the flags.
+    bool increment_counters = !bool(self.condition_value.flags & AssertFlags::no_increment_check_counters);
+    if (increment_counters)
+        const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_total++;
+
     // Interrupt the test if the condition is false or on an exception.
-    if (!self.condition_value_known || !self.condition_value)
+    if (!self.condition_value_known || !self.condition_value.value)
+    {
+        // Increment failed checks counter.
+        if (increment_counters)
+            const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
+
         throw InterruptTestException{};
+    }
 }
 
 std::optional<std::string_view> ta_test::detail::BasicAssertWrapper::GetUserMessage() const
@@ -1315,6 +1326,9 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
     if (!ThreadState().current_test)
         HardError("Attempted to use `TA_MUST_THROW(...)`, but no test is currently running.", HardErrorKind::user);
 
+    // Increment total checks counter.
+    const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_total++;
+
     try
     {
         context::FrameGuard guard({self.info, &self.info->info}); // A wonky owning pointer that points to a subobject.
@@ -1335,6 +1349,9 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
     thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(self.info->info, should_break);
     if (should_break)
         self.break_func();
+
+    // Increment failed checks counter.
+    const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
 
     throw InterruptTestException{};
 }
@@ -1941,8 +1958,8 @@ More than one `--generate` flag can be active in a given test at a time. They ru
 Some notes:
 * This flag changes the generator semantics slightly, making subsequent calls to the generator lambda happen between the test repetitions, as opposed to
     when the control flow reaches the `TA_GENERATE(...)` call, to avoid entering the test when all future values are disabled.
-    This shouldn't affect you much, unless you're doing something unusual in the generator callback, or unless you're throwing from it and trying
-    to catch the resulting `InterruptTestException`, which isn't possible when this flag controls a generator.
+    This shouldn't affect you much, unless you're doing something unusual in the generator callback, or unless you're throwing from it
+    (then the repetition counters will can be slightly off, and trying to catch the resulting `InterruptTestException` stops being possible).
 * Not all types can be deserialized from strings, but index-based operators will always work.
     We support scalars, strings (with standard escape sequences), containers (as printed by `std::format()`: {...} sets, {a:b, c:d} maps, [...] other containers, and (...) tuples).
     Custom type support can be added by specializing `ta_test::string_conv::FromStringTraits`.
@@ -3189,7 +3206,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data) 
             num_skipped != 1 ? "s" : "",
             data.num_tests,
             data.num_tests_with_skipped,
-            data.num_tests != 1 ? "s" : ""
+            data.num_tests_with_skipped != 1 ? "s" : ""
         );
     }
 }
@@ -3568,59 +3585,91 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 
     terminal.Print("\n");
 
-    std::size_t num_passed = data.num_tests - data.failed_tests.size();
-    std::size_t num_skipped = data.num_tests_with_skipped - data.num_tests;
+    std::size_t num_tests_skipped = data.num_tests_with_skipped - data.num_tests;
+    std::size_t num_tests_passed = data.num_tests - data.failed_tests.size();
+    std::size_t num_tests_failed = data.failed_tests.size();
 
-    // The number of skipped tests.
-    if (num_skipped > 0 && data.num_tests > 0)
-    {
-        terminal.Print(cur_style, "{}{} test{} skipped\n",
-            style_num_skipped,
-            num_skipped,
-            num_skipped != 1 ? "s" : ""
-        );
-    }
+    std::size_t num_checks_passed = data.num_checks_total - data.num_checks_failed;
+    std::size_t num_checks_failed = data.num_checks_failed;
 
-    if (data.num_tests == 0)
+    if (num_tests_skipped == 0 && num_tests_passed == 0 && num_tests_failed == 0)
     {
-        // No tests to run.
-        terminal.Print(cur_style, "{}NO TESTS TO RUN\n",
-            style_no_tests
-        );
-    }
-    else if (data.failed_tests.size() == 0)
-    {
-        // All passed.
-
-        terminal.Print(cur_style, "{}{}{} TEST{} PASSED\n",
-            style_all_passed,
-            num_passed > 1 ? "ALL " : "",
-            num_passed,
-            num_passed != 1 ? "S" : ""
-        );
+        terminal.Print(cur_style, "{}{}", style_skipped_primary, chars_no_known_tests);
     }
     else
     {
-        // Some or all failed.
-
-        // Passed tests, if any.
-        if (num_passed > 0)
+        auto RowHeader = [&](const output::TextStyle &style, std::string_view value)
         {
-            terminal.Print(cur_style, "{}{} test{} passed\n",
-                style_num_passed,
-                num_passed,
-                num_passed != 1 ? "s" : ""
-            );
+            terminal.Print(cur_style, "{}{:<{}}", style, value, leftmost_column_width);
+        };
+        auto Cell = [&]<typename T>(const T &value)
+        {
+            bool gray_out = false;
+            if constexpr (std::is_integral_v<T>)
+            {
+                if (value == 0)
+                    gray_out = true;
+            }
+
+            auto old_style = cur_style.GetCurrentStyle(); // Need to back up the old style.
+            auto new_style = gray_out ? style_zero : old_style;
+
+            terminal.Print(cur_style, "{} {:>{}}{}", new_style, value, column_width - 1, old_style);
+        };
+
+        // The header.
+        RowHeader(style_table_header, "");
+        Cell(chars_col_tests);
+        Cell(chars_col_checks);
+        terminal.Print("\n");
+
+        // Num skipped.
+        if (num_tests_skipped > 0)
+        {
+            // Num known total.
+            if (num_tests_passed > 0 || num_tests_failed > 0)
+            {
+                RowHeader(style_total, chars_total_known);
+                Cell(num_tests_skipped + num_tests_passed + num_tests_failed);
+                terminal.Print("\n");
+            }
+
+            bool is_primary = num_tests_passed == 0 && num_tests_failed == 0;
+            RowHeader(is_primary ? style_skipped_primary : style_skipped, is_primary ? chars_skipped_primary : chars_skipped);
+            Cell(num_tests_skipped);
+            terminal.Print("\n");
         }
 
-        // Failed tests.
-        terminal.Print(cur_style, "{}{}{} TEST{} FAILED\n",
-            style_num_failed,
-            num_passed == 0 && data.failed_tests.size() > 1 ? "ALL " : "",
-            data.failed_tests.size(),
-            data.failed_tests.size() == 1 ? "" : "S"
-        );
+        // Num total.
+        if ((num_tests_passed > 0 && num_tests_failed > 0) || (num_checks_passed > 0 && num_checks_failed > 0))
+        {
+            RowHeader(style_total, chars_total_executed);
+            Cell(num_tests_passed + num_tests_failed);
+            Cell(num_checks_passed + num_checks_failed);
+            terminal.Print("\n");
+        }
+
+        // Num passed.
+        if (num_tests_passed > 0 || num_checks_passed > 0)
+        {
+            bool is_primary = num_tests_failed == 0;
+            RowHeader(is_primary ? style_passed_primary : style_passed, is_primary ? chars_passed_primary : chars_passed);
+            Cell(num_tests_passed);
+            Cell(num_checks_passed);
+            terminal.Print("\n");
+        }
+
+        // Num failed.
+        if (num_tests_failed > 0)
+        {
+            RowHeader(style_failed_primary, chars_failed_primary);
+            Cell(num_tests_failed);
+            Cell(num_checks_failed);
+            terminal.Print("\n");
+        }
     }
+
+    terminal.Print("\n");
 }
 
 // --- modules::AssertionPrinter ---

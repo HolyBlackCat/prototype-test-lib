@@ -3,7 +3,21 @@
 
 #include "testlib.h"
 
+// Print the number of variants in the summary, if they exist.
+
+
 #if 0
+
+            Tests  Variants    Checks
+Skipped         1         1         1
+Passed          1         1         1
+FAILED          1         1         1
+
+            Tests    Checks
+Skipped         1         1
+Passed          1         1
+FAILED          1         1
+
 bool fof()
 {
     TA_CONTEXT("Hello {}", []{std::cout << "A\n"; return 42;}());
@@ -78,7 +92,8 @@ TA_TEST(foo/test)
 
 TA_TEST(foo/test2)
 {
-    (void)TA_GENERATE(a, {4,5,6});
+    // (void)TA_GENERATE(a, {4,5,6});
+    TA_FAIL;
 }
 
 int main(int argc, char **argv)
@@ -92,12 +107,11 @@ int main(int argc, char **argv)
 //     Passed:  42
 //     FAILED:  42
 
-// Soft assertions?
-// sturct to hold a bool condition and the softness enum, use it as an assertion parameter (templated constructor to properly convert types to bool)
-
 // TA_FOR_TYPES, sane something for values
 
 // TA_VARIANT (should be scoped?)
+
+// Soft TA_MUST_THROW? (accept AssertFlags somehow?)
 
 // Better CaughtException interface?
 //     single function to check combined message
@@ -217,6 +231,29 @@ canv.Print(ta_test::Terminal{});
 TA_CHECK($("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && false);
 
 --- Werror on everything?
+
+Results printer:
+    A custom message when no tests are registered
+        but exit code 0
+
+    Checks counter:
+        TA_CHECK
+            check failure on both false and throw, but NOT on InterruptTestExceptions
+            total is incremented BEFORE entering
+        FAIL
+            increments both total and failure
+        TA_MUST_THROW
+            total is incremented BEFORE entering
+            increments fail if no exception
+
+        TA_GENERATE - MUST NOT increment check counters (check on exception and without it)
+
+    Variants
+        Only show the column when have variants
+
+    All combinations of zero/nonzero counts of: skipped, failed, passed (2^3)
+
+Non-zero exit code when all tests are skipped, or none are registered
 
 Test both shared and static library builds.
     Static library only once, and prefer shared for all tests.

@@ -230,14 +230,17 @@
 #define TA_TEST(name) DETAIL_TA_TEST(name)
 
 // Check condition, immediately fail the test if false.
-// The condition can be followed by a custom message, then possibly by format arguments.
+// You can pass an instance of `ta_test::AssertFlags` before the condition (in particular, `ta_test::soft`).
+// You can also pass an instance of `ta_test::AssertParam` as the only parameter, which contains both the flags and the condition.
+// The first parentheses can be followed by another ones, containing the custom message, and possibly formatting arguments for it.
 // The custom message is evaluated only if the condition is false, so you can use expensive calls in it.
-// Returns the same boolean that was passed as the condition.
+// Returns void.
 // Usage:
 //     TA_CHECK(x == 42);
 //     TA_CHECK($(x) == 42); // `$` will print the value of `x` on failure.
 //     TA_CHECK($(x) == 42)("Checking stuff!"); // Add a custom message.
 //     TA_CHECK($(x) == 42)("Checking {}!", "stuff"); // Custom message with formatting.
+//     TA_CHECK(ta_test::soft, $(x) == 42); // Let the test continue after a failure.
 #define TA_CHECK(...) DETAIL_TA_CHECK("TA_CHECK", #__VA_ARGS__, __VA_ARGS__)
 // Equivalent to `TA_CHECK(false)`, except the printed message is slightly different.
 // Also accepts an optional message: `TA_FAIL("Checking {}!", "stuff");`.
@@ -324,7 +327,7 @@
 #define DETAIL_TA_CHECK(macro_name_, str_, ...) \
     /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
     ~::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__>(\
-        [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(__VA_ARGS__);},\
+        [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(::ta_test::AssertParam(__VA_ARGS__));},\
         []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
     )\
     .DETAIL_TA_ADD_MESSAGE
@@ -404,6 +407,40 @@ namespace ta_test
     // You can catch and rethrow this before a `catch (...)` to still be able to abort tests inside one.
     // You could throw this manually, but I don't see why you'd want to.
     struct InterruptTestException {};
+
+    // Flags for `TA_CHECK(...)`. Pass them before the condition, as an optional parameter.
+    enum class AssertFlags
+    {
+        // Don't throw `InterruptTestException` on failure, but the test still fails.
+        soft = 1 << 0,
+        // Don't increment the statistics counters which are printed at the end of execution.
+        // This is mostly for internal use.
+        no_increment_check_counters = 1 << 1,
+    };
+    DETAIL_TA_FLAG_OPERATORS(AssertFlags)
+    using enum AssertFlags;
+
+    // Arguments of `TA_CHECK(...)` are passed to the constructor of this class.
+    // You can pass and instance of this directly to `TA_CHECK(...)` too.
+    struct AssertParam
+    {
+        AssertFlags flags{};
+        bool value = false;
+
+        constexpr AssertParam() {}
+
+        template <typename T>
+        constexpr AssertParam(T &&value)
+        requires requires{std::forward<T>(value) ? true : false;}
+            : value(std::forward<T>(value) ? true : false)
+        {}
+
+        template <typename T>
+        constexpr AssertParam(AssertFlags flags, T &&value)
+        requires requires{std::forward<T>(value) ? true : false;}
+            : flags(flags), value(std::forward<T>(value) ? true : false)
+        {}
+    };
 
     // Metaprogramming helpers.
     namespace meta
@@ -2179,6 +2216,11 @@ namespace ta_test
         struct RunTestsProgress : RunTestsInfo
         {
             std::vector<const BasicTestInfo *> failed_tests;
+
+            // This counts total checks, no matter if failed or not: TA_CHECK, TA_MUST_THROW, FAIL.
+            std::size_t num_checks_total = 0;
+            // This counts only the failed checks.
+            std::size_t num_checks_failed = 0;
         };
         struct RunTestsResults : RunTestsProgress {};
         // This is called first, before any tests run.
@@ -2999,7 +3041,7 @@ namespace ta_test
             // Prefer `Print()`.
             CFG_TA_API void PrintLow(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) const;
 
-            // Resets the text style when constructed and when destructed.
+            // Stores the current text style. Resets the text style when constructed and when destructed.
             // Can't be constructed manually, use `MakeStyleGuard()`.
             class StyleGuard
             {
@@ -3017,8 +3059,10 @@ namespace ta_test
 
                 CFG_TA_API ~StyleGuard();
 
-                // Pokes the terminal to reset the style, usually before and after running user code.
+                // Pokes the terminal to reset the style. This is called automatically in the constructor and in the destructor.
                 CFG_TA_API void ResetStyle();
+
+                [[nodiscard]] const TextStyle &GetCurrentStyle() const {return cur_style;}
             };
 
             [[nodiscard]] StyleGuard MakeStyleGuard()
@@ -3626,7 +3670,7 @@ namespace ta_test
         // You can also inherit custom assertion classes from this, if they don't need the expression decomposition provided by `AssertWrapper<T>`.
         class BasicAssertWrapper : public BasicModule::BasicAssertionInfo
         {
-            bool condition_value = false;
+            AssertParam condition_value = false;
 
             // User condition was evaluated to completion.
             bool condition_value_known = false;
@@ -3701,30 +3745,25 @@ namespace ta_test
             BasicAssertWrapper(const BasicAssertWrapper &) = delete;
             BasicAssertWrapper &operator=(const BasicAssertWrapper &) = delete;
 
-            template <typename T>
-            void EvalCond(T &&value)
+            void EvalCond(AssertParam param)
             {
-                // Using `? :` to force a contextual bool conversion.
-                condition_value = std::forward<T>(value) ? true : false;
+                condition_value = param;
                 condition_value_known = true;
             }
 
             template <typename F>
             Evaluator &AddMessage(const F &func)
             {
-                if (!condition_value)
+                message_func = [](const void *data)
                 {
-                    message_func = [](const void *data)
+                    std::string ret;
+                    (*static_cast<const F *>(data))([&]<typename ...P>(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
                     {
-                        std::string ret;
-                        (*static_cast<const F *>(data))([&]<typename ...P>(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
-                        {
-                            ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
-                        });
-                        return ret;
-                    };
-                    message_data = &func;
-                }
+                        ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                    });
+                    return ret;
+                };
+                message_data = &func;
                 return DETAIL_TA_ADD_MESSAGE;
             }
 
@@ -4134,7 +4173,7 @@ namespace ta_test
                 // Using the assertion macro to nicely print exceptions, and to fail the test if this throws something.
                 // We can't rely on automatic test failure on exceptions, because this function can get called outside of the test-wide try-catch,
                 //   when `--generate` is involved.
-                TA_CHECK( generate_value() )("Generating a value in `TA_GENERATE(...)`.");
+                TA_CHECK( no_increment_check_counters, generate_value() )("Generating a value in `TA_GENERATE(...)`.");
 
                 this->this_value_is_custom = false;
                 this->num_generated_values++;
@@ -5465,16 +5504,44 @@ namespace ta_test
         // Prints the results of a run.
         struct ResultsPrinter : BasicPrintingModule
         {
+            // The table header.
+            output::TextStyle style_table_header = {.color = output::TextColor::light_white};
+            // Total number of tests (with and without skipped).
+            output::TextStyle style_total = {.color = output::TextColor::light_black};
+
+            // Zero numbers use this style instead of their normal styles.
+            output::TextStyle style_zero = {.color = output::TextColor::light_black};
+
             // The number of skipped tests.
-            output::TextStyle style_num_skipped = {.color = output::TextColor::light_blue};
-            // No tests to run.
-            output::TextStyle style_no_tests = {.color = output::TextColor::light_blue, .bold = true};
-            // All tests passed.
-            output::TextStyle style_all_passed = {.color = output::TextColor::light_green, .bold = true};
-            // Some tests passed, this part shows how many have passed.
-            output::TextStyle style_num_passed = {.color = output::TextColor::light_green};
-            // Some tests passed, this part shows how many have failed.
-            output::TextStyle style_num_failed = {.color = output::TextColor::light_red, .bold = true};
+            output::TextStyle style_skipped = {.color = output::TextColor::light_blue};
+            // The number of skipped tests, when all tests were skipped.
+            output::TextStyle style_skipped_primary = {.color = output::TextColor::light_blue, .bold = true};
+            // The number of passed tests.
+            output::TextStyle style_passed = {.color = output::TextColor::light_green};
+            // The number of passed tests, when all tests passed (or were skipped).
+            output::TextStyle style_passed_primary = {.color = output::TextColor::light_green, .bold = true};
+            // The number of failed tests.
+            output::TextStyle style_failed_primary = {.color = output::TextColor::light_red, .bold = true};
+
+            // Rows. `..._primary` is used for the last (most important) row.
+            std::string chars_skipped           = "Skipped";
+            std::string chars_passed            = "Passed";
+            std::string chars_skipped_primary   = "SKIPPED";
+            std::string chars_passed_primary    = "PASSED";
+            std::string chars_failed_primary    = "FAILED";
+            std::string chars_total_known       = "Known";
+            std::string chars_total_executed = "Executed";
+
+            // Columns.
+            std::string chars_col_tests = "Tests";
+            // std::string chars_col_repetitions = "Variants";
+            std::string chars_col_checks = "Checks"; // This covers assertions, `TA_MUST_THROW`, `TA_FAIL`.
+
+            // No tests are registered at all.
+            std::string chars_no_known_tests = "NO TESTS ARE REGISTERED";
+
+            int column_width = 10;
+            int leftmost_column_width = 8; // This is used for the column with the row names. Should be equal to max row header length.
 
             void OnPostRunTests(const RunTestsResults &data) noexcept override;
         };
