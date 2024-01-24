@@ -1,9 +1,17 @@
 #include <exception>
 #include <iostream>
+#include <deque>
 
 #include "testlib.h"
 
+// Add `expand` tag for TA_GENERATE_PARAM
+
+// Try supporting $[...] instead of $(...) - looks cleaner to me (internally make it easier to switch to (...) if desired.
+
+
 #if 0
+
+TA_CHECK( $[($[a] - $[b]).length()] < 42 )
 
             Tests  Variants    Checks
 Skipped         1         1         1
@@ -81,10 +89,17 @@ bool fof()
 }
 #endif
 
+#if 0
+
+#endif
 TA_TEST(foo/test)
 {
-    (void)TA_GENERATE(a, {1,2,3});
-    (void)TA_GENERATE(b, {4,5,6});
+    std::cout << TA_GENERATE(x, {nullptr}) << '\n';
+
+    TA_GENERATE_PARAM(auto T, nullptr, 42)
+    {
+        std::cout << (void*)(T) << '\n';
+    };
 }
 
 TA_TEST(foo/test2)
@@ -121,35 +136,35 @@ int main(int argc, char **argv)
 
 // Split the runner (with all modules) into a separate header? Including most utility functions too.
 
-// Rebrand using this regex: `(?<![a-z])ta(?![a-z])` (not case-sensitive, not whole word).
+// Optimize the calls to the `BasicPrintingModule` with the module lists too.
 
 // Check that paths are clickable in Visual Studio
 
-// Optimize the calls to the `BasicPrintingModule` with the module lists too.
+// Re-check lists below:
 
 // Later:
-//     Somehow don't evaluate the message if the assertion passes? Perhaps change the syntax to `CHECK(cond, LOG("{}", 42))`, reusing one of the log macros?
-//         Same for the arguments passed to `Trace`?
+//     Should we transition to __PRETTY_FUNCTION__/__FUNCSIG__-based type names?
 //     Multithreading? Thread inheritance system.
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
 //     What's the deal with SEH? Do we need to do anything?
-//     Do we force-open the console on Windows if there's none? That's when `GetFileType(GetStdHandle(STD_OUTPUT_HANDLE))` returns 0.
-//     Take into account the terminal width? By slicing off the whole right section, and drawing it on the next lines.
-//     Length cap on serialized values, configurable.
-//     Signal and SEH handling?
+//     Signal handling?
 
 // Maybe not?
 //     Soft TA_MUST_THROW?
 //     Allow more characters in bracket-less form: `:`, `.`, `->`?
-//     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
-//     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
-//     Deduplicate assertions in stacks? Both when an assertion fails and when an exception is triggered.
+// Maybe not...
 //     Get terminal width, and limit separator length to that value (but still not make them longer than they currently are)
 //     Try to enforce relative paths, and try printing errors on the same line as paths.
-//     $(...) should tolerate non-printable arguments, but only in non-dependent context.
+//     Decorate line breaks in logs with `//` as well?
+//     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
+// Probably not:
+//     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
+//     $(...) should tolerate non-printable arguments, but only in non-dependent context - stops being possible when we transition to `$[...]` spelling.
 //     In, $(...) for really long lines, do just [1], then a reference at the bottom: `[1]: ...`. (Decide on the exact spelling, for this to not be confused with a single-element vector, or whatever)
 //         What's the point? $(...) isn't lazy, so you shouldn't have long lines in it anyway. Use the user message, which is lazy.
-//     Decorate line breaks in logs with `//` as well?
+//     Do we force-open the console on Windows if there's none? That's when `GetFileType(GetStdHandle(STD_OUTPUT_HANDLE))` returns 0.
+//         Maybe not? If this is a release build, then we'll also not have argc/argv, and if the user goes out of their way to construct them,
+//         they can also open the console themselves.
 
 // Unclear how:
 //     Draw a fat bracket while explaining each test failure?
@@ -181,6 +196,7 @@ int main(int argc, char **argv)
     int, short, long, float, double, long double
     std::vector<int> std::set<int>, std::map<int, int>
     tuple (including empty), pair
+    nullptr
 
 --- FromString
     Same types as in ToString
@@ -478,6 +494,37 @@ TA_CHECK:
         hard error by default
         interrupt-test-exception with the flag
     Build error on using a local variable
+
+--- TA_GENERATE_PARAM
+    Work with -g
+        For duplicate elements, -g must return the first one.
+        In the error message, print the list of allowed strings, but don't repeat them, and don't sort them.
+    When generating a value, don't break when only some values are printable (non-printable shouldn't show `= ...` in the log)
+    The user can return values from the lambda:
+        Forward the result (The return type is `auto`, not `decltype(auto)`)
+        Check for [[nodiscard]]
+    Not adding (...) on complex a initial parameter should give a pretty static_assert, not a cryptic error (preferably)
+    What should work without (...)
+        typename
+        class
+        auto
+    (...) can only be followed by a single identifier
+    Check for crap like `(std::)integral` by declaring a dummy lambda without a parameter name
+
+    Default return type is auto (check that it's not a reference).
+    User can -> override return type (check that references are forwarded correctly)
+
+    Single arg = ok
+    0 args = nice error
+
+    `auto` uses `string_conv::ToString()` to print stuff (because MSVC prints template param `int`s in hex otherwise, which is lame),
+        but falling back to native printing
+    But `typename` uses __PRETTY_FUNCTION__ printing, because that's generally nicer (check this while being inside of various templates,
+        to make sure they don't mess with our name parsing).
+
+    Test NTTPs: `(int) X, 10, 20`.
+    Test `nullptr`.
+
 
 --- All the macros nicely no-op when tests are disabled
     TA_CHECK validates the arguments (crash on call?)

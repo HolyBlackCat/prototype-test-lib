@@ -108,7 +108,7 @@ bool ta_test::text::TestNameMatchesRegex(std::string_view name, const std::regex
 std::string ta_test::string_conv::DefaultFallbackToStringTraits<char>::operator()(char value) const
 {
     char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
-    text::escape::EscapeString({&value, 1}, ret, false);
+    *text::escape::EscapeString({&value, 1}, ret, false) = '\0';
     return ret;
 }
 
@@ -120,9 +120,44 @@ std::string ta_test::string_conv::DefaultFallbackToStringTraits<std::string_view
     return ret;
 }
 
+std::string ta_test::string_conv::DefaultToStringTraits<std::nullptr_t>::operator()(std::nullptr_t) const
+{
+    return "nullptr";
+}
+
 std::string ta_test::string_conv::DefaultToStringTraits<std::type_index>::operator()(std::type_index value) const
 {
     return text::Demangler{}(value.name());
+}
+
+std::string ta_test::string_conv::DefaultFromStringTraits<char>::operator()(char &target, const char *&string) const
+{
+    return text::escape::UnescapeString(string, '\'', &target, true);
+}
+
+std::string ta_test::string_conv::DefaultFromStringTraits<std::nullptr_t>::operator()(std::nullptr_t &target, const char *&string) const
+{
+    target = nullptr; // Just in case?
+
+    if (string[0] == '0')
+    {
+        if (string[1] == 'x' && string[2] == '0')
+        {
+            string += 3;
+            return ""; // `0x0`
+        }
+
+        string += 1;
+        return ""; // `0`
+    }
+
+    if (string[0] == 'n' && string[1] == 'u' && string[2] == 'l' && string[3] == 'l' && string[4] == 'p' && string[5] == 't' && string[6] == 'r')
+    {
+        string += 7;
+        return ""; // `nullptr`
+    }
+
+    return "Expected one of: `nullptr`, `0x0`, `0`.";
 }
 
 ta_test::context::Context ta_test::context::CurrentContext()

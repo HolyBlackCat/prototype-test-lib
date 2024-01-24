@@ -1,11 +1,15 @@
 #pragma once
 
+// The proper preprocessor or bust.
+#if defined(_MSC_VER) && !defined(__clang__) && (!defined(_MSVC_TRADITIONAL) || _MSVC_TRADITIONAL == 1)
+#error The standard-conformant MSVC preprocessor is required, enable it with `/Zc:preprocessor`.
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <compare>
 #include <concepts>
-#include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -208,6 +212,14 @@
 #endif
 #endif
 
+// The pretty function name.
+// We could use `std::source_location`, but I've had issues with it with at least one combination of Clang+libc++ in the past, so I'm prefering the extensions.
+#ifdef _MSC_VER
+#define CFG_TA_THIS_FUNC_NAME __FUNCSIG__
+#else
+#define CFG_TA_THIS_FUNC_NAME __PRETTY_FUNCTION__
+#endif
+
 #ifndef CFG_TA_NODISCARD_LAMBDA
 #  if CFG_TA_CXX_STANDARD >= 23
 #    define CFG_TA_NODISCARD_LAMBDA [[nodiscard]]
@@ -303,11 +315,34 @@
 // WARNING!! Since the lambda will outlive the test, make sure your captures don't dangle.
 #define TA_GENERATE_FUNC(name, ...) DETAIL_TA_GENERATE_FUNC(name, __VA_ARGS__)
 
+// A version of `TA_GENERATE` for generating types (and other template parameters, such as constant values or templates).
+// Despite how the syntax looks like, the whole test is repeated for each type/value, not just the braced block.
+// Example usage:
+//     TA_GENERATE_PARAM(typename T, int, float, double)
+//     {
+//         // ...
+//     };
+// Note the trailing `;`.
+// The first argument must be one of: `typename T`, `class T`, `auto T` (T = any name),
+//   OR `(...) T` (`...` = parameter kind, such as one of the above or `int`, `template <typename...> typename`, etc).
+//   Certain non-type parameters are impossible to express with this syntax (pointers/references to functions/arrays),
+//   because a part of the type goes after the parameter name. For those, either typedef the type, or just use `auto`.
+// The remaining arguments are a non-empty list of parameter arguments. They can contain commas, or macros can work with that.
+// The `{...}` body is a lambda. You can return something from it, then the macro returns the same thing.
+//   The default return type is `auto`, but you can add `-> ...` after the macro to change the type (and possibly return by reference).
+#define TA_GENERATE_PARAM(param, first_elem, ...) \
+    DETAIL_TA_GENERATE_PARAM(param, first_elem, __VA_ARGS__)
+
 
 // --- INTERNAL MACROS ---
 
-#define DETAIL_TA_CAT(x, y) DETAIL_TA_CAT_(x, y)
-#define DETAIL_TA_CAT_(x, y) x##y
+#define DETAIL_TA_NULL(...)
+
+#define DETAIL_TA_STR(...) DETAIL_TA_STR_(__VA_ARGS__)
+#define DETAIL_TA_STR_(...) #__VA_ARGS__
+
+#define DETAIL_TA_CAT(x, ...) DETAIL_TA_CAT_(x, __VA_ARGS__)
+#define DETAIL_TA_CAT_(x, ...) x##__VA_ARGS__
 
 #define DETAIL_TA_TEST(name) \
     inline void _ta_test_func(::ta_test::meta::ConstStringTag<#name>); \
@@ -365,6 +400,60 @@
 #define DETAIL_TA_GENERATE_FUNC(name, ...) \
     ::ta_test::detail::GenerateValue<#name, __FILE__, __LINE__, __COUNTER__>([&]{return __VA_ARGS__;})
 
+#define DETAIL_TA_GENERATE_PARAM(param, first_elem, ...) \
+    ::ta_test::detail::ParamGenerator<\
+        __FILE__, __LINE__, __COUNTER__, \
+        /* Parameter name string. */\
+        DETAIL_TA_STR(DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME(param)), \
+        /* Bake the parameter list into a lambda. */\
+        []<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) ..._ta_test_P>() \
+        { \
+            return []<typename _ta_test_F, typename ..._ta_test_Q>() \
+            { \
+                return ::std::array{+[](_ta_test_F &&f, _ta_test_Q &&... q) -> decltype(auto) {return f.template operator()<_ta_test_P>(std::forward<_ta_test_Q>(q)...);}...}; \
+            }; \
+        } \
+        .template operator()<first_elem __VA_OPT__(,) __VA_ARGS__>(), \
+        /* Another lambda to convert arguments to strings. */\
+        ::ta_test::detail::ParamNameFunc<[]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) _ta_test_NameOf>(::ta_test::meta::PreferenceTagA) -> std::string \
+        {constexpr auto s = ::ta_test::detail::ParseEntityNameFromString<CFG_TA_THIS_FUNC_NAME>(); return {s.data(), s.data() + s.size() - 1};}> \
+        >{} \
+    ->* [&]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME(param)>()
+
+// Internal macro for `DETAIL_TA_GENERATE_PARAM(...)`.
+// If the argument starts with one of: `typename`, `class`, `auto`, then returns that word. Otherwise the argument must be of the form `(a)b`, then returns `a`.
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(...) \
+    DETAIL_TA_CAT(DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_C_, \
+        DETAIL_TA_CAT( \
+            DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_B_, \
+            DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_A __VA_ARGS__ \
+        ) \
+    ) \
+    /* Extra closing: */ )
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_A(...) 0 (__VA_ARGS__)
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_B_0(...) 0 (__VA_ARGS__)
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_B_DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_A
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_C_0(...) __VA_ARGS__ DETAIL_TA_NULL(
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_C_typename typename DETAIL_TA_NULL(
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_C_class class DETAIL_TA_NULL(
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND_C_auto auto DETAIL_TA_NULL(
+
+// Internal macro for `DETAIL_TA_GENERATE_PARAM(...)`.
+// The argument must start with `(...)` or one of: `typename`, `class`, `auto`. Returns the argument without that part.
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME(...) \
+    DETAIL_TA_CAT(DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_C_, \
+        DETAIL_TA_CAT(DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_B_, \
+            DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_A __VA_ARGS__ \
+        ) \
+    )
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_A(...) 0
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_B_0 0
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_B_DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_A
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_C_0
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_C_typename
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_C_class
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_C_auto
+
 // --- ENUM FLAGS MACROS ---
 
 // Synthesizes operators for a enum of flags: `&`, `|`, and `~`. Also multiplication by a bool.
@@ -411,6 +500,7 @@ namespace ta_test
     // Flags for `TA_CHECK(...)`. Pass them before the condition, as an optional parameter.
     enum class AssertFlags
     {
+        hard = 0,
         // Don't throw `InterruptTestException` on failure, but the test still fails.
         soft = 1 << 0,
         // Don't increment the statistics counters which are printed at the end of execution.
@@ -516,6 +606,10 @@ namespace ta_test
         struct ValuesAreEqual : std::false_type {};
         template <auto X>
         struct ValuesAreEqual<X, X> : std::true_type {};
+
+        // Those are used to prioritize function overloads.
+        struct PreferenceTagA {};
+        struct PreferenceTagB : PreferenceTagA {};
     }
 
     namespace text
@@ -862,8 +956,10 @@ namespace ta_test
         namespace escape
         {
             // Escapes a string, writes the result to `out_iter`. Includes quotes automatically.
+            // Returns the next value of `out_iter`.
+            // NOTE: If you're writing to a raw `char` buffer, you must null-terminate manually!
             template <typename It>
-            constexpr void EscapeString(std::string_view source, It out_iter, bool double_quotes)
+            constexpr It EscapeString(std::string_view source, It out_iter, bool double_quotes)
             {
                 *out_iter++ = "'\""[double_quotes];
 
@@ -905,6 +1001,8 @@ namespace ta_test
                 }
 
                 *out_iter++ = "'\""[double_quotes];
+
+                return out_iter;
             }
 
             // Unescapes a string.
@@ -1121,6 +1219,7 @@ namespace ta_test
         };
 
         // Caches type names produced by `Demangler`.
+        // NOTE: This ignores cvref-qualifiers (because `typeid` does too).
         template <typename T>
         [[nodiscard]] const std::string &TypeName()
         {
@@ -1318,6 +1417,7 @@ namespace ta_test
 
         // Don't specialize this, specialize `ToStringTraits` defined below.
         // `ToStringTraits` inherits from this by default.
+        // This is what the library specializes internally.
         template <typename T, typename = void>
         struct DefaultToStringTraits
         {
@@ -1363,6 +1463,7 @@ namespace ta_test
         {
             CFG_TA_API std::string operator()(std::string_view value) const;
         };
+
         // libstdc++ 13 has a broken non-SFINAE-friendly `formatter<const char *>::set_debug_string()`, which causes issues.
         // `std::string_view` formatter doesn't have this issue, so we just use it here instead.
         // Bug: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=112832
@@ -1370,7 +1471,13 @@ namespace ta_test
         template <> struct DefaultToStringTraits<      char *> : DefaultToStringTraits<std::string_view> {};
         template <> struct DefaultToStringTraits<const char *> : DefaultToStringTraits<std::string_view> {};
         // Somehow this catches const arrays too.
-        template <std::size_t N> struct DefaultFallbackToStringTraits<char[N]> : DefaultFallbackToStringTraits<std::string_view> {};
+        template <std::size_t N> struct DefaultToStringTraits<char[N]> : DefaultToStringTraits<std::string_view> {};
+
+        // A `nullptr`. We override this to print `nullptr`, rather than the default `0x0`.
+        template <> struct DefaultToStringTraits<std::nullptr_t>
+        {
+            CFG_TA_API std::string operator()(std::nullptr_t) const;
+        };
 
         // `ToStringTraits` serializes this as is, without escaping or quotes.
         struct ExactString
@@ -1618,10 +1725,14 @@ namespace ta_test
         template <>
         struct DefaultFromStringTraits<char>
         {
-            [[nodiscard]] std::string operator()(char &target, const char *&string) const
-            {
-                return text::escape::UnescapeString(string, '\'', &target, true);
-            }
+            [[nodiscard]] CFG_TA_API std::string operator()(char &target, const char *&string) const;
+        };
+
+        // Single character.
+        template <>
+        struct DefaultFromStringTraits<std::nullptr_t>
+        {
+            [[nodiscard]] CFG_TA_API std::string operator()(std::nullptr_t &target, const char *&string) const;
         };
 
         // Ranges.
@@ -4192,6 +4303,8 @@ namespace ta_test
             !text::chars::IsDigit(Name.view().front()) && // Doesn't start with a digit.
             std::all_of(Name.view().begin(), Name.view().end(), text::chars::IsIdentifierCharStrict); // Only valid characters.
 
+        // `TA_GENERATE_FUNC(...)` expands to this.
+        // `func` returns the user lambda (it's not the user lambda itself).
         template <
             // Manually specified:
             meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter,
@@ -4320,7 +4433,159 @@ namespace ta_test
 
             return guard.this_generator->GetValue();
         }
+
+
+        // Template parameter generators:
+
+        // Parses a name from a `CFG_TA_THIS_FUNC_NAME` from a specially crafted lambda.
+        template <meta::ConstString S>
+        constexpr auto ParseEntityNameFromString()
+        {
+            constexpr std::string_view view = S.view();
+            #ifdef _MSC_VER
+            // This always works, even if we're inside another `operator()`, because any extra `operator()`s are printed as `::()`.
+            constexpr std::string_view prefix = "::operator ()<";
+            constexpr std::string_view suffix = ">(void) const";
+            #else
+            // GCC prints `[with` before, and sometimes the template parameter kind (`auto` and such).
+            // Clang prints `[` before, but sometimes also enclosing template parameters.
+            // Hence we start with the parameter name. It seems it's always the last parameter, and it seems the parameters aren't sorted.
+            constexpr std::string_view prefix = "_ta_test_NameOf = ";
+            constexpr std::string_view suffix = "]";
+            #endif
+            static_assert(view.ends_with(suffix), "Failed to parse the template argument name, don't know how to do it on your compiler.");
+            constexpr std::size_t n = view.rfind(prefix);
+            static_assert(n != std::string_view::npos, "Failed to parse the template argument name, don't know how to do it on your compiler.");
+            std::array<char, view.size() - n - prefix.size() - suffix.size() + 1> ret{};
+            std::copy(view.data() + n + prefix.size(), view.data() + view.size() - suffix.size(), ret.begin());
+            return ret;
+        }
+
+        // This is used to get template parameter names. `F` is a lambda that returns a `__PRETTY_FUNC__`/`__FUNCSIG__`-based name.
+        // The lambda must be generated by the macro because it can be an arbitrary template template parameter,
+        // which makes it impossible to not generate.
+        template <auto F>
+        struct ParamNameFunc : decltype(F)
+        {
+            using decltype(F)::operator();
+
+            // The name `_ta_test_NameOf` must match what `TA_GENERATE_PARAM(...)` uses internally, and what `ParseEntityNameFromString()` expects.
+            // `A` is unused, it receives `_ta_test_ParamMarker`.
+            template <auto _ta_test_NameOf>
+            // We always need at least some condition here, even if just `requires true`, to have priority over the inherited function.
+            requires string_conv::SupportsToString<decltype(_ta_test_NameOf)>
+            std::string operator()(::ta_test::meta::PreferenceTagB) const
+            {
+                // Prefer `ToString()` if supported.
+                // Otherwise MSVC prints integers in hex, which is stupid.
+                return string_conv::ToString(_ta_test_NameOf);
+            }
+        };
+
+        // Holds the generated parameter index for `TA_GENERATE_PARAM(...)`.
+        // This is convertible to and from a string.
+        template <std::size_t N, typename NameLambda>
+        struct GeneratedParamIndex
+        {
+            static constexpr std::size_t size = N;
+
+            std::size_t index = 0;
+        };
+
+        // `TA_GENERATE_PARAM(...)` expands to this.
+        template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString Name, auto ListLambda, typename NameLambda>
+        struct ParamGenerator
+        {
+            template <typename F>
+            [[nodiscard]] decltype(auto) operator->*(F &&func)
+            {
+                auto name_lambda_wrapped = [](std::size_t i){return ListLambda.template operator()<NameLambda, meta::PreferenceTagB>()[i](NameLambda{}, meta::PreferenceTagB{});};
+
+                static constexpr auto arr = ListLambda.template operator()<F>();
+                auto index = (GenerateValue<Name, LocFile, LocLine, LocCounter>)(
+                    []{
+                        return [i = std::size_t{}](bool &repeat) mutable
+                        {
+                            repeat = i + 1 < arr.size();
+                            return GeneratedParamIndex<arr.size(), decltype(name_lambda_wrapped)>{i++};
+                        };
+                    }
+                );
+                return arr[index.index](std::forward<F>(func));
+            }
+        };
     }
+    // Some internal specializations.
+    template <std::size_t N, typename NameLambda>
+    struct string_conv::DefaultToStringTraits<detail::GeneratedParamIndex<N, NameLambda>>
+    {
+        std::string operator()(detail::GeneratedParamIndex<N, NameLambda> value) const
+        {
+            return NameLambda{}(value.index);
+        }
+    };
+    template <std::size_t N, typename NameLambda>
+    struct string_conv::DefaultFromStringTraits<detail::GeneratedParamIndex<N, NameLambda>>
+    {
+        // If we have duplicate elements in the list, this returns the first one.
+        [[nodiscard]] std::string operator()(detail::GeneratedParamIndex<N, NameLambda> &target, const char *&string) const
+        {
+            if constexpr (N == 0)
+            {
+                return "This type doesn't have any valid values.";
+            }
+            else
+            {
+                // Prepare a list of names. Stable-sort by decreasing length, to give longer strings priority.
+                static const std::vector<std::pair<std::string, std::size_t>> list = []{
+                    std::vector<std::pair<std::string, std::size_t>> ret;
+                    ret.reserve(N);
+                    for (std::size_t i = 0; i < N; i++)
+                        ret.emplace_back(NameLambda{}(i), i);
+                    std::stable_sort(ret.begin(), ret.end(), [](const auto &a, const auto &b){return a.first.size() > b.first.size();});
+                    return ret;
+                }();
+
+                auto iter = std::find_if(list.begin(), list.end(), [&](const auto &p)
+                {
+                    for (std::size_t i = 0; i < p.first.size(); i++)
+                    {
+                        if (p.first[i] != string[i] || string[i] == '\0')
+                            return false;
+                    }
+                    return true;
+                });
+
+                if (iter == list.end())
+                {
+                    std::string error = "Expected one of: ";
+
+                    // To make sure we don't print the same element twice.
+                    std::set<std::string> elems;
+
+                    for (std::size_t i = 0; i < N; i++)
+                    {
+                        std::string elem = NameLambda{}(i);
+                        if (!elems.insert(elem).second)
+                            continue; // Refuse to print the same element twice.
+
+                        if (i != 0)
+                            error += ", ";
+
+                        error += '`';
+                        error += elem;
+                        error += '`';
+                    }
+                    error += '.';
+                    return error;
+                }
+
+                target.index = iter->second;
+                string += iter->first.size();
+                return "";
+            }
+        }
+    };
 
     enum class GeneratorFlags
     {
