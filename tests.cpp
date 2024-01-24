@@ -4,6 +4,9 @@
 
 #include "testlib.h"
 
+// A bool trait whether we should prepend (type) to types when serializing them for generators
+// Enable for integrals but not `char`
+
 // Add `expand` tag for TA_GENERATE_PARAM
 
 // Try supporting $[...] instead of $(...) - looks cleaner to me (internally make it easier to switch to (...) if desired.
@@ -96,9 +99,9 @@ TA_TEST(foo/test)
 {
     std::cout << TA_GENERATE(x, {nullptr}) << '\n';
 
-    TA_GENERATE_PARAM(auto T, nullptr, 42)
+    TA_GENERATE_PARAM(auto T, nullptr, 42, 'A')
     {
-        std::cout << (void*)(T) << '\n';
+        std::cout << T << '\n';
     };
 }
 
@@ -525,6 +528,8 @@ TA_CHECK:
     Test NTTPs: `(int) X, 10, 20`.
     Test `nullptr`.
 
+    For non-char integrals prepend the type: `(int)42`.
+        Make sure -g understands this syntax.
 
 --- All the macros nicely no-op when tests are disabled
     TA_CHECK validates the arguments (crash on call?)

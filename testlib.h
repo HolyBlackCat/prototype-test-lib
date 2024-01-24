@@ -320,16 +320,24 @@
 // Example usage:
 //     TA_GENERATE_PARAM(typename T, int, float, double)
 //     {
+//         T x = 42;
 //         // ...
 //     };
 // Note the trailing `;`.
 // The first argument must be one of: `typename T`, `class T`, `auto T` (T = any name),
-//   OR `(...) T` (`...` = parameter kind, such as one of the above or `int`, `template <typename...> typename`, etc).
+//   or `(...) T` (`...` = parameter kind, such as one of the above, or a type/concept, or a template template parameter).
+//   Here's an example of a template template parameter:
+//       TA_GENERATE_PARAM((template <typename...> typename) T, std::vector, std::deque)
+//       {
+//           T<int> x = {1,2,3};
+//           // ...
+//       };
 //   Certain non-type parameters are impossible to express with this syntax (pointers/references to functions/arrays),
 //   because a part of the type goes after the parameter name. For those, either typedef the type, or just use `auto`.
-// The remaining arguments are a non-empty list of parameter arguments. They can contain commas, or macros can work with that.
-// The `{...}` body is a lambda. You can return something from it, then the macro returns the same thing.
+// The remaining arguments are a non-empty list of parameter arguments. They can contain commas, our macros can work with that.
+// The `{...}` body is a lambda (with `[&]` capture). You can return something from it, then the macro returns the same thing.
 //   The default return type is `auto`, but you can add `-> ...` after the macro to change the type (and possibly return by reference).
+//   Like with `std::visit`, the return type can't depend on the template parameter.
 #define TA_GENERATE_PARAM(param, first_elem, ...) \
     DETAIL_TA_GENERATE_PARAM(param, first_elem, __VA_ARGS__)
 
@@ -1389,6 +1397,8 @@ namespace ta_test
     // String conversions.
     namespace string_conv
     {
+        // --- MISC ---
+
         // This imitates `std::range_format`, except we don't deal with unescaped strings.
         enum class RangeKind
         {
@@ -1398,6 +1408,22 @@ namespace ta_test
             map, // {A: B, C: D}
             string, // "..."
         };
+
+        // The default value of `ClarifyTypeInMixedTypeContexts` (see below).
+        // Don't specialize this, this is specialized by the library internally.
+        template <typename T>
+        struct DefaultClarifyTypeInMixedTypeContexts : std::false_type {};
+
+        // If true, when printed alongside values of different types (currently only in `TA_GENERATE_PARAM(...)`), also print the type.
+        // You can specialize this.
+        template <typename T>
+        struct ClarifyTypeInMixedTypeContexts : DefaultClarifyTypeInMixedTypeContexts<T> {};
+
+        // All scalars look the same otherwise (arithmetic types and pointers, separately),
+        // except `char`s (which are printed as single-quoted characters) and `nullptr`, which weirdly counts as a scalar,
+        // and is printed as `nullptr` (because of our custom trait; `std::format` prints it as `0x0`).
+        template <typename T> requires(std::is_scalar_v<T> && !std::is_same_v<T, char> && !std::is_same_v<T, std::nullptr_t>)
+        struct DefaultClarifyTypeInMixedTypeContexts<T> : std::true_type {};
 
 
         // --- TO STRING ---
@@ -4474,11 +4500,18 @@ namespace ta_test
             template <auto _ta_test_NameOf>
             // We always need at least some condition here, even if just `requires true`, to have priority over the inherited function.
             requires string_conv::SupportsToString<decltype(_ta_test_NameOf)>
-            std::string operator()(::ta_test::meta::PreferenceTagB) const
+            std::string operator()(meta::PreferenceTagB) const
             {
                 // Prefer `ToString()` if supported.
                 // Otherwise MSVC prints integers in hex, which is stupid.
-                return string_conv::ToString(_ta_test_NameOf);
+                std::string value = string_conv::ToString(_ta_test_NameOf);
+
+                // Prepend the type if necessary.
+                // Note, we don't need to remove constness here, it seems `decltype()` can never return const-qualified types here.
+                if constexpr (string_conv::ClarifyTypeInMixedTypeContexts<decltype(_ta_test_NameOf)>::value)
+                    return CFG_TA_FMT_NAMESPACE::format("({}){}", text::TypeName<decltype(_ta_test_NameOf)>(), value);
+                else
+                    return value;
             }
         };
 
