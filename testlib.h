@@ -334,10 +334,15 @@
 //       };
 //   Certain non-type parameters are impossible to express with this syntax (pointers/references to functions/arrays),
 //   because a part of the type goes after the parameter name. For those, either typedef the type, or just use `auto`.
-// The remaining arguments are a non-empty list of parameter arguments. They can contain commas, our macros can work with that.
+// The remaining arguments are a non-empty list of parameter arguments.
 // The `{...}` body is a lambda (with `[&]` capture). You can return something from it, then the macro returns the same thing.
-//   The default return type is `auto`, but you can add `-> ...` after the macro to change the type (and possibly return by reference).
+//   As usual, the default return type is `auto`, but you can add `-> ...` after the macro to change the type (and possibly return by reference).
 //   Like with `std::visit`, the return type can't depend on the template parameter.
+// You can extract the argument list from a template instead of hardcoding it, using `ta_test::expand` like this:
+//     TA_GENERATE_PARAM(typename T, ta_test::expand, std::tuple<A, B, C>)
+// Which is equivalent to:
+//     TA_GENERATE_PARAM(typename T, A, B, C)
+// `ta_test::expand` must be followed by exactly one type, which must be a template specialization `T<U...>` (where `U` can be anything, not necessarily a type).
 #define TA_GENERATE_PARAM(param, first_elem, ...) \
     DETAIL_TA_GENERATE_PARAM(param, first_elem, __VA_ARGS__)
 
@@ -414,16 +419,30 @@
         /* Parameter name string. */\
         DETAIL_TA_STR(DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME(param)), \
         /* Bake the parameter list into a lambda. */\
-        []<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) ..._ta_test_P>() \
-        { \
-            return []<typename _ta_test_F, typename ..._ta_test_Q>() \
+        ::ta_test::meta::Overload{ \
+            /* Hardcoded parameter list. */\
+            []<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) ..._ta_test_P>() \
             { \
-                return ::std::array{+[](_ta_test_F &&f, _ta_test_Q &&... q) -> decltype(auto) {return f.template operator()<_ta_test_P>(std::forward<_ta_test_Q>(q)...);}...}; \
-            }; \
+                return []<typename _ta_test_F, typename ..._ta_test_Q>() \
+                { \
+                    return ::std::array{+[](_ta_test_F &&f, _ta_test_Q &&... q) -> decltype(auto) {return f.template operator()<_ta_test_P>(std::forward<_ta_test_Q>(q)...);}...}; \
+                }; \
+            }, \
+            /* Parameter list expanded from a user type. */\
+            []<::ta_test::ExpandTag, typename _ta_test_L>() \
+            { \
+                return []<template <DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param)...> typename _ta_test_X, DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) ..._ta_test_P>(::ta_test::meta::TypeTag<_ta_test_X<_ta_test_P...>>) \
+                { \
+                    return []<typename _ta_test_F, typename ..._ta_test_Q>() \
+                    { \
+                        return ::std::array{+[](_ta_test_F &&f, _ta_test_Q &&... q) -> decltype(auto) {return f.template operator()<_ta_test_P>(std::forward<_ta_test_Q>(q)...);}...}; \
+                    }; \
+                }(::ta_test::meta::TypeTag<_ta_test_L>{}); \
+            } \
         } \
         .template operator()<first_elem __VA_OPT__(,) __VA_ARGS__>(), \
         /* Another lambda to convert arguments to strings. */\
-        ::ta_test::detail::ParamNameFunc<[]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) _ta_test_NameOf>(::ta_test::meta::PreferenceTagA) -> std::string \
+        ::ta_test::detail::ParamNameFunc<[]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) _ta_test_NameOf>(::ta_test::meta::PreferenceTagB) -> std::string \
         {constexpr auto s = ::ta_test::detail::ParseEntityNameFromString<CFG_TA_THIS_FUNC_NAME>(); return {s.data(), s.data() + s.size() - 1};}> \
         >{} \
     ->* [&]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME(param)>()
@@ -540,6 +559,11 @@ namespace ta_test
         {}
     };
 
+    struct ExpandTag {};
+    // Pass this to `TA_GENERATE_PARAM(...)` to expand the argument list from a single type.
+    // See comments on that macro for details.
+    inline constexpr ExpandTag expand;
+
     // Metaprogramming helpers.
     namespace meta
     {
@@ -599,9 +623,9 @@ namespace ta_test
         template <typename, typename...>
         struct AlwaysFalse : std::false_type {};
 
-        // Tag dispatch helper.
-        template <auto>
-        struct ValueTag {};
+        // Tag dispatch helpers.
+        template <typename> struct TypeTag {};
+        template <auto> struct ValueTag {};
 
         // Extracts the class type from a member pointer type.
         template <typename T>
@@ -616,8 +640,8 @@ namespace ta_test
         struct ValuesAreEqual<X, X> : std::true_type {};
 
         // Those are used to prioritize function overloads.
-        struct PreferenceTagA {};
-        struct PreferenceTagB : PreferenceTagA {};
+        struct PreferenceTagB {};
+        struct PreferenceTagA : PreferenceTagB {};
     }
 
     namespace text
@@ -4495,12 +4519,13 @@ namespace ta_test
         {
             using decltype(F)::operator();
 
+            // This catches NTTPs and tries to print them using our `ToString()` if possible.
             // The name `_ta_test_NameOf` must match what `TA_GENERATE_PARAM(...)` uses internally, and what `ParseEntityNameFromString()` expects.
             // `A` is unused, it receives `_ta_test_ParamMarker`.
             template <auto _ta_test_NameOf>
             // We always need at least some condition here, even if just `requires true`, to have priority over the inherited function.
             requires string_conv::SupportsToString<decltype(_ta_test_NameOf)>
-            std::string operator()(meta::PreferenceTagB) const
+            std::string operator()(meta::PreferenceTagA) const
             {
                 // Prefer `ToString()` if supported.
                 // Otherwise MSVC prints integers in hex, which is stupid.
@@ -4512,6 +4537,15 @@ namespace ta_test
                     return CFG_TA_FMT_NAMESPACE::format("({}){}", text::TypeName<decltype(_ta_test_NameOf)>(), value);
                 else
                     return value;
+            }
+
+            // Catch `expand`, and trigger an unconditional `static_assert`.
+            // If it arrives here, it was misused.
+            template <ExpandTag T>
+            std::string operator()(meta::PreferenceTagA) const
+            {
+                static_assert(meta::AlwaysFalse<meta::ValueTag<T>>::value, "Incorrect use of `expand`.");
+                return "";
             }
         };
 
@@ -4532,7 +4566,7 @@ namespace ta_test
             template <typename F>
             [[nodiscard]] decltype(auto) operator->*(F &&func)
             {
-                auto name_lambda_wrapped = [](std::size_t i){return ListLambda.template operator()<NameLambda, meta::PreferenceTagB>()[i](NameLambda{}, meta::PreferenceTagB{});};
+                auto name_lambda_wrapped = [](std::size_t i){return ListLambda.template operator()<NameLambda, meta::PreferenceTagA>()[i](NameLambda{}, meta::PreferenceTagA{});};
 
                 static constexpr auto arr = ListLambda.template operator()<F>();
                 auto index = (GenerateValue<Name, LocFile, LocLine, LocCounter>)(
