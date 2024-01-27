@@ -998,7 +998,7 @@ std::size_t ta_test::output::expr::DrawToCanvas(output::TextCanvas &canvas, std:
 
         i++;
     };
-    text::expr::ParseExpr(expr, lambda, nullptr);
+    text::expr::ParseExpr(expr, lambda, false, nullptr);
     if (identifier_start)
         FinalizeIdentifier({identifier_start, expr.data() + expr.size()});
 
@@ -1090,7 +1090,7 @@ void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
         cur = cur->enclosing_assertion;
     }
 
-    HardError("`$(...)` was evaluated when an assertion owning it already finished executing, or in a wrong thread.", HardErrorKind::user);
+    HardError("`$[...]` was evaluated when an assertion owning it already finished executing, or in a wrong thread.", HardErrorKind::user);
 }
 
 void ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
@@ -3911,13 +3911,13 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
 
             // Dim the macro name.
             for (std::size_t i = 0; i < this_info.ident_size; i++)
-                canvas.CellInfoAt(line_counter - 1, expr_column + this_info.ident_offset + i).style.color = color_dim;
+                canvas.CellInfoAt(line_counter - 1, expr_column + this_info.ident_offset + i).style = style_dim;
 
             // Dim the parentheses.
             if (dim_parentheses)
             {
-                canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style.color = color_dim;
-                canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style.color = color_dim;
+                canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset - 1).style = style_dim;
+                canvas.CellInfoAt(line_counter - 1, expr_column + this_info.expr_offset + this_info.expr_size).style = style_dim;
             }
         }
 

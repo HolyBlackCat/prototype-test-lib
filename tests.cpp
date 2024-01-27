@@ -3,12 +3,6 @@
 #include <deque>
 
 #include "testlib.h"
-
-// Add `expand` tag for TA_GENERATE_PARAM
-
-// Try supporting $[...] instead of $(...) - looks cleaner to me (internally make it easier to switch to (...) if desired.
-
-
 #if 0
 
 TA_CHECK( $[($[a] - $[b]).length()] < 42 )
@@ -29,11 +23,11 @@ bool fof()
     TA_LOG("Hello!");
     TA_CONTEXT_LAZY("Hello {}", []{std::cout << "B\n"; return 43;}());
     try{
-        TA_CHECK($(1) == $(2));
+        TA_CHECK($[1] == $[2]);
     }
     catch (ta_test::InterruptTestException) {}
-        TA_CHECK($(1) == $(2));
-    // TA_CHECK($(1) == $(2))("x = {}", 42);
+        TA_CHECK($[1] == $[2]);
+    // TA_CHECK($[1] == $[2])("x = {}", 42);
     // TA_FAIL("stuff {}", 42);
 
     // auto x = TA_MUST_THROW(throw std::runtime_error("123"))("z={}",43);
@@ -89,9 +83,6 @@ bool fof()
 }
 #endif
 
-#if 0
-
-#endif
 TA_TEST(foo/test)
 {
     // std::cout << TA_GENERATE(x, {nullptr}) << '\n';
@@ -109,8 +100,8 @@ TA_TEST(foo/test)
 
 TA_TEST(foo/test2)
 {
-    // (void)TA_GENERATE(a, {4,5,6});
-    TA_FAIL;
+    int a = 1, b = 2, c = 3;
+    TA_CHECK($[$[a] + $[b] + $[c]] == 7);
 }
 
 int main(int argc, char **argv)
@@ -118,11 +109,13 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// TA_FOR_TYPES, sane something for values
+// Try supporting $[...] instead of $[...] - looks cleaner to me (internally make it easier to switch to (...) if desired.
 
 // TA_VARIANT (should be scoped?)
 
-// Soft TA_MUST_THROW? (accept AssertFlags somehow?)
+// Optimize the calls to the `BasicPrintingModule` with the module lists too.
+
+// Split the runner (with all modules) into a separate header? Including most utility functions too.
 
 // Better CaughtException interface?
 //     single function to check combined message
@@ -132,23 +125,15 @@ int main(int argc, char **argv)
 // Test without exceptions.
 // Test without RTTI. What about exception type names?
 
-// Subsections, for_types, and for_values (for_values optional?)
+// Subsections
 
-// Move `mutable bool should_break` to a saner location, don't keep it in the context?
-// Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
-
-// Short macros that can be disabled in the config.
-
-// Split the runner (with all modules) into a separate header? Including most utility functions too.
-
-// Optimize the calls to the `BasicPrintingModule` with the module lists too.
+// Not now? -- Move `mutable bool should_break` to a saner location, don't keep it in the context? Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
 
 // Check that paths are clickable in Visual Studio
 
-// Re-check lists below:
-
 // Later:
 //     Should we transition to __PRETTY_FUNCTION__/__FUNCSIG__-based type names?
+//     Soft TA_MUST_THROW? (accept AssertFlags somehow?)
 //     Multithreading? Thread inheritance system.
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
 //     What's the deal with SEH? Do we need to do anything?
@@ -163,17 +148,18 @@ int main(int argc, char **argv)
 //     Decorate line breaks in logs with `//` as well?
 //     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
 // Probably not:
+//     Short macros that can be disabled in the config.
 //     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
-//     $(...) should tolerate non-printable arguments, but only in non-dependent context - stops being possible when we transition to `$[...]` spelling.
-//     In, $(...) for really long lines, do just [1], then a reference at the bottom: `[1]: ...`. (Decide on the exact spelling, for this to not be confused with a single-element vector, or whatever)
-//         What's the point? $(...) isn't lazy, so you shouldn't have long lines in it anyway. Use the user message, which is lazy.
+//     $[...] should tolerate non-printable arguments, but only in non-dependent context - stops being possible when we transition to `$[...]` spelling.
+//     In, $[...] for really long lines, do just [1], then a reference at the bottom: `[1]: ...`. (Decide on the exact spelling, for this to not be confused with a single-element vector, or whatever)
+//         What's the point? $[...] isn't lazy, so you shouldn't have long lines in it anyway. Use the user message, which is lazy.
 //     Do we force-open the console on Windows if there's none? That's when `GetFileType(GetStdHandle(STD_OUTPUT_HANDLE))` returns 0.
 //         Maybe not? If this is a release build, then we'll also not have argc/argv, and if the user goes out of their way to construct them,
 //         they can also open the console themselves.
 
 // Unclear how:
 //     Draw a fat bracket while explaining each test failure?
-//     `$(...)` could be useful to provide context, but what if the function returns void or non-printable type?
+//     `$[...]` could be useful to provide context, but what if the function returns void or non-printable type?
 //     -g messes up repetition counter a bit if a generator throws (while in the after-test generator update block)
 
 // Selling points:
@@ -233,14 +219,14 @@ ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(\"meow\",foo42foo\"meow\
 ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo('a','\\n','meow',foo42foo'meow'bar42bar,'meow'_bar42bar,'foo\\'bar')");
 ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(R\"(meow)\",foo42fooR\"(meow)\"bar42bar,u8R\"(meow)\"_bar42bar,R\"(foo\"bar)\",R\"ab(foo\"f)\"g)a\"bar)ab\")");
 // Different identifier/keyword categories:
-ta_test::text::expr::DrawToCanvas(canv, line++, 3, "($ ( foo42bar bitand static_cast<int>(0) && __COUNTER__ ) && $(foo()) && $(false))");
+ta_test::text::expr::DrawToCanvas(canv, line++, 3, "($ ( foo42bar bitand static_cast<int>(0) && __COUNTER__ ) && $[foo(]) && $[false])");
 // Unicode: (make sure unicode chars are not highlighted as punctuation)
 ta_test::text::expr::DrawToCanvas(canv, line++, 3, "[мур] int");
 canv.Print(ta_test::Terminal{});
 
 --- Colors
 
-TA_CHECK($("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && $("foo") && false);
+TA_CHECK($["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && false);
 
 --- Werror on everything?
 
@@ -300,6 +286,7 @@ TA_CHECK:
     Error if outlives the test. Error if destroyed out of order?
     ta_test::ExactString - control characters should be printed as unicode replacements
     Compilation error on comma
+    TA_CHECK(((((((((((((($[(((42)))])))))))))))))) // There's some internal limit on the number of parens, but this is way below it.
 
 --- TA_FAIL
     With and without the message.
@@ -540,7 +527,7 @@ TA_CHECK:
 
 --- All the macros nicely no-op when tests are disabled
     TA_CHECK validates the arguments (crash on call?)
-    $(...) only works inside of TA_CHECK
+    $[...] only works inside of TA_CHECK
     TA_TEST generates a dummy function to validate stuff
     TA_LOG and TA_CONTEXT - crash on call??? (disable crash with a macro?)
 
@@ -572,9 +559,9 @@ Good test names:
     a-zA-Z0-9_/
 
 --- Build errors when:
-    $(...) lexically outside of ASSERT().
+    $[...] lexically outside of ASSERT().
     No error when ASSERT() is lexically outside of a test.
-    Unformattable $(...) type
+    Unformattable $[...] type
 
 --- Runtime errors when:
     Same test name registered from two different places
@@ -584,10 +571,10 @@ Good test names:
 --- Evaluation order weirdness
     ASSERT evaluated when no test is running.
     ASSERT evaluated in a wrong thread.
-    $(...) evaluation delayed until after the assertion.
-    $(...) evaluation
-    If $(...) is evaluated more than once, should keep the latest value.
-    Try duplicating $(...) with a macro, what then?
+    $[...] evaluation delayed until after the assertion.
+    $[...] evaluation
+    If $[...] is evaluated more than once, should keep the latest value.
+    Try duplicating $[...] with a macro, what then?
 
 --- Formatting errors shouldn't compile.
 

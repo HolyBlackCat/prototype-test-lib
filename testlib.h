@@ -97,7 +97,7 @@
 #endif
 #endif
 
-// Whether to define `$(...)` as an alias for `TA_ARG(...)`.
+// Whether to define `$[...]` as an alias for `TA_ARG(...)`.
 #ifndef CFG_TA_USE_DOLLAR
 #define CFG_TA_USE_DOLLAR 1
 #endif
@@ -135,7 +135,8 @@
 #endif
 
 // A comma-separated list of macro names defined to be equivalent to `TA_ARG`.
-// `TA_ARG` itself and optionally `$` are added automatically.
+// `$` and `TA_ARG` are added automatically.
+// NOTE! This should have the same value in all TUs to avoid ODR violations.
 #ifndef CFG_TA_EXTRA_ARG_MACROS
 #define CFG_TA_EXTRA_ARG_MACROS
 #endif
@@ -249,10 +250,10 @@
 // Returns void.
 // Usage:
 //     TA_CHECK(x == 42);
-//     TA_CHECK($(x) == 42); // `$` will print the value of `x` on failure.
-//     TA_CHECK($(x) == 42)("Checking stuff!"); // Add a custom message.
-//     TA_CHECK($(x) == 42)("Checking {}!", "stuff"); // Custom message with formatting.
-//     TA_CHECK(ta_test::soft, $(x) == 42); // Let the test continue after a failure.
+//     TA_CHECK($[x] == 42); // `$` will print the value of `x` on failure.
+//     TA_CHECK($[x] == 42)("Checking stuff!"); // Add a custom message.
+//     TA_CHECK($[x] == 42)("Checking {}!", "stuff"); // Custom message with formatting.
+//     TA_CHECK(ta_test::soft, $[x] == 42); // Let the test continue after a failure.
 #define TA_CHECK(...) DETAIL_TA_CHECK("TA_CHECK", #__VA_ARGS__, __VA_ARGS__)
 // Equivalent to `TA_CHECK(false)`, except the printed message is slightly different.
 // Also accepts an optional message: `TA_FAIL("Checking {}!", "stuff");`.
@@ -261,12 +262,14 @@
 // Equivalent to throwing `ta_test::InterruptTestException`.
 #define TA_INTERRUPT_TEST DETAIL_TA_INTERRUPT_TEST
 
+#if CFG_TA_USE_DOLLAR
 // Can only be used inside of `TA_CHECK(...)`. Wrap a subexpression in this to print its value if the assertion fails.
 // Those can be nested inside one another.
-// The expansion is enclosed in `(...)`, which lets you use it e.g. as a sole function argument: `func $(var)`.
-#define TA_ARG(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
-#if CFG_TA_USE_DOLLAR
-#define $(...) DETAIL_TA_ARG(__COUNTER__, __VA_ARGS__)
+// The expansion is enclosed in `(...)`, which lets you use it e.g. as a sole function argument: `func $[var]`.
+#define $ DETAIL_TA_ARG
+#else
+// A fallback replacement for `$`. Don't enable it by default to enforce a consistent style.
+#define TA_ARG DETAIL_TA_ARG
 #endif
 
 // Checks that `...` throws an exception (it can even contain more than one statement), otherwise fails the test immediately.
@@ -387,10 +390,8 @@
 #define DETAIL_TA_ADD_MESSAGE(...) \
     AddMessage([&](auto &&_ta_add_message){_ta_add_message(__VA_ARGS__);})
 
-#define DETAIL_TA_ARG(counter, ...) \
-    /* Note the outer parentheses, they allow this to be transparently used e.g. as a single function parameter. */\
-    /* Passing `counter` the second time is redundant, but helps with our parsing. */\
-    (_ta_assert.BeginArg(counter)._ta_handle_arg_(counter, __VA_ARGS__))
+#define DETAIL_TA_ARG \
+    _ta_assert._ta_handle_arg_(__COUNTER__)
 
 #define DETAIL_TA_MUST_THROW(macro_name_, str_, ...) \
     /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
@@ -697,9 +698,7 @@ namespace ta_test
             {
                 for (std::string_view alias : std::initializer_list<std::string_view>{
                     "TA_ARG",
-                    #if CFG_TA_USE_DOLLAR
-                    "$"
-                    #endif
+                    "$", // Unconditionally, without checking `CFG_TA_USE_DOLLAR`, to avoid ODR violations.
                     CFG_TA_EXTRA_ARG_MACROS
                 })
                 {
@@ -1276,12 +1275,14 @@ namespace ta_test
 
             // `emit_char` is `(const char &ch, CharKind kind) -> void`.
             // It's called for every character, classifying it. The character address is guaranteed to be in `expr`.
-            // `function_call` is `(std::string_view name, std::string_view args, std::size_t depth) -> void`.
+            // `function_call` is `(bool exiting, std::string_view name, std::string_view args, std::size_t depth) -> void`.
             // It's called for every pair of parentheses. `args` is the contents of parentheses, possibly with leading and trailing whitespace.
             // `name` is the identifier preceding the `(`, without whitespace. It can be empty, or otherwise invalid.
             // `depth` is the parentheses nesting depth, starting at 0.
+            // It's called both when entering parentheses (`exiting` == false, `args` == "") and when exiting them (`exiting` == true).
+            // If `function_call_uses_brackets` is true, `function_call` expects square brackets instead of parentheses.
             template <typename EmitCharFunc, typename FunctionCallFunc>
-            constexpr void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, FunctionCallFunc &&function_call)
+            constexpr void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, bool function_call_uses_brackets, FunctionCallFunc &&function_call)
             {
                 CharKind state = CharKind::normal;
 
@@ -1345,20 +1346,23 @@ namespace ta_test
                         {
                             if constexpr (!std::is_null_pointer_v<FunctionCallFunc>)
                             {
-                                if (ch == '(')
+                                if (ch == "(["[function_call_uses_brackets])
                                 {
                                     if (parens_stack_pos >= std::size(parens_stack))
                                         HardError("Too many nested parentheses.");
+
+                                    function_call(false, identifier, {}, parens_stack_pos);
+
                                     parens_stack[parens_stack_pos++] = {
                                         .ident = identifier,
                                         .args = &ch + 1,
                                     };
                                     identifier = {};
                                 }
-                                else if (ch == ')' && parens_stack_pos > 0)
+                                else if (ch == ")]"[function_call_uses_brackets] && parens_stack_pos > 0)
                                 {
                                     parens_stack_pos--;
-                                    function_call(parens_stack[parens_stack_pos].ident, std::string_view(parens_stack[parens_stack_pos].args, &ch), parens_stack_pos);
+                                    function_call(true, parens_stack[parens_stack_pos].ident, std::string_view(parens_stack[parens_stack_pos].args, &ch), parens_stack_pos);
                                 }
                             }
                         }
@@ -2773,7 +2777,7 @@ namespace ta_test
             // The exact code passed to the assertion macro, as a string. Before macro expansion.
             [[nodiscard]] virtual std::string_view Expr() const = 0;
 
-            // How many `$(...)` arguments are in this assertion.
+            // How many `$[...]` arguments are in this assertion.
             [[nodiscard]] std::size_t NumArgs() const {return ArgsInfo().size();}
 
             // Misc information about an argument.
@@ -3822,9 +3826,8 @@ namespace ta_test
 
             // The method name is wonky to assist with our parsing.
             template <typename T>
-            T &&_ta_handle_arg_(int counter, T &&arg) &&
+            T &&operator[](T &&arg) &&
             {
-                (void)counter; // Unused, but passing it helps with parsing.
                 EnsureAssertionIsRunning();
                 target->value = string_conv::ToString(arg);
                 target->state = BasicModule::BasicAssertionExpr::StoredArg::State::done;
@@ -3935,7 +3938,7 @@ namespace ta_test
 
             CFG_TA_API std::optional<std::string_view> GetUserMessage() const override;
 
-            virtual ArgWrapper BeginArg(int counter) = 0;
+            virtual ArgWrapper _ta_handle_arg_(int counter) = 0;
         };
 
         template <meta::ConstString MacroName, meta::ConstString RawString, meta::ConstString ExpandedString, meta::ConstString FileName, int LineNumber>
@@ -3946,11 +3949,11 @@ namespace ta_test
             // The number of arguments.
             static constexpr std::size_t num_args = []{
                 std::size_t ret = 0;
-                text::expr::ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
+                text::expr::ParseExpr(RawString.view(), nullptr, true, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
                 {
                     (void)args;
                     (void)depth;
-                    if (text::chars::IsArgMacroName(name))
+                    if (!exiting && text::chars::IsArgMacroName(name))
                         ret++;
                 });
                 return ret;
@@ -3983,18 +3986,26 @@ namespace ta_test
 
                 if constexpr (num_args > 0)
                 {
+                    // Below we parse the expression twice. The first parse triggers the callback at the beginning of `$[...]`,
+                    // and the second triggers it at the end of `$[...]`. This creates more work for us, but can't be fixed without
+                    // wrapping the whole argument of `$[...]` in a macro call (which is incompatible with using `[...]`, which we want because they look better).
+
                     // Parse expanded string.
                     std::size_t pos = 0;
-                    text::expr::ParseExpr(ExpandedString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
+                    text::expr::ParseExpr(ExpandedString.view(), nullptr, false, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
                     {
-                        if (name != "_ta_handle_arg_")
+                        (void)depth;
+
+                        if (!exiting || name != "_ta_handle_arg_")
                             return;
 
                         if (pos >= num_args)
-                            HardError("More `$(...)`s than expected.");
+                            HardError("More `$[...]`s than expected.");
 
                         ArgInfo &new_info = ret.info[pos];
-                        new_info.depth = depth;
+
+                        // Note: Can't fill `new_info.depth` here, because the parentheses only container the counter, and not the actual `$[...]` argument.
+                        // We fill the depth during the next pass.
 
                         for (const char &ch : args)
                         {
@@ -4013,21 +4024,35 @@ namespace ta_test
                         pos++;
                     });
                     if (pos != num_args)
-                        HardError("Less `$(...)`s than expected.");
+                        HardError("Less `$[...]`s than expected.");
+
+                    // This stack maps bracket depth to the element index, so that the second pass processes things in the same order as the first pass.
+                    // This only matters for nested brackets.
+                    std::size_t bracket_stack[num_args]{};
 
                     // Parse raw string.
                     pos = 0;
-                    text::expr::ParseExpr(RawString.view(), nullptr, [&](std::string_view name, std::string_view args, std::size_t depth)
+                    std::size_t stack_depth = 0;
+                    text::expr::ParseExpr(RawString.view(), nullptr, true, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
                     {
+                        // This `depth` is useless to us, because it also counts the user parentheses.
                         (void)depth;
 
                         if (!text::chars::IsArgMacroName(name))
                             return;
 
-                        if (pos >= num_args)
-                            HardError("More `$(...)`s than expected.");
+                        if (!exiting)
+                        {
+                            if (pos >= num_args)
+                                HardError("More `$[...]`s than expected.");
 
-                        ArgInfo &this_info = ret.info[pos];
+                            bracket_stack[stack_depth++] = pos++;
+                            return;
+                        }
+
+                        ArgInfo &this_info = ret.info[bracket_stack[--stack_depth]];
+
+                        this_info.depth = stack_depth;
 
                         this_info.expr_offset = std::size_t(args.data() - RawString.view().data());
                         this_info.expr_size = args.size();
@@ -4052,14 +4077,11 @@ namespace ta_test
                                 break;
                             }
                         }
-
-                        pos++;
                     });
                     if (pos != num_args)
-                        HardError("Less `$(...)`s than expected.");
+                        HardError("Less `$[...]`s than expected.");
 
                     // Sort `counter_to_arg_index` by counter, to allow binary search.
-                    // Sorting is necessary when the arguments are nested.
                     std::sort(ret.counter_to_arg_index.begin(), ret.counter_to_arg_index.end(),
                         [](const CounterIndexPair &a, const CounterIndexPair &b){return a.counter < b.counter;}
                     );
@@ -4071,8 +4093,8 @@ namespace ta_test
                     {
                         if (auto d = ret.info[a].depth <=> ret.info[b].depth; d != 0)
                             return d > 0;
-                        if (auto d = ret.info[a].counter <=> ret.info[b].counter; d != 0)
-                            return d < 0;
+                        // if (auto d = ret.info[a].counter <=> ret.info[b].counter; d != 0)
+                        //     return d < 0;
                         return false;
                     });
                 }
@@ -4109,13 +4131,13 @@ namespace ta_test
                 }
             }
 
-            [[nodiscard]] ArgWrapper BeginArg(int counter) override
+            [[nodiscard]] ArgWrapper _ta_handle_arg_(int counter) override
             {
                 auto it = std::partition_point(arg_data.counter_to_arg_index.begin(), arg_data.counter_to_arg_index.end(),
                     [&](const CounterIndexPair &pair){return pair.counter < counter;}
                 );
                 if (it == arg_data.counter_to_arg_index.end() || it->counter != counter)
-                    HardError("`TA_CHECK` isn't aware of this `$(...)`.");
+                    HardError("`TA_CHECK` isn't aware of this `$[...]`.");
 
                 return {*this, stored_args[it->index]};
             }
@@ -4863,7 +4885,7 @@ namespace ta_test
                     [[maybe_unused]] auto context = MakeContextGuard();
                     ForElem(elem, [&](const SingleException &elem)
                     {
-                        TA_CHECK( $(elem.type) == $(typeid(T)) )("Expected the exception type to be exactly `{}`, but got `{}`.", text::TypeName<T>(), string_conv::ToString(elem.type));
+                        TA_CHECK( $[elem.type] == $[typeid(T)] )("Expected the exception type to be exactly `{}`, but got `{}`.", text::TypeName<T>(), string_conv::ToString(elem.type));
                         return false;
                     });
                     return static_cast<Ref>(*this);
@@ -5886,7 +5908,7 @@ namespace ta_test
         // Prints failed assertions.
         struct AssertionPrinter : BasicPrintingModule
         {
-            // Whether we should print the values of `$(...)` in the expression.
+            // Whether we should print the values of `$[...]` in the expression.
             bool decompose_expression = true;
             // Whether we should print the enclosing assertions.
             bool print_assertion_stack = true;
@@ -5919,7 +5941,7 @@ namespace ta_test
             // This is used for brackets above expressions.
             output::TextStyle style_overline = {.color = output::TextColor::light_magenta, .bold = true};
             // This is used to dim the unwanted parts of expressions.
-            output::TextColor color_dim = output::TextColor::light_black;
+            output::TextStyle style_dim = {.color = output::TextColor::light_black};
 
             // Labels a subexpression that had a nested assertion failure in it.
             std::u32string chars_in_this_subexpr = U"in here";
