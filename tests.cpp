@@ -87,29 +87,38 @@ TA_TEST(foo/test)
 {
     // std::cout << TA_GENERATE(x, {nullptr}) << '\n';
 
-    TA_GENERATE_PARAM(auto T, nullptr, 42, 'A')
-    {
-        // std::cout << T << '\n';
-    };
+    // if TA_VARIANT(foo)
+    // {
 
-    TA_GENERATE_PARAM(typename U, ta_test::expand, std::tuple<int, float>)
-    {
-        // std::cout << ta_test::text::TypeName<T>() << '\n';
-    };
+    // }
+    // else if TA_VARIANT(bar)
+    // {
+
+    // }
+    // else
+    //     ;
+
+    // // How do I implement this one?!
+    // TA_CHOOSE(action)
+    // TA_VARIANT(a)
+    // {
+
+    // }
+    // TA_VARIANT(b)
+    // {
+
+    // }
 }
 
 TA_TEST(foo/test2)
 {
-    int a = 1, b = 2, c = 3;
-    TA_CHECK($[$[a] + $[b] + $[c]] == 7);
+    TA_CHECK(($)[42] == 43);
 }
 
 int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
-
-// Try supporting $[...] instead of $[...] - looks cleaner to me (internally make it easier to switch to (...) if desired.
 
 // TA_VARIANT (should be scoped?)
 
@@ -125,11 +134,11 @@ int main(int argc, char **argv)
 // Test without exceptions.
 // Test without RTTI. What about exception type names?
 
-// Subsections
-
 // Not now? -- Move `mutable bool should_break` to a saner location, don't keep it in the context? Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
 
-// Check that paths are clickable in Visual Studio
+// Check that paths are clickable in Visual Studio (especially when not at line start)
+
+// TESTS!!
 
 // Later:
 //     Should we transition to __PRETTY_FUNCTION__/__FUNCSIG__-based type names?
@@ -140,7 +149,6 @@ int main(int argc, char **argv)
 //     Signal handling?
 
 // Maybe not?
-//     Soft TA_MUST_THROW?
 //     Allow more characters in bracket-less form: `:`, `.`, `->`?
 // Maybe not...
 //     Get terminal width, and limit separator length to that value (but still not make them longer than they currently are)
@@ -286,12 +294,21 @@ TA_CHECK:
     Error if outlives the test. Error if destroyed out of order?
     ta_test::ExactString - control characters should be printed as unicode replacements
     Compilation error on comma
-    TA_CHECK(((((((((((((($[(((42)))])))))))))))))) // There's some internal limit on the number of parens, but this is way below it.
+
+    Challenge the parsing:
+        ' as digit seprator
+        strings, char literals, raw strings - all containing opening/closing brackets, whole $[...]
+
+    TA_CHECK( ((((((((((((($[(((42)))]))))))))))))) ) // There's some internal limit on the number of parens, but this is way below it.
+
+    TA_CHECK( $ [ 42 ] ) - spaces must work
+
+    TA_CHECK( ($)[42] ), TA_CHECK( ( $ ) [42] ) - should work. $ must be grayed out, but not its enclosing `(`,`)`
 
 --- TA_FAIL
     With and without the message.
 
---- TA_STOP
+--- TA_INTERRUPT_TEST
 
 --- TA_MUST_THROW:
     local variable capture actually works, and the values are correct
@@ -604,6 +621,8 @@ Good test names:
 --- Try to start the tests again while they are already running. Should crash with an error.
 
 Absolutely no `{}:{}` in the code, all error locations must use
+
+ta_test::IsFailing()
 
 ---------------
 

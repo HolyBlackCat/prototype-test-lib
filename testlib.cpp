@@ -55,6 +55,12 @@ void ta_test::HardError(std::string_view message, HardErrorKind kind)
     std::terminate();
 }
 
+bool ta_test::IsFailing()
+{
+    auto &thread_state = detail::ThreadState();
+    return thread_state.current_test && thread_state.current_test->failed;
+}
+
 ta_test::text::Demangler::Demangler() {}
 
 ta_test::text::Demangler::~Demangler()

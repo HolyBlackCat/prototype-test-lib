@@ -525,6 +525,11 @@ namespace ta_test
     // You could throw this manually, but I don't see why you'd want to.
     struct InterruptTestException {};
 
+    // Whether the current test is in the process of failing.
+    // This is useful if you use soft assertion, and want to manually stop on failure.
+    // If no test is currently running, returns false.
+    [[nodiscard]] CFG_TA_API bool IsFailing();
+
     // Flags for `TA_CHECK(...)`. Pass them before the condition, as an optional parameter.
     enum class AssertFlags
     {
@@ -1096,10 +1101,6 @@ namespace ta_test
 
                     if (max_digits == -2)
                     {
-                        #if 0
-                        { // Prevent the following '}' from messing up the folding in Clangd!
-                        #endif
-
                         if (*source != '}')
                             return "Expected `}` to close the escape sequence.";
                         source++;
