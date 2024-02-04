@@ -3,6 +3,9 @@
 #include <deque>
 
 #include "testlib.h"
+
+// Search for _ta_handle_arg_ in raw strings and emit a compile-time error.
+
 #if 0
 
 TA_CHECK( $[($[a] - $[b]).length()] < 42 )
@@ -83,30 +86,18 @@ bool fof()
 }
 #endif
 
+#define TA_VARIANT(name) DETAIL_TA_VARIANT(name)
+
+#define DETAIL_TA_VARIANT(name) _ta_test_variant *  if (auto cond = var.Cond()) else
+
 TA_TEST(foo/test)
 {
     // std::cout << TA_GENERATE(x, {nullptr}) << '\n';
 
-    // if TA_VARIANT(foo)
+    // TA_SELECT(action)
     // {
-
-    // }
-    // else if TA_VARIANT(bar)
-    // {
-
-    // }
-    // else
-    //     ;
-
-    // // How do I implement this one?!
-    // TA_CHOOSE(action)
-    // TA_VARIANT(a)
-    // {
-
-    // }
-    // TA_VARIANT(b)
-    // {
-
+    //     TA_VARIANT(foo) std::cout << "Foo!\n";
+    //     TA_VARIANT(bar) std::cout << "Bar!\n";
     // }
 }
 
@@ -304,6 +295,8 @@ TA_CHECK:
     TA_CHECK( $ [ 42 ] ) - spaces must work
 
     TA_CHECK( ($)[42] ), TA_CHECK( ( $ ) [42] ) - should work. $ must be grayed out, but not its enclosing `(`,`)`
+
+    Build error if $ is already expanded (nested in another macro)
 
 --- TA_FAIL
     With and without the message.

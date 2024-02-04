@@ -1334,7 +1334,7 @@ namespace ta_test
                         else if (chars::IsIdentifierChar(ch))
                         {
                             // We reset `identifier` lazily here, as opposed to immediately,
-                            // to allow function calls with whitespace between the identifier and `(`.
+                            // to allow function calls with whitespace (and/or `)`, even) between the identifier and `(`.
                             if (!chars::IsIdentifierChar(prev_ch))
                                 identifier = {};
 
@@ -3943,6 +3943,9 @@ namespace ta_test
         };
 
         template <meta::ConstString MacroName, meta::ConstString RawString, meta::ConstString ExpandedString, meta::ConstString FileName, int LineNumber>
+        requires
+            // Check (at compile-time) that `$[...]` weren't expanded too early by another macro.
+            (RawString.view().find("_ta_handle_arg_(") == std::string_view::npos)
         struct AssertWrapper : BasicAssertWrapper, BasicModule::BasicAssertionExpr
         {
             using BasicAssertWrapper::BasicAssertWrapper;
