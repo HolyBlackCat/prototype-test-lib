@@ -349,6 +349,12 @@
 #define TA_GENERATE_PARAM(param, first_elem, ...) \
     DETAIL_TA_GENERATE_PARAM(param, first_elem, __VA_ARGS__)
 
+#define TA_SELECT(name) \
+    DETAIL_TA_SELECT(name)
+
+#define TA_VARIANT(name) \
+    DETAIL_TA_VARIANT(name)
+
 
 // --- INTERNAL MACROS ---
 
@@ -447,6 +453,37 @@
         {constexpr auto s = ::ta_test::detail::ParseEntityNameFromString<CFG_TA_THIS_FUNC_NAME>(); return {s.data(), s.data() + s.size() - 1};}> \
         >{} \
     ->* [&]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME(param)>()
+
+#define DETAIL_TA_SELECT(name) \
+    for (::ta_test::detail::VariantGenerator<__FILE__, __LINE__, __COUNTER__, #name> _ta_test_variant; _ta_test_variant.LoopCondition();) \
+    switch (_ta_test_variant.SelectTarget()) \
+    case decltype(_ta_test_variant)::Enum{}:
+
+#define DETAIL_TA_VARIANT(name) \
+    DETAIL_TA_VARIANT_LOW(name, __COUNTER__)
+
+#define DETAIL_TA_VARIANT_LOW(name, counter) \
+    /* This `if` handles the first (registration) pass. */\
+    if (true) { \
+        _ta_test_variant.template RegisterVariant<counter, #name>(); \
+        /* In the second pass, this lets us break from the `TA_SELECT(...)` switch, */\
+        if (false) \
+            DETAIL_TA_CAT(_ta_test_variant_exit_label_, counter): break; \
+    } else \
+    /* The second pass jumps here. */\
+    case typename decltype(_ta_test_variant)::Enum(counter): \
+    /* During the second pass, this first runs the user code, and then breaks us out of the `TA_SELECT(...)`. */\
+    for ([[maybe_unused]] bool DETAIL_TA_CAT(_ta_test_variant_flag_, counter) : {false, true}) \
+    if (true) { \
+        /* Exit from `TA_SELECT(...)` after running the user code during the second pass. */\
+        if (DETAIL_TA_CAT(_ta_test_variant_flag_, counter)) goto DETAIL_TA_CAT(_ta_test_variant_exit_label_, counter); \
+        /* Run the user code in the second pass. */\
+        else goto DETAIL_TA_CAT(_ta_test_variant_start_label_, counter); \
+    } \
+    /* Here we need a dummy loop to catch user's `break` and not letting it resume the `TA_SELECT(...)`. */\
+    else while (false) \
+    /* User code execution starts here. */\
+    DETAIL_TA_CAT(_ta_test_variant_start_label_, counter):
 
 // Internal macro for `DETAIL_TA_GENERATE_PARAM(...)`.
 // If the argument starts with one of: `typename`, `class`, `auto`, then returns that word. Otherwise the argument must be of the form `(a)b`, then returns `a`.
@@ -672,7 +709,7 @@ namespace ta_test
                 return IsAlphaLowercase(ch) || IsAlphaUppercase(ch);
             }
             // Whether `ch` is a letter or an other non-digit identifier character.
-            [[nodiscard]] constexpr bool IsNonDigitIdentifierChar(char ch)
+            [[nodiscard]] constexpr bool IsNonDigitIdentifierCharStrict(char ch)
             {
                 return ch == '_' || IsAlpha(ch);
             }
@@ -683,7 +720,7 @@ namespace ta_test
             // Whether `ch` can be a part of an identifier.
             [[nodiscard]] constexpr bool IsIdentifierCharStrict(char ch)
             {
-                return IsNonDigitIdentifierChar(ch) || IsDigit(ch);
+                return IsNonDigitIdentifierCharStrict(ch) || IsDigit(ch);
             }
             // Same, but also allows `$`, which we use in our macro.
             [[nodiscard]] constexpr bool IsIdentifierChar(char ch)
@@ -712,6 +749,12 @@ namespace ta_test
                 }
 
                 return false;
+            }
+
+            // Whether `name` is a non-empty valid idenfitier.
+            [[nodiscard]] constexpr bool IsIdentifierStrict(std::string_view name)
+            {
+                return !name.empty() && IsNonDigitIdentifierCharStrict(name.front()) && std::all_of(name.begin() + 1, name.end(), IsIdentifierCharStrict);
             }
 
             // Skips whitespace characters, if any.
@@ -4222,6 +4265,7 @@ namespace ta_test
             static constexpr bool test_name_is_valid = []{
                 if (TestName.view().empty())
                     return false;
+                // Intentionalyl allowing leading digits here.
                 if (!std::all_of(TestName.view().begin(), TestName.view().end(), [](char ch){return text::chars::IsIdentifierCharStrict(ch) || ch == '/';}))
                     return false;
                 if (std::adjacent_find(TestName.view().begin(), TestName.view().end(), [](char a, char b){return a == '/' && b == '/';}) != TestName.view().end())
@@ -4299,12 +4343,20 @@ namespace ta_test
 
         // --- GENERATORS ---
 
-        template <meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter, typename ReturnType, typename F>
+        template <
+            // Manually specified:
+            meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter, typename F,
+            // Computed:
+            typename UserFuncType = decltype(std::declval<F &&>()()),
+            typename ReturnType = decltype(std::declval<UserFuncType &>()(std::declval<bool &>()))
+        >
         struct SpecificGenerator : BasicModule::BasicTypedGenerator<ReturnType>
         {
             using BasicModule::BasicGenerator::overriding_module;
 
-            F func;
+            using return_type = ReturnType;
+
+            UserFuncType func;
 
             template <typename G>
             SpecificGenerator(G &&make_func) : func(std::forward<G>(make_func)()) {}
@@ -4372,32 +4424,22 @@ namespace ta_test
             }
         };
 
-        // Using a concept instead of a `static_assert`, because I can't find where to put the `static_assert` to make Clangd report on it.
-        template <meta::ConstString Name>
-        concept IsValidGeneratorName =
-            !Name.view().empty() && // Not empty.
-            !text::chars::IsDigit(Name.view().front()) && // Doesn't start with a digit.
-            std::all_of(Name.view().begin(), Name.view().end(), text::chars::IsIdentifierCharStrict); // Only valid characters.
-
         // `TA_GENERATE_FUNC(...)` expands to this.
         // `func` returns the user lambda (it's not the user lambda itself).
         template <
             // Manually specified:
             meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter,
             // Deduced:
-            typename F,
-            // Computed:
-            typename UserFuncType = decltype(std::declval<F &&>()()),
-            typename ReturnType = decltype(std::declval<UserFuncType &>()(std::declval<bool &>()))
+            typename F
         >
-        requires IsValidGeneratorName<Name>
-        [[nodiscard]] const ReturnType &GenerateValue(F &&func)
+        requires(text::chars::IsIdentifierStrict(Name.view()))
+        [[nodiscard]] auto GenerateValue(F &&func) -> const typename SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>::return_type &
         {
             auto &thread_state = ThreadState();
             if (!thread_state.current_test)
                 HardError("Can't use `TA_GENERATE(...)` when no test is running.", HardErrorKind::user);
 
-            using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, ReturnType, UserFuncType>;
+            using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>;
 
             struct Guard
             {
@@ -4607,6 +4649,125 @@ namespace ta_test
                 return arr[index.index](std::forward<F>(func));
             }
         };
+
+        // This index type is used internally by `TA_SELECT(...)` and `TA_VARIANT(...)`.
+        template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString Name>
+        struct VariantIndex
+        {
+            int value = 0;
+
+            struct State
+            {
+                std::map<int, std::string_view> index_to_string;
+                std::map<std::string_view, int, std::less<>> string_to_index;
+            };
+            [[nodiscard]] static State &GlobalState()
+            {
+                static State ret;
+                return ret;
+            }
+        };
+
+        // `TA_SELECT(...) and TA_VARIANT(...)` expand to this.
+        template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString Name>
+        requires(text::chars::IsIdentifierStrict(Name.view()))
+        class VariantGenerator
+        {
+            using IndexType = VariantIndex<LocFile, LocLine, LocCounter, Name>;
+
+            // The next pass number.
+            // 0 = discovery pass, 1 = running the single variant, 2 = exiting.
+            int pass_number = 0;
+
+            // Which variants we're going to run.
+            std::vector<int> enabled_variants;
+
+            struct GeneratorFunctor
+            {
+                VariantGenerator &self;
+
+                auto operator()() const
+                {
+                    return [variants = std::move(self.enabled_variants), index = std::size_t(0)](bool &repeat) mutable -> IndexType
+                    {
+                        if (index >= variants.size())
+                            HardError("`TA_VARIANT(...)` index is out of range.");
+                        int ret = variants[index++];
+                        repeat = index < variants.size();
+                        return IndexType{ret};
+                    };
+                }
+            };
+
+            // Touching this registers a variant.
+            template <int VarCounter, meta::ConstString VarName>
+            inline static const std::nullptr_t register_variant = []{
+                auto &state = IndexType::GlobalState();
+                // We silently ignore duplicate indices, just in case.
+                if (state.index_to_string.try_emplace(VarCounter, VarName.view()).second)
+                {
+                    // For duplicate names, we keep the lower index.
+                    auto [iter, inserted] = state.string_to_index.try_emplace(VarName.view(), VarCounter);
+                    if (!inserted)
+                        iter->second = std::min(iter->second, VarCounter);
+                }
+
+                return nullptr;
+            }();
+
+          public:
+            // Opaque enum for the variant index.
+            // Value `0` is reserved for the initial execution, where no variant is selected yet.
+            // It's impossible to receive `__COUNTER__ == 0` in a variant, because even though the counter starts at zero,
+            // we call it at least once before, in `TA_SELECT(...)` itself.
+            enum class Enum : int {};
+
+            VariantGenerator()
+            {
+                GlobalThreadState &thread_state = ThreadState();
+                if (!thread_state.current_test)
+                    HardError("Can't use `TA_SELECT(...)` when no test is running.");
+                if (thread_state.current_test->generator_index < thread_state.current_test->generator_stack.size()
+                    && bool(dynamic_cast<const SpecificGenerator<Name, LocFile, LocLine, LocCounter, GeneratorFunctor> *>(
+                        thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get()
+                    ))
+                )
+                {
+                    // Skip the first pass (variant discovery pass).
+                    pass_number = 1;
+                }
+            }
+
+            [[nodiscard]] bool LoopCondition()
+            {
+                return pass_number++ < 2; // Two passes.
+            }
+
+            [[nodiscard]] Enum SelectTarget()
+            {
+                if (pass_number != 2)
+                {
+                    // First pass.
+                    return {};
+                }
+                else
+                {
+                    // Second pass.
+                    return Enum(GenerateValue<Name, LocFile, LocLine, LocCounter>(GeneratorFunctor{*this}).value);
+                }
+            }
+
+            // Touching this registers a variant, and calling it at runtime enables it for this run.
+            template <int VarCounter, meta::ConstString VarName>
+            requires(text::chars::IsIdentifierStrict(VarName.view()))
+            auto RegisterVariant()
+            {
+                (void)std::integral_constant<const std::nullptr_t *, &register_variant<VarCounter, VarName>>{};
+                if (pass_number != 1)
+                    HardError("Why are we trying to register a variant in the second pass?");
+                enabled_variants.push_back(VarCounter);
+            }
+        };
     }
     // Some internal specializations.
     template <std::size_t N, typename NameLambda>
@@ -4679,11 +4840,59 @@ namespace ta_test
             }
         }
     };
+    template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString Name>
+    struct string_conv::DefaultToStringTraits<detail::VariantIndex<LocFile, LocLine, LocCounter, Name>>
+    {
+        using Type = detail::VariantIndex<LocFile, LocLine, LocCounter, Name>;
+
+        std::string operator()(Type value) const
+        {
+            auto it = Type::GlobalState().index_to_string.find(value.value);
+            if (it == Type::GlobalState().index_to_string.end())
+                HardError("Didn't find this `TA_VARIANT(...)` index in the map.");
+            return std::string(it->second);
+        }
+    };
+    template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString Name>
+    struct string_conv::DefaultFromStringTraits<detail::VariantIndex<LocFile, LocLine, LocCounter, Name>>
+    {
+        using Type = detail::VariantIndex<LocFile, LocLine, LocCounter, Name>;
+
+        // If we have duplicate elements in the list, this returns the first one.
+        [[nodiscard]] std::string operator()(Type &target, const char *&string) const
+        {
+            if (Type::GlobalState().string_to_index.empty())
+                return "This `TA_SELECT(...)` has no variants.";
+            const char *start = string;
+            while (text::chars::IsIdentifierCharStrict(*string))
+                string++;
+            if (string == start)
+                return "Expected the variant name.";
+            auto iter = Type::GlobalState().string_to_index.find(std::string_view(start, string));
+            if (iter == Type::GlobalState().string_to_index.end())
+            {
+                std::string error = "Expected the variant name, one of: ";
+                bool first = true;
+                for (const auto &elem : Type::GlobalState().string_to_index)
+                {
+                    if (first)
+                        first = false;
+                    else
+                        error += ", ";
+
+                    error += elem.first;
+                }
+                error += '.';
+                return error;
+            }
+            target.value = iter->second;
+            return "";
+        }
+    };
 
     enum class GeneratorFlags
     {
         // Don't emit a hard error if the range is empty, instead throw `InterruptTestException` to abort the test.
-        // Has no effect when exceptions are disabled.
         allow_empty_range = 1 << 0,
     };
     DETAIL_TA_FLAG_OPERATORS(GeneratorFlags)

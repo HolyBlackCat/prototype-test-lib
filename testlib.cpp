@@ -2500,7 +2500,7 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
         GeneratorOverrideSeq::Entry new_entry;
 
         { // Parse the name.
-            if (!text::chars::IsIdentifierCharStrict(*string) || text::chars::IsDigit(*string))
+            if (!text::chars::IsNonDigitIdentifierCharStrict(*string))
                 return "Expected a generator name.";
 
             const char *name_begin = string;

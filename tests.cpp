@@ -4,7 +4,8 @@
 
 #include "testlib.h"
 
-// Search for _ta_handle_arg_ in raw strings and emit a compile-time error.
+// Support zero-variant selections, and in general override-only ranges.
+// Write comments for TA_SELECT and TA_VARIANT
 
 #if 0
 
@@ -86,24 +87,29 @@ bool fof()
 }
 #endif
 
-#define TA_VARIANT(name) DETAIL_TA_VARIANT(name)
-
-#define DETAIL_TA_VARIANT(name) _ta_test_variant *  if (auto cond = var.Cond()) else
-
 TA_TEST(foo/test)
 {
-    // std::cout << TA_GENERATE(x, {nullptr}) << '\n';
-
-    // TA_SELECT(action)
-    // {
-    //     TA_VARIANT(foo) std::cout << "Foo!\n";
-    //     TA_VARIANT(bar) std::cout << "Bar!\n";
-    // }
-}
-
-TA_TEST(foo/test2)
-{
-    TA_CHECK(($)[42] == 43);
+    std::cout << "Starting test" << '\n';
+    TA_SELECT(action)
+    {
+        std::cout << __LINE__ << '\n';
+        TA_VARIANT(one)
+        {
+            std::cout << "Hello\n";
+        }
+        std::cout << __LINE__ << '\n';
+        TA_VARIANT(two)
+        {
+            std::cout << "world!\n";
+        }
+        std::cout << __LINE__ << '\n';
+        TA_VARIANT(three)
+        {
+            std::cout << "world!\n";
+        }
+        std::cout << __LINE__ << '\n';
+    }
+    std::cout << "Done" << '\n';
 }
 
 int main(int argc, char **argv)
@@ -132,6 +138,7 @@ int main(int argc, char **argv)
 // TESTS!!
 
 // Later:
+//     Option to cache the generator values somehow? Enable it by default?
 //     Should we transition to __PRETTY_FUNCTION__/__FUNCSIG__-based type names?
 //     Soft TA_MUST_THROW? (accept AssertFlags somehow?)
 //     Multithreading? Thread inheritance system.
@@ -158,19 +165,24 @@ int main(int argc, char **argv)
 
 // Unclear how:
 //     Draw a fat bracket while explaining each test failure?
-//     `$[...]` could be useful to provide context, but what if the function returns void or non-printable type?
+//     `$[...]` could be useful purely to provide context, but what if the function returns void or non-printable type?
 //     -g messes up repetition counter a bit if a generator throws (while in the after-test generator update block)
 
 // Selling points:
-//     "DESIGNING A SUPERIOR UNIT TEST FRAMEWORK"
 //     * Expression unwrapping
-//     * Sections that are not broken (can do a cross product)
-//     * First-class nested exceptions support out of the box
-//     * Lazy message evaluation
-//         * Point out that you can't do proper lazyness with <<, because operands are still evaluated.
-//     * No comma weirdness
+//     * Better sections/subcases (can do a cross product, controllable from the command line)
+//     * Generators
+//         * Understand C++20 ranges
+//         * Fully controllable from the command line
+//     * Quality of life:
+//         * Using std::format/libfmt everywhere, no iostreams.
+//         * First-class nested exceptions support out of the box
+//         * True lazy message evaluation
+//             * Point out that you can't do proper lazyness with <<, because operands are still evaluated.
+//         * No comma weirdness in macros
 //     * Clickthrough everywhere (i.e. file paths everywhere, that should be clickable in an IDE)
 //     * Tests in headers = bad practice, but we support it without code duplication, but still check if the test names clash (different source locations)
+//         * Compare with what gtest and catch2 do.
 
 
 /* Pending tests:
@@ -535,6 +547,16 @@ TA_CHECK:
         (auto A, ta_test::expand, 42) = build error
         (auto A, ta_test::expand, ValueTag<42>, 42) = build error
 
+--- TA_SELECT and TA_VARIANT
+    No registered variants = runtime error
+        Must mention the source location
+        The flags parameter to allow no variants.
+    break and continue
+        inside TA_VARIANT
+        just inside TA_SELECT
+    nested variants (for same TA_SELECT) = build error
+    duplicate variant name = build error
+
 --- All the macros nicely no-op when tests are disabled
     TA_CHECK validates the arguments (crash on call?)
     $[...] only works inside of TA_CHECK
@@ -616,6 +638,16 @@ Good test names:
 Absolutely no `{}:{}` in the code, all error locations must use
 
 ta_test::IsFailing()
+
+strictness of identifiers:
+    No $ in any names
+    Names shouldn't start with digits (except text names can)
+    No empty names, can only contain alphanumeric chars and _
+
+--- Interactive tests for Clangd!!
+    Must immediately report bad names:
+        test names
+        all generator macros
 
 ---------------
 
