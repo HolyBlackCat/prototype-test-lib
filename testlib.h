@@ -20,7 +20,6 @@
 #include <iterator>
 #include <map>
 #include <memory>
-#include <numeric>
 #include <optional>
 #include <ranges>
 #include <regex>
@@ -294,31 +293,37 @@
 #define TA_CONTEXT_LAZY(...) DETAIL_TA_CONTEXT_LAZY(__VA_ARGS__)
 
 // Repeats the test for all values in the range `...`. (Either a `{...}` list or a C++20 range.)
-// `name` is the name for logging purposes, it must be a valid identifier.
+// Example usage: `int x = TA_GENERATE(foo, {1,2,3});`.
+// `name` is the name for logging purposes, it must be a valid identifier. It's also used for controlling the generator from the command line.
 // You can't use any local variables in `...`, that's a compilation error.
+//   This is an artificial limitation for safety reasons, to prevent accidental dangling.
 //   Use `TA_GENERATE_FUNC(...)` with `ta_test::RangeToGeneratorFunc(...)` to do that.
-// Accepts a second optional parameter, of type `ta_test::GeneratorFlags`, like `RangeToGeneratorFunc()`.
+// Accepts an optional parameter before the range, of type `ta_test::GeneratorFlags`, like `RangeToGeneratorFunc()`.
+//   E.g. pass `ta_test::interrupt_test_if_empty` to allow empty ranges.
 #define TA_GENERATE(name, ...) DETAIL_TA_GENERATE(name, __VA_ARGS__)
 
 // Repeats the test for all values returned by the lambda.
 // Usage: `T x = TA_GENERATE_FUNC(name, lambda);`.
+// NOTE: Since the lambda will outlive the test, make sure your captures don't dangle.
 // The lambda must be `(bool &repeat) -> ??`. The return type can be anything, possibly a reference.
 // Saves the return value from the lambda and returns it from `TA_GENERATE(...)`.
 // `repeat` receives `true` by default. If it remains true, the test will be restarted and the lambda will be called again to compute the new value.
-// If it's set to false, the
-//  by const reference: `const decltype(func(...)) &`.
+// If it's set to false, the return value becomes the last one in the sequence, and the lambda is discarded.
+// The value is returned by const reference: `const decltype(func(...)) &`.
 // Note that this means that if `func()` returns by reference, the possible lack of constness of the reference is preserved:
 //   Lambda returns | TA_GENERATE_FUNC returns
 //   ---------------|-------------------------
 //             T    | const T &
 //             T &  |       T &
 //             T && |       T &&
-// The lambda won't be called again, or at least not until its recreated to restart the sequence, if necessary.
 // The lambda is not evaluated/constructed at all when reentering `TA_GENERATE_FUNC(...)`, if we already have one from the previous run.
-// WARNING!! Since the lambda will outlive the test, make sure your captures don't dangle.
+// We guarantee that the lambda isn't copied or moved AT ALL.
+// The lambda can be preceded by an optional parameter of type `ta_test::GeneratorFlags`.
+// Or you can pass an instance of `ta_test::GenerateFuncParam`, which combines both parameters.
 #define TA_GENERATE_FUNC(name, ...) DETAIL_TA_GENERATE_FUNC(name, __VA_ARGS__)
 
 // A version of `TA_GENERATE` for generating types (and other template parameters, such as constant values or templates).
+// Currently this version doesn't accept flags.
 // Despite how the syntax looks like, the whole test is repeated for each type/value, not just the braced block.
 // Example usage:
 //     TA_GENERATE_PARAM(typename T, int, float, double)
@@ -346,14 +351,32 @@
 // Which is equivalent to:
 //     TA_GENERATE_PARAM(typename T, A, B, C)
 // `ta_test::expand` must be followed by exactly one type, which must be a template specialization `T<U...>` (where `U` can be anything, not necessarily a type).
-#define TA_GENERATE_PARAM(param, first_elem, ...) \
-    DETAIL_TA_GENERATE_PARAM(param, first_elem, __VA_ARGS__)
+#define TA_GENERATE_PARAM(param, first_elem, ...) DETAIL_TA_GENERATE_PARAM(param, first_elem, __VA_ARGS__)
 
-#define TA_SELECT(name) \
-    DETAIL_TA_SELECT(name)
-
-#define TA_VARIANT(name) \
-    DETAIL_TA_VARIANT(name)
+// Repeats the test several times, once for each of the several code fragments (a spin on `TA_GENERATE(...)`).
+// Example usage:
+//     TA_SELECT(foo)
+//     {
+//         TA_VARIANT(a) {...}
+//         TA_VARIANT(b) {...}
+//         TA_VARIANT(c) {...}
+//     }
+// `foo` and `a`,`b`,`c` are names for logging purposes.
+// The braces after `TA_VARIANT(...)` can be omitted, if the body is only a single line (like in an `if`).
+// `TA_SELECT` accepts a second optional parameter of type `ta_test::GeneratorFlags`, which in particular lets you customize the behavior if no variants are enabled.
+// You can enable and disable variants at runtime, by adding an `if` outside one.
+// This means that the braces after `TA_SELECT(...)` can contain more than just the variants.
+// When `TA_SELECT` is first reached, its body is executed from the `{`, but without entering any of the variants. The list of reached variants is preserved,
+//   and then the execution jumps to the first discovered variant, and when it finishes, jumps to the closing brace of `TA_SELECT(...)`.
+//   When `TA_SELECT` is then reached again after the test restarts, it only executes the next variant.
+// The body of `TA_SELECT(...)` is internally a `switch`, so e.g. you can't have any variables outside of variants. Put your variables before `TA_SELECT(...)`.
+// Using `continue;` or `break;` (both have the same effect) inside of a `TA_VARIANT` jumps to its `}`,
+//   and using `break` outside of a variant stops the variant discovery and jumps to the first variant.
+//   This isn't entirely intentional design; our macros use a loop internally so those keywords have to do *something*,
+//   so the only reasonable option was to make them do this.
+#define TA_SELECT(...) DETAIL_TA_SELECT(__VA_ARGS__)
+// Marks one of the several code fragments to be executed by `TA_VARIANT(...)`. See that macro for details.
+#define TA_VARIANT(name) DETAIL_TA_VARIANT(name)
 
 
 // --- INTERNAL MACROS ---
@@ -415,10 +438,10 @@
     ::ta_test::detail::ScopedLogGuardLazy DETAIL_TA_CAT(_ta_context,__COUNTER__)([&]{return CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__);})
 
 #define DETAIL_TA_GENERATE(name, ...) \
-    ::ta_test::detail::GenerateValue<#name, __FILE__, __LINE__, __COUNTER__>([/*non-capturing*/]{return ::ta_test::RangeToGeneratorFunc(__VA_ARGS__);})
+    ::ta_test::detail::GenerateValue<#name, __FILE__, __LINE__, __COUNTER__>([/*non-capturing*/]{return ::ta_test::GenerateFuncParam(::ta_test::RangeToGeneratorFunc(__VA_ARGS__));})
 
 #define DETAIL_TA_GENERATE_FUNC(name, ...) \
-    ::ta_test::detail::GenerateValue<#name, __FILE__, __LINE__, __COUNTER__>([&]{return __VA_ARGS__;})
+    ::ta_test::detail::GenerateValue<#name, __FILE__, __LINE__, __COUNTER__>([&]{return ::ta_test::GenerateFuncParam(__VA_ARGS__);})
 
 #define DETAIL_TA_GENERATE_PARAM(param, first_elem, ...) \
     ::ta_test::detail::ParamGenerator<\
@@ -454,8 +477,8 @@
         >{} \
     ->* [&]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME(param)>()
 
-#define DETAIL_TA_SELECT(name) \
-    for (::ta_test::detail::VariantGenerator<__FILE__, __LINE__, __COUNTER__, #name> _ta_test_variant; _ta_test_variant.LoopCondition();) \
+#define DETAIL_TA_SELECT(name, ...) \
+    for (auto _ta_test_variant = ::ta_test::detail::VariantGenerator<__FILE__, __LINE__, __COUNTER__, #name>(__VA_ARGS__); _ta_test_variant.LoopCondition();) \
     switch (_ta_test_variant.SelectTarget()) \
     case decltype(_ta_test_variant)::Enum{}:
 
@@ -581,7 +604,7 @@ namespace ta_test
     using enum AssertFlags;
 
     // Arguments of `TA_CHECK(...)` are passed to the constructor of this class.
-    // You can pass and instance of this directly to `TA_CHECK(...)` too.
+    // You can pass an instance of this directly to `TA_CHECK(...)` too.
     struct AssertParam
     {
         AssertFlags flags{};
@@ -601,6 +624,46 @@ namespace ta_test
             : flags(flags), value(std::forward<T>(value) ? true : false)
         {}
     };
+
+    // Flags for `TA_GENERATE(...)` and others.
+    enum class GeneratorFlags
+    {
+        // Don't emit a hard error if the range is empty, instead throw `InterruptTestException` to abort the test.
+        interrupt_test_if_empty = 1 << 0,
+        // Generate no elements.
+        // This causes a hard error, or, if `interrupt_test_if_empty` is also set, an `InterruptTestException`.
+        // That is, unless `--generate` is used to add custom values to this generator.
+        // This is primarily useful when generating from a callback. When generating from a range, this has the same effect as passing an empty range.
+        // The callback or range are still used to deduce the return type, but are otherwise ignored.
+        generate_nothing = 1 << 1,
+    };
+    DETAIL_TA_FLAG_OPERATORS(GeneratorFlags)
+    using enum GeneratorFlags;
+
+    // Arguments of `TA_GENERATE_FUNC(...)` are passed to the constructor of this class.
+    // You can pass an instance of this directly to `TA_GENERATE_FUNC(...)` too.
+    // You're expected to use CTAD with this. We go to lengths to ensure zero moves for the functor, which is we need.
+    template <std::invocable<bool &> F, bool HasFlags>
+    struct GenerateFuncParam
+    {
+        // This is optional. If you provide no initializer, the flag-less specialization will be choosen.
+        GeneratorFlags flags{};
+
+        // This is usually a non-reference or an lvalue reference. But you could also make this an rvalue reference.
+        F func{};
+
+        using FuncRefType = F &&;
+    };
+    // Flag-less specialization.
+    template <std::invocable<bool &> F>
+    struct GenerateFuncParam<F, false>
+    {
+        static constexpr GeneratorFlags flags{}; // Default flags.
+        F func{};
+        using FuncRefType = F &&;
+    };
+    template <typename F> GenerateFuncParam(GeneratorFlags, F &&) -> GenerateFuncParam<F, true>;
+    template <typename F> GenerateFuncParam(F &&) -> GenerateFuncParam<F, false>;
 
     struct ExpandTag {};
     // Pass this to `TA_GENERATE_PARAM(...)` to expand the argument list from a single type.
@@ -4347,8 +4410,8 @@ namespace ta_test
             // Manually specified:
             meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter, typename F,
             // Computed:
-            typename UserFuncType = decltype(std::declval<F &&>()()),
-            typename ReturnType = decltype(std::declval<UserFuncType &>()(std::declval<bool &>()))
+            typename UserFuncWrapperType = decltype(std::declval<F &&>()()),
+            typename ReturnType = decltype(std::declval<UserFuncWrapperType &>().func(std::declval<bool &>()))
         >
         struct SpecificGenerator : BasicModule::BasicTypedGenerator<ReturnType>
         {
@@ -4356,7 +4419,7 @@ namespace ta_test
 
             using return_type = ReturnType;
 
-            UserFuncType func;
+            UserFuncWrapperType func;
 
             template <typename G>
             SpecificGenerator(G &&make_func) : func(std::forward<G>(make_func)()) {}
@@ -4406,9 +4469,13 @@ namespace ta_test
                     };
                     Guard guard{.self = *this};
 
+                    // Here the default value of `repeat` is `true`.
+                    // This is to match the programming pattern of `if (...) break;` with `if (...) repeat = false;`,
+                    //   but I'm not sure if this is ultimately a good decision. Could flip this later.
+
                     // We could try to somehow conditionally assign here if possible.
                     // I tried, got some weird build error in some edge case, and decided not to bother.
-                    this->storage.template emplace<1>(func, this->repeat);
+                    this->storage.template emplace<1>(func.func, this->repeat);
 
                     guard.ok = true;
                     return true;
@@ -4433,7 +4500,8 @@ namespace ta_test
             typename F
         >
         requires(text::chars::IsIdentifierStrict(Name.view()))
-        [[nodiscard]] auto GenerateValue(F &&func) -> const typename SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>::return_type &
+        [[nodiscard]] auto GenerateValue(F &&func)
+            -> const typename SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>::return_type &
         {
             auto &thread_state = ThreadState();
             if (!thread_state.current_test)
@@ -4508,6 +4576,23 @@ namespace ta_test
                     HardError("Something is wrong with the generator index."); // This should never happen.
 
                 auto new_generator = std::make_unique<GeneratorType>(std::forward<F>(func));
+
+                // Fail if no values.
+                if (bool(new_generator->func.flags & GeneratorFlags::generate_nothing))
+                {
+                    if (bool(new_generator->func.flags & GeneratorFlags::interrupt_test_if_empty))
+                    {
+                        throw InterruptTestException{};
+                    }
+                    else
+                    {
+                        HardError(CFG_TA_FMT_NAMESPACE::format(
+                            "No values specified for generator at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`. "
+                            "Must either specify them from the command line, ensure this generator isn't reached, or pass `ta_test::interrupt_test_if_empty` to interrupt the test.",
+                            LocFile.view(), LocLine
+                        ));
+                    }
+                }
 
                 guard.this_generator = new_generator.get();
 
@@ -4639,11 +4724,11 @@ namespace ta_test
                 static constexpr auto arr = ListLambda.template operator()<F>();
                 auto index = (GenerateValue<Name, LocFile, LocLine, LocCounter>)(
                     []{
-                        return [i = std::size_t{}](bool &repeat) mutable
+                        return GenerateFuncParam([i = std::size_t{}](bool &repeat) mutable
                         {
                             repeat = i + 1 < arr.size();
                             return GeneratedParamIndex<arr.size(), decltype(name_lambda_wrapped)>{i++};
-                        };
+                        });
                     }
                 );
                 return arr[index.index](std::forward<F>(func));
@@ -4675,6 +4760,8 @@ namespace ta_test
         {
             using IndexType = VariantIndex<LocFile, LocLine, LocCounter, Name>;
 
+            GeneratorFlags flags{};
+
             // The next pass number.
             // 0 = discovery pass, 1 = running the single variant, 2 = exiting.
             int pass_number = 0;
@@ -4688,14 +4775,18 @@ namespace ta_test
 
                 auto operator()() const
                 {
-                    return [variants = std::move(self.enabled_variants), index = std::size_t(0)](bool &repeat) mutable -> IndexType
-                    {
-                        if (index >= variants.size())
-                            HardError("`TA_VARIANT(...)` index is out of range.");
-                        int ret = variants[index++];
-                        repeat = index < variants.size();
-                        return IndexType{ret};
-                    };
+                    bool is_empty = self.enabled_variants.empty();
+                    return GenerateFuncParam(
+                        self.flags | is_empty * GeneratorFlags::generate_nothing,
+                        [variants = std::move(self.enabled_variants), index = std::size_t(0)](bool &repeat) mutable -> IndexType
+                        {
+                            if (index >= variants.size())
+                                HardError("`TA_VARIANT(...)` index is out of range.");
+                            int ret = variants[index++];
+                            repeat = index < variants.size();
+                            return IndexType{ret};
+                        }
+                    );
                 }
             };
 
@@ -4722,8 +4813,10 @@ namespace ta_test
             // we call it at least once before, in `TA_SELECT(...)` itself.
             enum class Enum : int {};
 
-            VariantGenerator()
+            VariantGenerator(GeneratorFlags flags = {})
+                : flags(flags)
             {
+                // When reentering the generator, skip the first pass.
                 GlobalThreadState &thread_state = ThreadState();
                 if (!thread_state.current_test)
                     HardError("Can't use `TA_SELECT(...)` when no test is running.");
@@ -4890,29 +4983,19 @@ namespace ta_test
         }
     };
 
-    enum class GeneratorFlags
-    {
-        // Don't emit a hard error if the range is empty, instead throw `InterruptTestException` to abort the test.
-        allow_empty_range = 1 << 0,
-    };
-    DETAIL_TA_FLAG_OPERATORS(GeneratorFlags)
-    using enum GeneratorFlags;
-
     // Converts a C++20 range to a functor usable with `TA_GENERATE_FUNC(...)`.
     // `TA_GENERATE(...)` calls it internally. But you might want to call it manually,
     // because `TA_GENERATE(...)` prevents you from using any local variables, for safety.
     template <std::ranges::input_range T>
-    [[nodiscard]] auto RangeToGeneratorFunc(T &&range, GeneratorFlags flags = {})
+    [[nodiscard]] auto RangeToGeneratorFunc(GeneratorFlags flags, T &&range)
     {
-        class Functor
+        struct Functor
         {
             std::remove_cvref_t<T> range{};
             std::ranges::iterator_t<std::remove_cvref_t<T>> iter{};
-            GeneratorFlags flags{};
 
-          public:
-            explicit Functor(T &&range, GeneratorFlags flags)
-                : range(std::forward<T>(range)), iter(this->range.begin()), flags(flags)
+            explicit Functor(T &&range)
+                : range(std::forward<T>(range)), iter(this->range.begin())
             {}
 
             // `iter` might go stale on copy.
@@ -4923,12 +5006,7 @@ namespace ta_test
             {
                 // Check for the end of the range. Not in the constructor, because that doesn't play nice with `--generate`.
                 if (iter == range.end())
-                {
-                    if (bool(flags & GeneratorFlags::allow_empty_range))
-                        throw InterruptTestException{};
-                    else
-                        HardError("Empty generator range.", HardErrorKind::user);
-                }
+                    HardError("Overflowed a generator range.");
 
                 decltype(auto) ret = *iter;
                 repeat = ++iter != range.end();
@@ -4938,20 +5016,38 @@ namespace ta_test
                     return ret;
             }
         };
-        return Functor(std::forward<T>(range), flags);
+
+        // Here we check emptiness before moving the range, which seems to be unavoidable here.
+        bool is_empty = false;
+        if constexpr (requires{range.empty();})
+            is_empty = range.empty();
+        else
+            is_empty = range.begin() == range.end();
+        if (is_empty)
+            flags |= GeneratorFlags::generate_nothing;
+
+        // Must get zero moves on the functor.
+        return GenerateFuncParam(flags, Functor(std::forward<T>(range)));
     }
     // Those overload accept `{...}` initializer lists. They also conveniently add support for C arrays.
     // Note the lvalue overload being non-const, this way it can accept both const and non-const arrays, same as `std::to_array`.
     template <typename T, std::size_t N> requires(N > 0)
-    [[nodiscard]] auto RangeToGeneratorFunc(T (&range)[N], GeneratorFlags flags = {})
+    [[nodiscard]] auto RangeToGeneratorFunc(GeneratorFlags flags, T (&range)[N])
     {
         return (RangeToGeneratorFunc)(std::to_array(range), flags);
     }
     template <typename T, std::size_t N> requires(N > 0)
-    [[nodiscard]] auto RangeToGeneratorFunc(T (&&range)[N], GeneratorFlags flags = {})
+    [[nodiscard]] auto RangeToGeneratorFunc(GeneratorFlags flags, T (&&range)[N])
     {
         return (RangeToGeneratorFunc)(std::to_array(std::move(range)), flags);
     }
+    // Flag-less overloads. We use overloads to have flags before the range, to be consistent with everything else.
+    template <std::ranges::input_range T>
+    [[nodiscard]] auto RangeToGeneratorFunc(T &&range) {return (RangeToGeneratorFunc)(GeneratorFlags{}, std::forward<T>(range));}
+    template <typename T, std::size_t N> requires(N > 0)
+    [[nodiscard]] auto RangeToGeneratorFunc(T (&range)[N]) {return (RangeToGeneratorFunc)(GeneratorFlags{}, range);}
+    template <typename T, std::size_t N> requires(N > 0)
+    [[nodiscard]] auto RangeToGeneratorFunc(T (&&range)[N]) {return (RangeToGeneratorFunc)(GeneratorFlags{}, std::move(range));}
 
 
     // --- ANALYZING EXCEPTIONS ---

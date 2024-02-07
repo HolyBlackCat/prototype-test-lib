@@ -4,9 +4,6 @@
 
 #include "testlib.h"
 
-// Support zero-variant selections, and in general override-only ranges.
-// Write comments for TA_SELECT and TA_VARIANT
-
 #if 0
 
 TA_CHECK( $[($[a] - $[b]).length()] < 42 )
@@ -89,35 +86,31 @@ bool fof()
 
 TA_TEST(foo/test)
 {
-    std::cout << "Starting test" << '\n';
-    TA_SELECT(action)
+    std::vector<int> v = {1,2,3};
+
+    TA_SELECT(insert_method)
     {
-        std::cout << __LINE__ << '\n';
-        TA_VARIANT(one)
+        TA_VARIANT(insert)
         {
-            std::cout << "Hello\n";
+            v.insert(v.end(), 4);
         }
-        std::cout << __LINE__ << '\n';
-        TA_VARIANT(two)
+        TA_VARIANT(push_back)
         {
-            std::cout << "world!\n";
+            v.push_back(4);
         }
-        std::cout << __LINE__ << '\n';
-        TA_VARIANT(three)
+        TA_VARIANT(emplace_back)
         {
-            std::cout << "world!\n";
+            v.emplace_back(4);
         }
-        std::cout << __LINE__ << '\n';
     }
-    std::cout << "Done" << '\n';
+
+    TA_CHECK($[v] == std::vector{1,2,3,4});
 }
 
 int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
-
-// TA_VARIANT (should be scoped?)
 
 // Optimize the calls to the `BasicPrintingModule` with the module lists too.
 
@@ -128,21 +121,24 @@ int main(int argc, char **argv)
 //     or
 //     THIS: expand ForEach to allow "any" elem to be checked; expand context to allow pointing to element
 
-// Test without exceptions.
-// Test without RTTI. What about exception type names?
-
 // Not now? -- Move `mutable bool should_break` to a saner location, don't keep it in the context? Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
 
 // Check that paths are clickable in Visual Studio (especially when not at line start)
 
 // TESTS!!
 
-// Later:
-//     Option to cache the generator values somehow? Enable it by default?
-//     Should we transition to __PRETTY_FUNCTION__/__FUNCSIG__-based type names?
-//     Soft TA_MUST_THROW? (accept AssertFlags somehow?)
+// Should we transition to __PRETTY_FUNCTION__/__FUNCSIG__-based type names?
+//     Remove the dumb generator logic for adding references to types.
+
+// v0.2:
+//     Optionally no exceptions
+//     Optionally no RTTI
 //     Multithreading? Thread inheritance system.
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
+
+// Later:
+//     Option to cache the generator values somehow? Enable it by default?
+//     Soft TA_MUST_THROW? (accept AssertFlags somehow?)
 //     What's the deal with SEH? Do we need to do anything?
 //     Signal handling?
 
@@ -164,8 +160,10 @@ int main(int argc, char **argv)
 //         they can also open the console themselves.
 
 // Unclear how:
+//     `noop_if_empty` flag for generators. This will work for `TA_GENERATE_PARAM` and `TA_SELECT`, but what to do with others to have feature parity?
+//     In `TA_GENERATE_PARAM`, an extra list can only runs on demand from the command line.
 //     Draw a fat bracket while explaining each test failure?
-//     `$[...]` could be useful purely to provide context, but what if the function returns void or non-printable type?
+//     `$[...]` could be useful to provide context for non-printable function calls (including void).
 //     -g messes up repetition counter a bit if a generator throws (while in the after-test generator update block)
 
 // Selling points:
@@ -381,6 +379,16 @@ TA_CHECK:
         If the roundtrip passes AND the string is short (<= 20 chars, since that's max for [u]uint64_t), THEN printed as `=...`.
         Otherwise if the value doesn't come from `=...` flag, THEN print the index `#...`.
         Otherwise the whole summary is replaced with `...`.
+
+    Default value of `repeat` is true.
+
+    Passing an lvalue functor.
+
+    How exceptions are handled:
+        when constructing the lambda
+        when calling it
+            for the first time
+            for the second+ time
 
     Overriding values:
         =
