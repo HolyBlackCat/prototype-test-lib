@@ -1704,7 +1704,7 @@ int ta_test::Runner::Run()
                     // Actually pop the generators.
                     while (guard.state.generator_stack.size() > guard.state.generator_index)
                     {
-                        module_lists.Call<&BasicModule::OnPrePruneLastGenerator>(guard.state);
+                        module_lists.Call<&BasicModule::OnPrePruneGenerator>(guard.state);
                         guard.state.generator_stack.pop_back();
                     }
                 }
@@ -2448,7 +2448,7 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
     }
 }
 
-void ta_test::modules::GeneratorOverrider::OnPrePruneLastGenerator(const RunSingleTestProgress &test) noexcept
+void ta_test::modules::GeneratorOverrider::OnPrePruneGenerator(const RunSingleTestProgress &test) noexcept
 {
     if (test.generator_stack.back()->OverridingModule() == this)
     {

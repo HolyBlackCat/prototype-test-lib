@@ -2865,8 +2865,8 @@ namespace ta_test
         //   which value is the last one beforehand).
         // You must return true from this when the generator is exhausted, `IsLastValue()` is ignored when an override is active.
         virtual bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) noexcept {(void)test; (void)generator; return false;}
-        // This is called right before the final generator in the stack is pruned, because it has no more values.
-        virtual void OnPrePruneLastGenerator(const RunSingleTestProgress &test) noexcept {(void)test;}
+        // This is called right before a generator is popped from the stack, because it has no more values.
+        virtual void OnPrePruneGenerator(const RunSingleTestProgress &test) noexcept {(void)test;}
 
         // --- FAILING TESTS ---
 
@@ -2952,7 +2952,7 @@ namespace ta_test
             struct DecoExpr {std::string_view string;};
             // An expression with syntax highlighting and argument values. More than one per assertion weren't tested.
             struct DecoExprWithArgs {const BasicAssertionExpr *expr = nullptr;};
-            // `std::monostate` indicates that there should be no more
+            // `std::monostate` indicates that there is no more elements.
             using DecoVar = std::variant<std::monostate, DecoFixedString, DecoExpr, DecoExprWithArgs>;
             // Returns one of the elements to be printed.
             [[nodiscard]] virtual DecoVar GetElement(int index) const = 0;
@@ -3044,7 +3044,7 @@ namespace ta_test
             x(OnPostGenerate) \
             x(OnRegisterGeneratorOverride) \
             /* `OnOverrideGenerator` isn't needed */ \
-            x(OnPrePruneLastGenerator) \
+            x(OnPrePruneGenerator) \
             x(OnPreFailTest) \
             x(OnAssertionFailed) \
             x(OnUncaughtException) \
@@ -5815,7 +5815,7 @@ namespace ta_test
             void OnPostRunSingleTest(const RunSingleTestResults &data) noexcept override;
             bool OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) noexcept override;
             bool OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) noexcept override;
-            void OnPrePruneLastGenerator(const RunSingleTestProgress &test) noexcept override;
+            void OnPrePruneGenerator(const RunSingleTestProgress &test) noexcept override;
 
             // Parses a `GeneratorOverrideSeq` object. `target` must initially be empty.
             // Returns the error on failure, or an empty string on success.
