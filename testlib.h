@@ -4844,12 +4844,12 @@ namespace ta_test
     template <typename T, std::size_t N> requires(N > 0)
     [[nodiscard]] auto RangeToGeneratorFunc(GeneratorFlags flags, T (&range)[N])
     {
-        return (RangeToGeneratorFunc)(std::to_array(range), flags);
+        return (RangeToGeneratorFunc)(flags, std::to_array(range));
     }
     template <typename T, std::size_t N> requires(N > 0)
     [[nodiscard]] auto RangeToGeneratorFunc(GeneratorFlags flags, T (&&range)[N])
     {
-        return (RangeToGeneratorFunc)(std::to_array(std::move(range)), flags);
+        return (RangeToGeneratorFunc)(flags, std::to_array(std::move(range)));
     }
     // Flag-less overloads. We use overloads to have flags before the range, to be consistent with everything else.
     template <std::ranges::input_range T>
