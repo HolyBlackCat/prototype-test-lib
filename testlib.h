@@ -566,6 +566,12 @@ namespace ta_test
     struct BasicModule;
     class ModuleLists;
 
+    namespace detail
+    {
+        class GenerateValueHelper;
+    }
+
+
     // The exit codes we're using. This is mostly for reference.
     enum class ExitCode
     {
@@ -2508,6 +2514,8 @@ namespace ta_test
         // Describes a generator created with `TA_GENERATE(...)`.
         struct BasicGenerator
         {
+            friend detail::GenerateValueHelper;
+
             BasicGenerator() = default;
             BasicGenerator(const BasicGenerator &) = delete;
             BasicGenerator &operator=(const BasicGenerator &) = delete;
@@ -2538,6 +2546,9 @@ namespace ta_test
 
             // Demangles the type from `GetType()`, and adds qualifiers from `GetTypeFlags()`.
             [[nodiscard]] CFG_TA_API std::string GetTypeName() const;
+
+            // The generator flags.
+            [[nodiscard]] virtual GeneratorFlags GetFlags() const = 0;
 
             // Whether the last generated value is the last one for this generator.
             // Note that when the generator is operating under a module override, the system doesn't respect this variable (see below).
@@ -3032,39 +3043,49 @@ namespace ta_test
 
         // All virtual functions of this interface must be listed here.
         // See `class ModuleLists` for how this list is used.
-        #define DETAIL_TA_MODULE_FUNCS(x) \
-            x(GetFlags) \
-            x(OnUnknownFlag) \
-            x(OnMissingFlagArgument) \
-            x(OnFilterTest) \
-            x(OnPreRunTests) \
-            x(OnPostRunTests) \
-            x(OnPreRunSingleTest) \
-            x(OnPostRunSingleTest) \
-            x(OnPostGenerate) \
-            x(OnRegisterGeneratorOverride) \
-            /* `OnOverrideGenerator` isn't needed */ \
-            x(OnPrePruneGenerator) \
-            x(OnPreFailTest) \
-            x(OnAssertionFailed) \
-            x(OnUncaughtException) \
-            x(OnMissingException) \
-            x(OnExplainException) \
-            x(OnPreTryCatch) \
+        #define DETAIL_TA_MODULE_FUNCS_X(x) \
+            x(BasicModule, GetFlags) \
+            x(BasicModule, OnUnknownFlag) \
+            x(BasicModule, OnMissingFlagArgument) \
+            x(BasicModule, OnFilterTest) \
+            x(BasicModule, OnPreRunTests) \
+            x(BasicModule, OnPostRunTests) \
+            x(BasicModule, OnPreRunSingleTest) \
+            x(BasicModule, OnPostRunSingleTest) \
+            x(BasicModule, OnPostGenerate) \
+            x(BasicModule, OnRegisterGeneratorOverride) \
+            /* `OnOverrideGenerator` isn't needed. */ \
+            x(BasicModule, OnPrePruneGenerator) \
+            x(BasicModule, OnPreFailTest) \
+            x(BasicModule, OnAssertionFailed) \
+            x(BasicModule, OnUncaughtException) \
+            x(BasicModule, OnMissingException) \
+            x(BasicModule, OnExplainException) \
+            x(BasicModule, OnPreTryCatch) \
+            x(BasicPrintingModule, EnableUnicode) /* Not needed, but could be useful later. */ \
+            x(BasicPrintingModule, PrintContextFrame) \
+            x(BasicPrintingModule, PrintLogEntries) \
 
-        enum class InterfaceFunction
+        // A list of module bases that appear in `DETAIL_TA_MODULE_FUNCS_X`.
+        #define DETAIL_TA_MODULE_KINDS_X(x) \
+            x(BasicModule) \
+            x(BasicPrintingModule) \
+
+        enum class InterfaceFunc
         {
-            #define DETAIL_TA_X(func_) func_,
-            DETAIL_TA_MODULE_FUNCS(DETAIL_TA_X)
+            #define DETAIL_TA_X(base_, func_) func_,
+            DETAIL_TA_MODULE_FUNCS_X(DETAIL_TA_X)
             #undef DETAIL_TA_X
             _count [[maybe_unused]],
         };
         // For internal use, don't use and don't override. Returns the mask of functions implemented by this class.
         [[nodiscard]] virtual unsigned int Detail_ImplementedFunctionsMask() const noexcept = 0;
         // For internal use. Returns true if the specified function is overriden in the derived class.
-        [[nodiscard]] bool ImplementsFunction(InterfaceFunction func) const noexcept
+        [[nodiscard]] bool ImplementsFunction(InterfaceFunc func) const noexcept
         {
-            return Detail_ImplementedFunctionsMask() & (1 << int(func));
+            using MaskType = decltype(Detail_ImplementedFunctionsMask());
+            static_assert(int(InterfaceFunc::_count) < sizeof(MaskType) * 8, "You're out of bits in the mask.");
+            return Detail_ImplementedFunctionsMask() & (MaskType(1) << int(func));
         }
     };
 
@@ -3097,137 +3118,7 @@ namespace ta_test
             CFG_TA_API void FailCurrentTest();
         };
         [[nodiscard]] CFG_TA_API GlobalThreadState &ThreadState();
-
-        // Returns true if `P` is a member function pointer of a class other than `BasicModule`.
-        template <auto P>
-        struct IsOverriddenModuleFunction
-            : std::bool_constant<!std::is_same_v<typename meta::MemberPointerClass<decltype(P)>::type, BasicModule>>
-        {};
-
-        // Inherits from a user module, and checks which virtual functions were overriden.
-        template <typename T>
-        struct ModuleWrapper final : T
-        {
-            using T::T;
-
-            unsigned int Detail_ImplementedFunctionsMask() const noexcept override final
-            {
-                constexpr unsigned int ret = []{
-                    unsigned int value = 0;
-                    #define DETAIL_TA_X(func_) \
-                        if constexpr (detail::IsOverriddenModuleFunction<&T::func_>::value) \
-                            value |= 1 << int(BasicModule::InterfaceFunction::func_);
-                    DETAIL_TA_MODULE_FUNCS(DETAIL_TA_X)
-                    #undef DETAIL_TA_X
-                    return value;
-                }();
-                return ret;
-            }
-        };
     }
-
-
-    // A pointer to a class derived from `BasicModule`.
-    class ModulePtr
-    {
-        std::unique_ptr<BasicModule> ptr;
-
-        template <std::derived_from<BasicModule> T, typename ...P>
-        requires std::constructible_from<detail::ModuleWrapper<T>, P &&...>
-        friend ModulePtr MakeModule(P &&... params);
-
-      public:
-        constexpr ModulePtr() {}
-        constexpr ModulePtr(std::nullptr_t) {}
-
-        [[nodiscard]] explicit operator bool() const {return bool(ptr);}
-
-        [[nodiscard]] BasicModule *get() const {return ptr.get();}
-        [[nodiscard]] BasicModule &operator*() const {return *ptr;}
-        [[nodiscard]] BasicModule *operator->() const {return ptr.get();}
-    };
-    // Allocates a new module as a `ModulePtr`.
-    template <std::derived_from<BasicModule> T, typename ...P>
-    requires std::constructible_from<detail::ModuleWrapper<T>, P &&...>
-    [[nodiscard]] ModulePtr MakeModule(P &&... params)
-    {
-        ModulePtr ret;
-        ret.ptr = std::make_unique<detail::ModuleWrapper<T>>(std::forward<P>(params)...);
-        return ret;
-    }
-
-    // A non-owning wrapper on top of a module list.
-    // Additionally stores lists of modules implemeting certain functions, to optimize the calls to them.
-    // It's constructed once we start running tests, since that's when the module becomes frozen,
-    // and then becomes the only thing modules can use to interact with the test runner, since there's no way for them to obtain a runner reference.
-    class ModuleLists
-    {
-        std::span<const ModulePtr> all_modules;
-        std::array<std::vector<BasicModule *>, std::size_t(BasicModule::InterfaceFunction::_count)> lists;
-
-      public:
-        ModuleLists() {}
-        ModuleLists(std::span<const ModulePtr> all_modules)
-            : all_modules(all_modules)
-        {
-            for (std::size_t i = 0; i < std::size_t(BasicModule::InterfaceFunction::_count); i++)
-            {
-                lists[i].reserve(all_modules.size());
-                for (const auto &m : all_modules)
-                {
-                    if (m->ImplementsFunction(BasicModule::InterfaceFunction(i)))
-                        lists[i].push_back(m.get());
-                }
-            }
-        }
-
-        // Returns all stored modules.
-        [[nodiscard]] std::span<const ModulePtr> AllModules() const {return all_modules;}
-
-        // Calls `func` for every module of type `T` or derived from `T`.
-        // `func` is `(T &module) -> bool`. If `func` returns true, the function stops immediately and also returns true.
-        template <typename T, typename F>
-        bool FindModule(F &&func) const
-        {
-            for (const auto &m : all_modules)
-            {
-                if (auto base = dynamic_cast<T *>(m.get()))
-                {
-                    if (func(*base))
-                        return true;
-                }
-            }
-            return false;
-        }
-
-        // Get a list of all modules implementing function `F`.
-        template <BasicModule::InterfaceFunction F>
-        requires(F >= BasicModule::InterfaceFunction{} && F < BasicModule::InterfaceFunction::_count)
-        [[nodiscard]] std::span<BasicModule *const> GetModulesImplementing() const
-        {
-            return lists[std::size_t(F)];
-        }
-
-        // Calls a specific function for every module.
-        // The return values are ignored. If you need them, call manually using `GetModulesImplementing()`.
-        template <auto F, typename ...P>
-        requires std::is_member_function_pointer_v<decltype(F)>
-        void Call(P &&... params) const
-        {
-            constexpr BasicModule::InterfaceFunction func_enum = []{
-                #define DETAIL_TA_X(func_) \
-                    if constexpr (meta::ValuesAreEqual<F, &BasicModule::func_>::value) \
-                        return BasicModule::InterfaceFunction::func_; \
-                    else
-                DETAIL_TA_MODULE_FUNCS(DETAIL_TA_X)
-                #undef DETAIL_TA_X
-                static_assert(meta::AlwaysFalse<meta::ValueTag<F>>::value, "Bad member function pointer.");
-            }();
-            for (auto *m : GetModulesImplementing<func_enum>())
-                (m->*F)(params...); // No forwarding because there's more than one call.
-        }
-    };
-
 
     namespace platform
     {
@@ -4413,7 +4304,7 @@ namespace ta_test
             typename UserFuncWrapperType = decltype(std::declval<F &&>()()),
             typename ReturnType = decltype(std::declval<UserFuncWrapperType &>().func(std::declval<bool &>()))
         >
-        struct SpecificGenerator : BasicModule::BasicTypedGenerator<ReturnType>
+        struct SpecificGenerator final : BasicModule::BasicTypedGenerator<ReturnType>
         {
             using BasicModule::BasicGenerator::overriding_module;
 
@@ -4440,6 +4331,13 @@ namespace ta_test
             std::string_view GetName() const override
             {
                 return Name.view();
+            }
+
+            [[nodiscard]] GeneratorFlags GetFlags() const override final
+            {
+                // The flags have to sit in this class and not in `BasicGenerator`,
+                // to allow us to RVO the `GenerateFuncParam` all the way into here.
+                return func.flags;
             }
 
             void Generate() override
@@ -4491,6 +4389,20 @@ namespace ta_test
             }
         };
 
+        class GenerateValueHelper
+        {
+            bool generating_new_value = false;
+
+          public:
+            BasicModule::BasicGenerator *untyped_generator = nullptr;
+
+            // Non-null if a new generator is being created. In that case it has the same value as `untyped_generator`.
+            std::unique_ptr<BasicModule::BasicGenerator> created_untyped_generator;
+
+            CFG_TA_API ~GenerateValueHelper();
+            CFG_TA_API void HandleGenerator(const BasicModule::SourceLoc &source_loc);
+        };
+
         // `TA_GENERATE_FUNC(...)` expands to this.
         // `func` returns the user lambda (it's not the user lambda itself).
         template <
@@ -4507,134 +4419,32 @@ namespace ta_test
             if (!thread_state.current_test)
                 HardError("Can't use `TA_GENERATE(...)` when no test is running.", HardErrorKind::user);
 
+            GenerateValueHelper guard;
+
             using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>;
-
-            struct Guard
-            {
-                GeneratorType *this_generator = nullptr;
-                bool next_value = false;
-
-                ~Guard()
-                {
-                    if (this_generator)
-                    {
-                        auto &thread_state = ThreadState();
-
-                        // Check that we're still in the stack in the expected position.
-                        // We could've been popped from it on a generation failure.
-                        if (thread_state.current_test->generator_index < thread_state.current_test->generator_stack.size() &&
-                            thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get() == this_generator
-                        )
-                        {
-                            // Post callback.
-                            BasicModule::GeneratorCallInfo callback_data{
-                                .test = thread_state.current_test,
-                                .generator = this_generator,
-                                .generating_new_value = next_value,
-                            };
-                            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
-
-                            thread_state.current_test->generator_index++;
-                        }
-                    }
-                }
-            };
-            Guard guard;
-
-            bool creating_new_generator = false;
+            GeneratorType *typed_generator = nullptr;
 
             if (thread_state.current_test->generator_index < thread_state.current_test->generator_stack.size())
             {
                 // Revisiting a generator.
-                auto *this_untyped_generator = thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get();
 
                 // This tells the scope guard that the generator is ready.
-                guard.this_generator = const_cast<GeneratorType *>(dynamic_cast<const GeneratorType *>(this_untyped_generator));
-
-                // Make sure this is the right generator.
-                // Since the location is a part of the type, this nicely checks for the location equality.
-                // This is one of the two determinism checks, the second one is in runner's `Run()` to make sure we visited all generators.
-                if (!guard.this_generator)
-                {
-                    // Theoretically we can have two different generators at the same line, but I think this message is ok even in that case.
-                    HardError(CFG_TA_FMT_NAMESPACE::format(
-                        "Invalid non-deterministic use of generators. "
-                        "Was expecting to reach the generator at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`, "
-                        "but instead reached a different one at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`.",
-                        this_untyped_generator->GetLocation().file, this_untyped_generator->GetLocation().line,
-                        LocFile.view(), LocLine
-                    ), HardErrorKind::user);
-                }
+                // The `dynamic_cast` can fail after this, but that's a hard error anyway.
+                guard.untyped_generator = const_cast<BasicModule::BasicGenerator *>(thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get());
+                typed_generator = dynamic_cast<GeneratorType *>(guard.untyped_generator);
             }
             else
             {
                 // Visiting a generator for the first time.
 
-                creating_new_generator = true;
-
-                if (thread_state.current_test->generator_index != thread_state.current_test->generator_stack.size())
-                    HardError("Something is wrong with the generator index."); // This should never happen.
-
                 auto new_generator = std::make_unique<GeneratorType>(std::forward<F>(func));
-
-                // Fail if no values.
-                if (bool(new_generator->func.flags & GeneratorFlags::generate_nothing))
-                {
-                    if (bool(new_generator->func.flags & GeneratorFlags::interrupt_test_if_empty))
-                    {
-                        throw InterruptTestException{};
-                    }
-                    else
-                    {
-                        HardError(CFG_TA_FMT_NAMESPACE::format(
-                            "No values specified for generator at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`. "
-                            "Must either specify them from the command line, ensure this generator isn't reached, or pass `ta_test::interrupt_test_if_empty` to interrupt the test.",
-                            LocFile.view(), LocLine
-                        ));
-                    }
-                }
-
-                guard.this_generator = new_generator.get();
-
-                // Possibly accept an override.
-                for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<BasicModule::InterfaceFunction::OnRegisterGeneratorOverride>())
-                {
-                    if (m->OnRegisterGeneratorOverride(*thread_state.current_test, *new_generator))
-                    {
-                        new_generator->overriding_module = m;
-                        break;
-                    }
-                }
-
-                thread_state.current_test->generator_stack.push_back(std::move(new_generator));
+                guard.untyped_generator = typed_generator = new_generator.get();
+                guard.created_untyped_generator = std::move(new_generator);
             }
 
-            guard.next_value = thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size();
+            guard.HandleGenerator({LocFile.view(), LocLine});
 
-            // Advance the generator if needed.
-            if (guard.next_value && (!guard.this_generator->overriding_module || creating_new_generator))
-            {
-                switch (guard.this_generator->RunGeneratorOverride())
-                {
-                  case BasicModule::BasicGenerator::OverrideStatus::no_override:
-                    guard.this_generator->Generate();
-                    break;
-                  case BasicModule::BasicGenerator::OverrideStatus::success:
-                    // Nothing.
-                    break;
-                  case BasicModule::BasicGenerator::OverrideStatus::no_more_values:
-                    HardError(
-                        CFG_TA_FMT_NAMESPACE::format(
-                            "Generator `{}` was overriden to generate no values. This is not supported, you must avoid reaching the generator in the first place.",
-                            guard.this_generator->GetName()
-                        ),
-                        HardErrorKind::user
-                    );
-                    break;
-                }
-            }
-
-            return guard.this_generator->GetValue();
+            return typed_generator->GetValue();
         }
 
 
@@ -5468,6 +5278,161 @@ namespace ta_test
 
     // --- TEST RUNNER ---
 
+    namespace detail
+    {
+
+
+        // Inherits from a user module, and checks which virtual functions were overriden.
+        template <typename T>
+        struct ModuleWrapper final : T
+        {
+            using T::T;
+
+            unsigned int Detail_ImplementedFunctionsMask() const noexcept override final
+            {
+                using MaskType = decltype(Detail_ImplementedFunctionsMask());
+                constexpr MaskType ret = []{
+                    MaskType value = 0;
+                    #define DETAIL_TA_X(base_, func_) \
+                        if constexpr (std::is_base_of_v<base_, T>) \
+                            if constexpr (!meta::ValuesAreEqual<&T::func_, &base_::func_>::value) \
+                                value |= MaskType(1) << int(BasicModule::InterfaceFunc::func_);
+                    DETAIL_TA_MODULE_FUNCS_X(DETAIL_TA_X)
+                    #undef DETAIL_TA_X
+                    return value;
+                }();
+                return ret;
+            }
+        };
+    }
+
+    // A pointer to a class derived from `BasicModule`.
+    class ModulePtr
+    {
+        std::unique_ptr<BasicModule> ptr;
+
+        template <std::derived_from<BasicModule> T, typename ...P>
+        requires std::constructible_from<detail::ModuleWrapper<T>, P &&...>
+        friend ModulePtr MakeModule(P &&... params);
+
+      public:
+        constexpr ModulePtr() {}
+        constexpr ModulePtr(std::nullptr_t) {}
+
+        [[nodiscard]] explicit operator bool() const {return bool(ptr);}
+
+        [[nodiscard]] BasicModule *get() const {return ptr.get();}
+        [[nodiscard]] BasicModule &operator*() const {return *ptr;}
+        [[nodiscard]] BasicModule *operator->() const {return ptr.get();}
+    };
+    // Allocates a new module as a `ModulePtr`.
+    template <std::derived_from<BasicModule> T, typename ...P>
+    requires std::constructible_from<detail::ModuleWrapper<T>, P &&...>
+    [[nodiscard]] ModulePtr MakeModule(P &&... params)
+    {
+        ModulePtr ret;
+        ret.ptr = std::make_unique<detail::ModuleWrapper<T>>(std::forward<P>(params)...);
+        return ret;
+    }
+
+    // A non-owning wrapper on top of a module list.
+    // Additionally stores lists of modules implemeting certain functions, to optimize the calls to them.
+    // It's constructed once we start running tests, since that's when the module becomes frozen,
+    // and then becomes the only thing modules can use to interact with the test runner, since there's no way for them to obtain a runner reference.
+    class ModuleLists
+    {
+        // How many interface functions per module base.
+        static constexpr auto function_counts = []{
+            struct FunctionCounts
+            {
+                #define DETAIL_TA_X(base_) std::size_t base_ = 0;
+                DETAIL_TA_MODULE_KINDS_X(DETAIL_TA_X)
+                #undef DETAIL_TA_X
+            };
+            FunctionCounts ret{};
+            #define DETAIL_TA_X(base_, func_) ret.base_++;
+            DETAIL_TA_MODULE_FUNCS_X(DETAIL_TA_X)
+            #undef DETAIL_TA_X
+            return ret;
+        }();
+
+        std::span<const ModulePtr> all_modules;
+
+        // Lists of modules implementing interface functions, per base.
+        #define DETAIL_TA_X(base_) std::array<std::vector<base_ *>, function_counts.base_> DETAIL_TA_CAT(lists_, base_);
+        DETAIL_TA_MODULE_KINDS_X(DETAIL_TA_X)
+        #undef DETAIL_TA_X
+
+      public:
+        ModuleLists() {}
+        ModuleLists(std::span<const ModulePtr> all_modules)
+            : all_modules(all_modules)
+        {
+            for (const auto &m : all_modules)
+            {
+                // Counters per module base type.
+                #define DETAIL_TA_X(base_) std::size_t DETAIL_TA_CAT(i_, base_) = 0;
+                DETAIL_TA_MODULE_KINDS_X(DETAIL_TA_X)
+                #undef DETAIL_TA_X
+
+                #define DETAIL_TA_X(base_, func_) \
+                    if (m->ImplementsFunction(BasicModule::InterfaceFunc::func_)) \
+                        DETAIL_TA_CAT(lists_, base_)[DETAIL_TA_CAT(i_, base_)].push_back(&dynamic_cast<base_ &>(*m)); /* This cast should never fail. */ \
+                    DETAIL_TA_CAT(i_, base_)++;
+                DETAIL_TA_MODULE_FUNCS_X(DETAIL_TA_X)
+                #undef DETAIL_TA_X
+            }
+        }
+
+        // Returns all stored modules.
+        [[nodiscard]] std::span<const ModulePtr> AllModules() const {return all_modules;}
+
+        // Calls `func` for every module of type `T` or derived from `T`.
+        // `func` is `(T &module) -> bool`. If `func` returns true, the function stops immediately and also returns true.
+        template <typename T, typename F>
+        bool FindModule(F &&func) const
+        {
+            for (const auto &m : all_modules)
+            {
+                if (auto base = dynamic_cast<T *>(m.get()))
+                {
+                    if (func(*base))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        // Get a list of all modules implementing function `F`.
+        template <auto F>
+        [[nodiscard]] std::span<typename meta::MemberPointerClass<decltype(F)>::type *const> GetModulesImplementing() const
+        {
+            // Counters per module base type.
+            #define DETAIL_TA_X(base_) std::size_t DETAIL_TA_CAT(i_, base_) = 0;
+            DETAIL_TA_MODULE_KINDS_X(DETAIL_TA_X)
+            #undef DETAIL_TA_X
+
+            #define DETAIL_TA_X(base_, func_) \
+                if constexpr (meta::ValuesAreEqual<F, &base_::func_>::value) \
+                    return DETAIL_TA_CAT(lists_, base_)[DETAIL_TA_CAT(i_, base_)]; \
+                else if (DETAIL_TA_CAT(i_, base_)++, false) {} else
+            DETAIL_TA_MODULE_FUNCS_X(DETAIL_TA_X)
+            #undef DETAIL_TA_X
+            static_assert(meta::AlwaysFalse<meta::ValueTag<F>>::value, "Bad member function pointer.");
+        }
+
+        // Calls a specific function for every module.
+        // The return values are ignored. If you need them, call manually using `GetModulesImplementing()`.
+        template <auto F, typename ...P>
+        requires std::is_member_function_pointer_v<decltype(F)>
+        void Call(P &&... params) const
+        {
+
+            for (auto *m : GetModulesImplementing<F>())
+                (m->*F)(params...); // No forwarding because there's more than one call.
+        }
+    };
+
     // Use this to run tests.
     struct Runner
     {
@@ -6254,8 +6219,8 @@ namespace ta_test
 
             // Labels a subexpression that had a nested assertion failure in it.
             std::u32string chars_in_this_subexpr = U"in here";
-            // Same, but when there's more than one subexpression. This should never happen.
-            std::u32string chars_in_this_subexpr_inexact = U"in here?";
+            // Same, but when there's something wrong internally with determining the location. This shouldn't happen.
+            std::u32string chars_in_this_subexpr_weird = U"in here?";
 
             void OnAssertionFailed(const BasicAssertionInfo &data) noexcept override;
             bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept override;

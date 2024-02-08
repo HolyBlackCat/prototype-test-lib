@@ -237,7 +237,7 @@ void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<
     if (!thread_state.current_test)
         HardError("The current thread currently isn't running any test, can't use `AnalyzeException()`.", HardErrorKind::user);
 
-    for (auto *m : thread_state.current_test->all_tests->modules->GetModulesImplementing<BasicModule::InterfaceFunction::OnExplainException>())
+    for (auto *m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicModule::OnExplainException>())
     {
         std::optional<BasicModule::ExplainedException> opt;
         try
@@ -1031,13 +1031,10 @@ void ta_test::output::PrintContextFrame(output::Terminal::StyleGuard &cur_style,
     if (!thread_state.current_test)
         HardError("No test is currently running, can't print context.", HardErrorKind::user);
 
-    for (const auto &m : thread_state.current_test->all_tests->modules->AllModules())
+    for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicPrintingModule::PrintContextFrame>())
     {
-        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
-        {
-            if (base->PrintContextFrame(cur_style, frame))
-                break;
-        }
+        if (m->PrintContextFrame(cur_style, frame))
+            break;
     }
 }
 
@@ -1051,13 +1048,10 @@ void ta_test::output::PrintLog(Terminal::StyleGuard &cur_style)
     for (auto *entry : thread_state.scoped_log)
         entry->RefreshMessage();
 
-    for (const auto &m : thread_state.current_test->all_tests->modules->AllModules())
+    for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicPrintingModule::PrintLogEntries>())
     {
-        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
-        {
-            if (base->PrintLogEntries(cur_style, thread_state.current_test->unscoped_log, context::CurrentScopedLog()))
-                break;
-        }
+        if (m->PrintLogEntries(cur_style, thread_state.current_test->unscoped_log, context::CurrentScopedLog()))
+            break;
     }
 }
 
@@ -1297,6 +1291,117 @@ ta_test::detail::BasicScopedLogGuard::~BasicScopedLogGuard()
     if (thread_state.scoped_log.empty() || thread_state.scoped_log.back() != entry)
         HardError("The scoped log stack got corrupted.");
     thread_state.scoped_log.pop_back();
+}
+
+ta_test::detail::GenerateValueHelper::~GenerateValueHelper()
+{
+    if (untyped_generator)
+    {
+        auto &thread_state = ThreadState();
+
+        // Check that we're still in the stack in the expected position.
+        // We could've been popped from it on a generation failure.
+        if (thread_state.current_test->generator_index < thread_state.current_test->generator_stack.size() &&
+            thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get() == untyped_generator
+        )
+        {
+            // Post callback.
+            BasicModule::GeneratorCallInfo callback_data{
+                .test = thread_state.current_test,
+                .generator = untyped_generator,
+                .generating_new_value = generating_new_value,
+            };
+            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
+
+            thread_state.current_test->generator_index++;
+        }
+    }
+}
+
+void ta_test::detail::GenerateValueHelper::HandleGenerator(const BasicModule::SourceLoc &source_loc)
+{
+    auto &thread_state = ThreadState();
+
+    // If creating a new generator...
+    if (created_untyped_generator)
+    {
+        if (thread_state.current_test->generator_index != thread_state.current_test->generator_stack.size())
+            HardError("Something is wrong with the generator index."); // This should never happen.
+
+        // Fail if no values.
+        if (bool(untyped_generator->GetFlags() & GeneratorFlags::generate_nothing))
+        {
+            if (bool(untyped_generator->GetFlags() & GeneratorFlags::interrupt_test_if_empty))
+            {
+                // A micro-optimization. We don't need to run the destructor stuff in this case.
+                untyped_generator = nullptr;
+
+                throw InterruptTestException{};
+            }
+            else
+            {
+                HardError(CFG_TA_FMT_NAMESPACE::format(
+                    "No values specified for generator at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`. "
+                    "Must either specify them from the command line, ensure this generator isn't reached, or pass `ta_test::interrupt_test_if_empty` to interrupt the test.",
+                    source_loc.file, source_loc.line
+                ));
+            }
+        }
+
+        // Possibly accept an override.
+        for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicModule::OnRegisterGeneratorOverride>())
+        {
+            if (m->OnRegisterGeneratorOverride(*thread_state.current_test, *untyped_generator))
+            {
+                untyped_generator->overriding_module = m;
+                break;
+            }
+        }
+
+        thread_state.current_test->generator_stack.push_back(std::move(created_untyped_generator));
+    }
+    else
+    {
+        // Make sure this is the right generator.
+        // Since the location is a part of the type, this nicely checks for the location equality.
+        // This is one of the two determinism checks, the second one is in runner's `Run()` to make sure we visited all generators.
+        if (!untyped_generator)
+        {
+            // Theoretically we can have two different generators at the same line, but I think this message is ok even in that case.
+            HardError(CFG_TA_FMT_NAMESPACE::format(
+                "Invalid non-deterministic use of generators. "
+                "Was expecting to reach the generator at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`, "
+                "but instead reached a different one at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`.",
+                untyped_generator->GetLocation().file, untyped_generator->GetLocation().line,
+                source_loc.file, source_loc.line
+            ), HardErrorKind::user);
+        }
+    }
+
+    generating_new_value = thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size();
+
+    // Advance the generator if needed.
+    if (generating_new_value && (!untyped_generator->overriding_module || created_untyped_generator))
+    {
+        switch (untyped_generator->RunGeneratorOverride())
+        {
+          case BasicModule::BasicGenerator::OverrideStatus::no_override:
+            untyped_generator->Generate();
+            break;
+          case BasicModule::BasicGenerator::OverrideStatus::success:
+            // Nothing.
+            break;
+          case BasicModule::BasicGenerator::OverrideStatus::no_more_values:
+            HardError(
+                CFG_TA_FMT_NAMESPACE::format(
+                    "Generator `{}` was overriden to generate no values. This is not supported, you must avoid reaching the generator in the first place.",
+                    untyped_generator->GetName()
+                ),
+                HardErrorKind::user
+            );
+            break;
+        }
+    }
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<ta_test::ExceptionElem>::operator()(const ExceptionElem &value) const
@@ -3833,8 +3938,10 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
         std::size_t overline_start = 0;
         std::size_t overline_end = 0;
         // How many subexpressions want an overline.
-        // More than one should be impossible, but if it happens, we just combine them into a single fat one.
+        // This should be more than one only for nested `$[...]`, or if something really weird is going on.
         int num_overline_parts = 0;
+        // This is set to true if `num_overline_parts` is larger than one, but the brackets are somehow not nested.
+        bool overline_is_weird = false;
 
         // Incremented when we print an argument.
         std::size_t color_index = 0;
@@ -3856,8 +3963,15 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
                 }
                 else
                 {
-                    overline_start = std::min(overline_start, this_info.expr_offset);
-                    overline_end = std::max(overline_end, this_info.expr_offset + this_info.expr_size);
+                    overline_start = std::max(overline_start, this_info.expr_offset);
+                    overline_end = std::min(overline_end, this_info.expr_offset + this_info.expr_size);
+
+                    // This shouldn't happen. This means that the two `$[...]` aren't nested in one another.
+                    if (overline_end <= overline_start)
+                    {
+                        overline_is_weird = true;
+                        overline_end = overline_start + 1;
+                    }
                 }
                 num_overline_parts++;
             }
@@ -3934,7 +4048,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
                 overline_start--;
             overline_end++;
 
-            std::u32string_view this_value = num_overline_parts > 1 ? chars_in_this_subexpr_inexact : chars_in_this_subexpr;
+            std::u32string_view this_value = overline_is_weird ? chars_in_this_subexpr_weird : chars_in_this_subexpr;
 
             std::size_t center_x = expr_column + overline_start + (overline_end - overline_start) / 2;
             std::size_t value_x = center_x - this_value.size() / 2;

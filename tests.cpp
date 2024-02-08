@@ -4,6 +4,8 @@
 
 #include "testlib.h"
 
+// Remove the BasicModule from the header somehow.
+
 #if 0
 
 TA_CHECK( $[($[a] - $[b]).length()] < 42 )
@@ -83,6 +85,12 @@ bool fof()
     return true;
 }
 #endif
+
+int foo(int x)
+{
+    TA_CHECK($[x] > 0);
+    return x;
+}
 
 TA_TEST(foo/test)
 {
@@ -307,6 +315,11 @@ TA_CHECK:
     TA_CHECK( ($)[42] ), TA_CHECK( ( $ ) [42] ) - should work. $ must be grayed out, but not its enclosing `(`,`)`
 
     Build error if $ is already expanded (nested in another macro)
+
+    "in here" context for non-nested brackets.
+    "in here" context for nested brackets (should show the most nested one)
+
+    What if wrong thread evaluates the $[...]? That should be a hard error.
 
 --- TA_FAIL
     With and without the message.
