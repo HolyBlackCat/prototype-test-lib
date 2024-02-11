@@ -384,6 +384,7 @@ bool ta_test::platform::IsDebuggerAttached()
 
 bool ta_test::platform::IsTerminalAttached(bool is_stderr)
 {
+    #if CFG_TA_DETECT_TERMINAL
     // We cache the return value.
     auto lambda = []<bool IsStderr>
     {
@@ -402,6 +403,9 @@ bool ta_test::platform::IsTerminalAttached(bool is_stderr)
         return lambda.operator()<true>();
     else
         return lambda.operator()<false>();
+    #else
+    return false;
+    #endif
 }
 
 ta_test::output::Terminal::Terminal(FILE *stream)
@@ -411,16 +415,16 @@ ta_test::output::Terminal::Terminal(FILE *stream)
         stream == stderr ? platform::IsTerminalAttached(true) : false;
 
     output_func = [stream
-    #if CFG_TA_FMT_HAS_FILE_PRINT == 0 && defined(_WIN32)
+    #if CFG_TA_FMT_HAS_FILE_VPRINT == 0 && defined(_WIN32)
     , need_init = is_terminal
     #endif
     ](std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) mutable
     {
-        #if CFG_TA_FMT_HAS_FILE_PRINT == 2
+        #if CFG_TA_FMT_HAS_FILE_VPRINT == 2
         CFG_TA_FMT_NAMESPACE::vprint_unicode(stream, fmt, args);
-        #elif CFG_TA_FMT_HAS_FILE_PRINT == 1
+        #elif CFG_TA_FMT_HAS_FILE_VPRINT == 1
         CFG_TA_FMT_NAMESPACE::vprint(stream, fmt, args);
-        #elif CFG_TA_FMT_HAS_FILE_PRINT == 0
+        #elif CFG_TA_FMT_HAS_FILE_VPRINT == 0
 
         #ifdef _WIN32
         if (need_init)
@@ -439,7 +443,7 @@ ta_test::output::Terminal::Terminal(FILE *stream)
         std::string buffer = CFG_TA_FMT_NAMESPACE::vformat(fmt, args);
         std::fwrite(buffer.c_str(), buffer.size(), 1, stream);
         #else
-        #error Invalid value of `CFG_TA_FMT_HAS_FILE_PRINT`.
+        #error Invalid value of `CFG_TA_FMT_HAS_FILE_VPRINT`.
         #endif
     };
 
@@ -1322,8 +1326,11 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator(const BasicModule::So
 {
     auto &thread_state = ThreadState();
 
+    // Need this variable, because the generator is later moved-from.
+    bool creating_new_generator = bool(created_untyped_generator);
+
     // If creating a new generator...
-    if (created_untyped_generator)
+    if (creating_new_generator)
     {
         if (thread_state.current_test->generator_index != thread_state.current_test->generator_stack.size())
             HardError("Something is wrong with the generator index."); // This should never happen.
@@ -1381,7 +1388,7 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator(const BasicModule::So
     generating_new_value = thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size();
 
     // Advance the generator if needed.
-    if (generating_new_value && (!untyped_generator->overriding_module || created_untyped_generator))
+    if (generating_new_value && (!untyped_generator->overriding_module || creating_new_generator))
     {
         switch (untyped_generator->RunGeneratorOverride())
         {
@@ -3949,12 +3956,12 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
         for (std::size_t i = 0; i < expr->NumArgs(); i++)
         {
             const std::size_t arg_index = expr->ArgsInDrawOrder()[i];
-            const BasicAssertionExpr::StoredArg &this_arg = expr->StoredArgs()[arg_index];
+            BasicAssertionExpr::ArgState this_state = expr->CurrentArgState(arg_index);
             const BasicAssertionExpr::ArgInfo &this_info = expr->ArgsInfo()[arg_index];
 
             bool dim_parentheses = true;
 
-            if (this_arg.state == BasicAssertionExpr::StoredArg::State::in_progress)
+            if (this_state == BasicAssertionExpr::ArgState::in_progress)
             {
                 if (num_overline_parts == 0)
                 {
@@ -3976,9 +3983,9 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
                 num_overline_parts++;
             }
 
-            if (this_arg.state == BasicAssertionExpr::StoredArg::State::done)
+            if (this_state == BasicAssertionExpr::ArgState::done)
             {
-                text::uni::Decode(this_arg.value, this_value);
+                text::uni::Decode(expr->CurrentArgValue(arg_index), this_value);
 
                 std::size_t center_x = expr_column + this_info.expr_offset + (this_info.expr_size + 1) / 2 - 1;
                 std::size_t value_x = center_x - (this_value.size() + 1) / 2 + 1;

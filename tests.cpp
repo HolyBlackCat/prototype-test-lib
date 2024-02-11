@@ -4,115 +4,8 @@
 
 #include "testlib.h"
 
-// Remove the BasicModule from the header somehow.
-
-#if 0
-
-TA_CHECK( $[($[a] - $[b]).length()] < 42 )
-
-            Tests  Variants    Checks
-Skipped         1         1         1
-Passed          1         1         1
-FAILED          1         1         1
-
-            Tests    Checks
-Skipped         1         1
-Passed          1         1
-FAILED          1         1
-
-bool fof()
-{
-    TA_CONTEXT("Hello {}", []{std::cout << "A\n"; return 42;}());
-    TA_LOG("Hello!");
-    TA_CONTEXT_LAZY("Hello {}", []{std::cout << "B\n"; return 43;}());
-    try{
-        TA_CHECK($[1] == $[2]);
-    }
-    catch (ta_test::InterruptTestException) {}
-        TA_CHECK($[1] == $[2]);
-    // TA_CHECK($[1] == $[2])("x = {}", 42);
-    // TA_FAIL("stuff {}", 42);
-
-    // auto x = TA_MUST_THROW(throw std::runtime_error("123"))("z={}",43);
-    // x.CheckMessage("123").CheckMessage("1234");
-
-    TA_STOP;
-
-    TA_GENERATE(i, std::views::iota(10,20))
-    TA_GENERATE(i, {1,2,3})
-
-    TA_GENERATE_FUNC(i, [i = 0](bool &repeat) mutable {repeat = i < 3; return i++})
-
-
-    TA_FOR_TYPES(T, int, float, double) {...};
-    TA_FOR_TYPE_LIST(T, type_list<int, float, double>) {...};
-    TA_FOR_VALUES(T, 1, 1.f, 1.) {...};
-    TA_FOR_VALUE_LIST(T, value_list<1, 1.f, 1.>) {...};
-
-    if TA_VARIANT(foo) // expands more or less:  if (TA_GENERATE(foo, {true, false}))
-    // VARIANT also has a customized logging:
-    //     if we get a `true` variant, and
-    //     the preceding variant was just switched to false,
-    //     and we haven't seen this true variant on the previous run
-    //     // not needed: and if we're currently out of scope of the preceding varaint IF
-    //          // this would require expanding to like `(var; cond)`,
-    //          // and would prevent usage outside of conditions - should be do it regardless? I guess not?
-    // then the preceding variant is marked as non-printing as long as it remains false (aka the rest of its lifetime)
-    //     because it seems to be the sibling of the current variant
-
-    // ^ Now do we handle command-line overrides of variants and this sibling system?
-
-    // We will have to print an "otherwise" branch when running it (decide how to name it?)
-
-
-
-    for (int i : {1,2,3})
-    {
-        // T i = 1;
-        // T i = 2;
-        // T i = 3;
-    }
-
-
-    for (ta_test::RepeatTestFor<int> i = 1; i <= 3; i++)
-    {
-        // T i = 1;
-        // i = 2;
-        // i = 3;
-        //
-    }
-
-    return true;
-}
-#endif
-
-int foo(int x)
-{
-    TA_CHECK($[x] > 0);
-    return x;
-}
-
 TA_TEST(foo/test)
 {
-    std::vector<int> v = {1,2,3};
-
-    TA_SELECT(insert_method)
-    {
-        TA_VARIANT(insert)
-        {
-            v.insert(v.end(), 4);
-        }
-        TA_VARIANT(push_back)
-        {
-            v.push_back(4);
-        }
-        TA_VARIANT(emplace_back)
-        {
-            v.emplace_back(4);
-        }
-    }
-
-    TA_CHECK($[v] == std::vector{1,2,3,4});
 }
 
 int main(int argc, char **argv)
@@ -120,8 +13,7 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Optimize the calls to the `BasicPrintingModule` with the module lists too.
-
+// Remove the BasicModule from the header somehow.
 // Split the runner (with all modules) into a separate header? Including most utility functions too.
 
 // Better CaughtException interface?
@@ -129,14 +21,24 @@ int main(int argc, char **argv)
 //     or
 //     THIS: expand ForEach to allow "any" elem to be checked; expand context to allow pointing to element
 
+// Update TA_MUST_THROW comment for this.
+
+// Experiment with filesystem::path and wstring and wchar_t (on all compilers and on libfmt).
+//     and u8string and u16string and u32string and char{16,32,8}_t
+// If good, don't forget to enable "lazy copy for printing" for them
+
 // Not now? -- Move `mutable bool should_break` to a saner location, don't keep it in the context? Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
 
 // Check that paths are clickable in Visual Studio (especially when not at line start)
+
+// What about caching generator values by default, with opt-out flag? Then TA_GENERATE_PARAM needs to accept a flag parameter somehow.
 
 // TESTS!!
 
 // Should we transition to __PRETTY_FUNCTION__/__FUNCSIG__-based type names?
 //     Remove the dumb generator logic for adding references to types.
+
+// Add CMakeLists.txt!
 
 // v0.2:
 //     Optionally no exceptions
@@ -145,13 +47,17 @@ int main(int argc, char **argv)
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
 
 // Later:
+//     Lazy string conversion for ranges:
+//         Forward iterator or stronger, the element is also lazy copyable (similar range or `CopyForLazyStringConversion == true`)
+//         Copy everything to a single flat heap buffer (separate pass to calculate the buffer length)
+//             Think about range of ranges (std::filesystem::path)
 //     Option to cache the generator values somehow? Enable it by default?
 //     Soft TA_MUST_THROW? (accept AssertFlags somehow?)
-//     What's the deal with SEH? Do we need to do anything?
-//     Signal handling?
 
 // Maybe not?
 //     Allow more characters in bracket-less form: `:`, `.`, `->`?
+//     What's the deal with SEH? Do we need to do anything?
+//     Signal handling?
 // Maybe not...
 //     Get terminal width, and limit separator length to that value (but still not make them longer than they currently are)
 //     Try to enforce relative paths, and try printing errors on the same line as paths.
@@ -176,10 +82,13 @@ int main(int argc, char **argv)
 
 // Selling points:
 //     * Expression unwrapping
-//     * Better sections/subcases (can do a cross product, controllable from the command line)
+//     * Better sections/subcases (can do a cross product, always at least one executes) (controllable from the command line, but so are catch2's ones)
 //     * Generators
 //         * Understand C++20 ranges
-//         * Fully controllable from the command line
+//         * Fully controllable from the command line (though catch2's subsections are too; check that their generators aren't)
+//         * ERGONOMICS
+//             * fully logged (check if catch2 can enable this; if yes say "by default")
+//             * can copypaste the reproducer string from the output
 //     * Quality of life:
 //         * Using std::format/libfmt everywhere, no iostreams.
 //         * First-class nested exceptions support out of the box
@@ -205,6 +114,7 @@ int main(int argc, char **argv)
     std::vector<int> std::set<int>, std::map<int, int>
     tuple (including empty), pair
     nullptr
+    std::filesystem::path - don't crash with unicode symbols on non-unicode locales? Need to experiment.
 
 --- FromString
     Same types as in ToString
@@ -304,8 +214,11 @@ TA_CHECK:
     ta_test::ExactString - control characters should be printed as unicode replacements
     Compilation error on comma
 
+    Does `$[...]` has top-level (...) in expansion? I think not. Add a negative test.
+
+    Try passing an rvalue to $[...] that has CopyForLazyStringConversion specialzied to true. It must not be moved by the `$[...]` itself.
+
     Challenge the parsing:
-        ' as digit seprator
         strings, char literals, raw strings - all containing opening/closing brackets, whole $[...]
 
     TA_CHECK( ((((((((((((($[(((42)))]))))))))))))) ) // There's some internal limit on the number of parens, but this is way below it.
@@ -329,6 +242,7 @@ TA_CHECK:
 --- TA_MUST_THROW:
     local variable capture actually works, and the values are correct
     Doesn't warn on unused value.
+    Doesn't warn on unused [[nodiscard]] value??? (if possible at all)
     Doesn't warn on nodiscard violation.
     Doesn't warn on `;` at the end.
     Opening two same context frames deduplicates them.
@@ -355,6 +269,7 @@ TA_CHECK:
     What happens if the lazy version throws? We should probably gracefully stop the test.
     Usable in fold expressions without parentheses.
     Error if it outlives the test.
+    Lazy version should always re-evaluate to print the up-to-date variable values.
 
 --- TA_GENERATE_FUNC
     Name validation to be a valid identifier.
@@ -391,6 +306,7 @@ TA_CHECK:
     On test failure, print the generator summary after the test name, to simplify reproduction.
         If the roundtrip passes AND the string is short (<= 20 chars, since that's max for [u]uint64_t), THEN printed as `=...`.
         Otherwise if the value doesn't come from `=...` flag, THEN print the index `#...`.
+            Check that if we have both to_string and from_string conversions, BUT not ==, then the index gets printed.
         Otherwise the whole summary is replaced with `...`.
 
     Default value of `repeat` is true.
@@ -568,6 +484,8 @@ TA_CHECK:
         (auto A, ta_test::expand, 42) = build error
         (auto A, ta_test::expand, ValueTag<42>, 42) = build error
 
+    Pastable reproducer strings should print the proper values (if short enough), not # indices
+
 --- TA_SELECT and TA_VARIANT
     No registered variants = runtime error
         Must mention the source location
@@ -577,6 +495,8 @@ TA_CHECK:
         just inside TA_SELECT
     nested variants (for same TA_SELECT) = build error
     duplicate variant name = build error
+
+    Pastable reproducer strings should print the proper values (if short enough), not # indices
 
 --- All the macros nicely no-op when tests are disabled
     TA_CHECK validates the arguments (crash on call?)
@@ -625,7 +545,6 @@ Good test names:
     ASSERT evaluated when no test is running.
     ASSERT evaluated in a wrong thread.
     $[...] evaluation delayed until after the assertion.
-    $[...] evaluation
     If $[...] is evaluated more than once, should keep the latest value.
     Try duplicating $[...] with a macro, what then?
 

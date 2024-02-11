@@ -39,6 +39,8 @@
 
 // --- CONFIGURATION MACROS ---
 
+// NOTE: Unless otherwise specified, those should have the same value in every translation unit, or you risk ODR violations!
+
 // Whether we're building as a shared library.
 #ifndef CFG_TA_SHARED
 #define CFG_TA_SHARED 0
@@ -96,7 +98,8 @@
 #endif
 #endif
 
-// Whether to define `$[...]` as an alias for `TA_ARG(...)`.
+// If this is set to false, replaces `$[...]` with `TA_ARG(...)`. Use this if `$` is taken by some other library.
+// You can set this on a per-translation-unit basis.
 #ifndef CFG_TA_USE_DOLLAR
 #define CFG_TA_USE_DOLLAR 1
 #endif
@@ -193,17 +196,21 @@
 
 // Whether we should try to detect the debugger and break on failed assertions, on platforms where we know how to do so.
 // NOTE: Only touch this if including the debugger detection code in the binary is somehow problematic.
-// If you just want to temporarily disable automatic breakpoints, configure `modules::DebuggerDetector` in `ta_test::Runner` instead.
+// If you just want to temporarily disable automatic breakpoints, pass `--no-debug` or configure `modules::DebuggerDetector` in `ta_test::Runner` instead.
 #ifndef CFG_TA_DETECT_DEBUGGER
 #define CFG_TA_DETECT_DEBUGGER 1
 #endif
 
-// Whether we should try to detect stdout being attached to an interactive terminal,
+// Whether we should try to detect stdout or stderr being attached to an interactive terminal.
+// If this is disabled, we assume not having a terminal, so the colored output is disabled by default.
+// On Windows this also disables configuring the terminal (setting encoding to UTF-8 and enabling ANSI sequences), so you'd need to do that yourself.
+// If you just want to disable the colors by default, it's better to call `ta_test::Runner::SetEnableColor()` than touching this.
 #ifndef CFG_TA_DETECT_TERMINAL
 #define CFG_TA_DETECT_TERMINAL 1
 #endif
 
 // Warning pragmas to ignore warnings about unused values.
+// E.g. `TA_MUST_THROW(...)` calls this for its argument.
 #ifndef CFG_TA_IGNORE_UNUSED_VALUE
 #ifdef __GNUC__
 #define CFG_TA_IGNORE_UNUSED_VALUE(...) _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wunused-value\"") __VA_ARGS__ _Pragma("GCC diagnostic pop")
@@ -220,6 +227,7 @@
 #define CFG_TA_THIS_FUNC_NAME __PRETTY_FUNCTION__
 #endif
 
+// The `[[nodiscard]]` attribute for lambdas. This is only used internally.
 #ifndef CFG_TA_NODISCARD_LAMBDA
 #  if CFG_TA_CXX_STANDARD >= 23
 #    define CFG_TA_NODISCARD_LAMBDA [[nodiscard]]
@@ -234,29 +242,47 @@
 #  endif
 #endif
 
+// `$[...]` needs to preserve the argument value to later print it if the assertion fails.
+// It does so either by copying the value itself (for sufficiently trivial types), or by converting to a string immediately and storing that string.
+// One of the "triviallness" requirements is fitting within this storage and alignment.
+// Size 32 was chosen as the largest common `std::string` size (on x64 libstdc++ and MSVC STL, while libc++ uses 24).
+// Alignment 16 was chosen as the popular SIMD alignment.
+// Note that those must be large enough to fit `std::string`, there's a compile-time check for that.
+#ifndef CFG_TA_ARG_STORAGE_SIZE
+#define CFG_TA_ARG_STORAGE_SIZE 32
+#endif
+#ifndef CFG_TA_ARG_STORAGE_ALIGNMENT
+#define CFG_TA_ARG_STORAGE_ALIGNMENT 16
+#endif
+
 // --- INTERFACE MACROS ---
 
 // Define a test. Must be followed by `{...}`.
-// `name` is the test name without quotes, it must be a valid identifier.
+// `name` is the test name without quotes and without spaces. You can use letters, digits, and `_`.
 // Use `/` as a separator to make test groups: `group/sub_group/test_foo`. There must be no spaces around the slashes.
+// The grouping only affects the reporting output (and sometimes the execution order, to run the entire group together).
 #define TA_TEST(name) DETAIL_TA_TEST(name)
 
-// Check condition, immediately fail the test if false.
-// You can pass an instance of `ta_test::AssertFlags` before the condition (in particular, `ta_test::soft`).
+// Check condition. If it's false or throws, the test is marked as false, and also `InterruptTestException` is thrown to quickly exit the test.
+// You can pass an instance of `ta_test::AssertFlags` before the condition (in particular, `ta_test::soft` to not throw).
 // You can also pass an instance of `ta_test::AssertParam` as the only parameter, which contains both the flags and the condition.
-// The first parentheses can be followed by another ones, containing the custom message, and possibly formatting arguments for it.
-// The custom message is evaluated only if the condition is false, so you can use expensive calls in it.
+// The first parentheses can be followed by another one, containing the custom message, and possibly formatting arguments for it.
+// The custom message is evaluated only if the condition is false, so you can use expensive function calls in it.
+// You can wrap any part of the condition in `$[...]` to print it on failure (there can be several, possibly nested).
 // Returns void.
 // Usage:
-//     TA_CHECK(x == 42);
+//     TA_CHECK(x == 42); // You won't know the value of `x` on failure.
 //     TA_CHECK($[x] == 42); // `$` will print the value of `x` on failure.
 //     TA_CHECK($[x] == 42)("Checking stuff!"); // Add a custom message.
 //     TA_CHECK($[x] == 42)("Checking {}!", "stuff"); // Custom message with formatting.
 //     TA_CHECK(ta_test::soft, $[x] == 42); // Let the test continue after a failure.
 #define TA_CHECK(...) DETAIL_TA_CHECK("TA_CHECK", #__VA_ARGS__, __VA_ARGS__)
 // Equivalent to `TA_CHECK(false)`, except the printed message is slightly different.
-// Also accepts an optional message: `TA_FAIL("Checking {}!", "stuff");`.
-#define TA_FAIL DETAIL_TA_CHECK("", "", false)
+// Usage:
+//     TA_FAIL;
+//     TA_FAIL("Stuff failed!");
+//     TA_FAIL("Stuff {}!", "failed");
+#define TA_FAIL DETAIL_TA_FAIL
 // Stops the test immediately, not necessarily failing it.
 // Equivalent to throwing `ta_test::InterruptTestException`.
 #define TA_INTERRUPT_TEST DETAIL_TA_INTERRUPT_TEST
@@ -264,10 +290,9 @@
 #if CFG_TA_USE_DOLLAR
 // Can only be used inside of `TA_CHECK(...)`. Wrap a subexpression in this to print its value if the assertion fails.
 // Those can be nested inside one another.
-// The expansion is enclosed in `(...)`, which lets you use it e.g. as a sole function argument: `func $[var]`.
 #define $ DETAIL_TA_ARG
 #else
-// A fallback replacement for `$`. Don't enable it by default to enforce a consistent style.
+// A fallback replacement for `$`. We don't enable it by default to enforce a consistent style.
 #define TA_ARG DETAIL_TA_ARG
 #endif
 
@@ -276,13 +301,13 @@
 #define TA_MUST_THROW(...) \
     DETAIL_TA_MUST_THROW("TA_MUST_THROW", #__VA_ARGS__, __VA_ARGS__)
 
-// Logs a formatted line. The log is printed only on test failure.
+// Logs a formatted line. It's only printed on test failure, at most once per test.
 // Example:
 //     TA_LOG("Hello!");
 //     TA_LOG("x = {}", 42);
 // The trailing `\n`, if any, is ignored.
 #define TA_LOG(...) DETAIL_TA_LOG(__VA_ARGS__)
-// Creates a scoped log message. It's printed only if this line is in scope when something fails.
+// Creates a scoped log message. It's printed only if this line is in scope on test failure.
 // Unlike `TA_LOG()`, the message can be printed multiple times, if there are multiple failures in this scope.
 // The trailing `\n`, if any, is ignored.
 // The code calls this a "scoped log", and "context" means something else in the code.
@@ -292,13 +317,13 @@
 // Can evaluate the message more than once. You can utilize this to display the current variable values.
 #define TA_CONTEXT_LAZY(...) DETAIL_TA_CONTEXT_LAZY(__VA_ARGS__)
 
-// Repeats the test for all values in the range `...`. (Either a `{...}` list or a C++20 range.)
+// Repeats the test for all values in the range `...`. (Which is either a `{...}` or a C++20 range.)
 // Example usage: `int x = TA_GENERATE(foo, {1,2,3});`.
 // `name` is the name for logging purposes, it must be a valid identifier. It's also used for controlling the generator from the command line.
 // You can't use any local variables in `...`, that's a compilation error.
 //   This is an artificial limitation for safety reasons, to prevent accidental dangling.
 //   Use `TA_GENERATE_FUNC(...)` with `ta_test::RangeToGeneratorFunc(...)` to do that.
-// Accepts an optional parameter before the range, of type `ta_test::GeneratorFlags`, like `RangeToGeneratorFunc()`.
+// Accepts an optional parameter before the range, of type `ta_test::GeneratorFlags`, same as `RangeToGeneratorFunc()`.
 //   E.g. pass `ta_test::interrupt_test_if_empty` to allow empty ranges.
 #define TA_GENERATE(name, ...) DETAIL_TA_GENERATE(name, __VA_ARGS__)
 
@@ -319,7 +344,7 @@
 // The lambda is not evaluated/constructed at all when reentering `TA_GENERATE_FUNC(...)`, if we already have one from the previous run.
 // We guarantee that the lambda isn't copied or moved AT ALL.
 // The lambda can be preceded by an optional parameter of type `ta_test::GeneratorFlags`.
-// Or you can pass an instance of `ta_test::GenerateFuncParam`, which combines both parameters.
+// Or you can pass an instance of `ta_test::GenerateFuncParam`, which combines both arguments.
 #define TA_GENERATE_FUNC(name, ...) DETAIL_TA_GENERATE_FUNC(name, __VA_ARGS__)
 
 // A version of `TA_GENERATE` for generating types (and other template parameters, such as constant values or templates).
@@ -332,9 +357,10 @@
 //         // ...
 //     };
 // Note the trailing `;`.
-// The first argument must be one of: `typename T`, `class T`, `auto T` (T = any name),
-//   or `(...) T` (`...` = parameter kind, such as one of the above, or a type/concept, or a template template parameter).
-//   Here's an example of a template template parameter:
+// The first argument must be a template parameter declaration of the form `<kind> <name>`,
+//   where `<name>` is a valid identifier. If `<kind>` isn't one of: `typename`, `class`, `auto` (such as a specific type,
+//     a concept, or a template template parameter, it must be parenthesized).
+//   Here's an example with a template template parameter:
 //       TA_GENERATE_PARAM((template <typename...> typename) T, std::vector, std::deque)
 //       {
 //           T<int> x = {1,2,3};
@@ -343,7 +369,7 @@
 //   Certain non-type parameters are impossible to express with this syntax (pointers/references to functions/arrays),
 //   because a part of the type goes after the parameter name. For those, either typedef the type, or just use `auto`.
 // The remaining arguments are a non-empty list of parameter arguments.
-// The `{...}` body is a lambda (with `[&]` capture). You can return something from it, then the macro returns the same thing.
+// The `{...}` body is a lambda (with `[&]` capture) that is called immediately. You can return something from it, then the macro returns the same thing.
 //   As usual, the default return type is `auto`, but you can add `-> ...` after the macro to change the type (and possibly return by reference).
 //   Like with `std::visit`, the return type can't depend on the template parameter.
 // You can extract the argument list from a template instead of hardcoding it, using `ta_test::expand` like this:
@@ -361,19 +387,20 @@
 //         TA_VARIANT(b) {...}
 //         TA_VARIANT(c) {...}
 //     }
-// `foo` and `a`,`b`,`c` are names for logging purposes.
+// `foo` and `a`,`b`,`c` are names for logging purposes, and for controlling the test flow from a command line.
 // The braces after `TA_VARIANT(...)` can be omitted, if the body is only a single line (like in an `if`).
 // `TA_SELECT` accepts a second optional parameter of type `ta_test::GeneratorFlags`, which in particular lets you customize the behavior if no variants are enabled.
-// You can enable and disable variants at runtime, by adding an `if` outside one.
-// This means that the braces after `TA_SELECT(...)` can contain more than just the variants.
-// When `TA_SELECT` is first reached, its body is executed from the `{`, but without entering any of the variants. The list of reached variants is preserved,
-//   and then the execution jumps to the first discovered variant, and when it finishes, jumps to the closing brace of `TA_SELECT(...)`.
-//   When `TA_SELECT` is then reached again after the test restarts, it only executes the next variant.
+// You can enable and disable variants at runtime, by enclosing one in an `if`.
+// This implies that the braces after `TA_SELECT(...)` can contain more than just the variants.
+// When `TA_SELECT` is first reached, we run a variant discovery pass: the body is executed from the `{`, but without entering any of the variants.
+//   The list of reached variants is preserved, and then the execution jumps to the first discovered variant, and when it finishes,
+//   jumps to the closing brace of `TA_SELECT(...)`. When `TA_SELECT` is then reached again after the test restarts, it only executes the next variant.
 // The body of `TA_SELECT(...)` is internally a `switch`, so e.g. you can't have any variables outside of variants. Put your variables before `TA_SELECT(...)`.
 // Using `continue;` or `break;` (both have the same effect) inside of a `TA_VARIANT` jumps to its `}`,
 //   and using `break` outside of a variant stops the variant discovery and jumps to the first variant.
 //   This isn't entirely intentional design; our macros use a loop internally so those keywords have to do *something*,
 //   so the only reasonable option was to make them do this.
+// We guarantee that exactly one variant is executed for a `TA_SELECT(...)`.
 #define TA_SELECT(...) DETAIL_TA_SELECT(__VA_ARGS__)
 // Marks one of the several code fragments to be executed by `TA_VARIANT(...)`. See that macro for details.
 #define TA_VARIANT(name) DETAIL_TA_VARIANT(name)
@@ -412,7 +439,7 @@
     )\
     .DETAIL_TA_ADD_MESSAGE
 
-#define DETAIL_TA_FAIL(macro_name_) DETAIL_TA_CHECK(macro_name_, "", false)
+#define DETAIL_TA_FAIL DETAIL_TA_CHECK("", "", false)
 
 #define DETAIL_TA_INTERRUPT_TEST (throw ::ta_test::InterruptTestException{})
 
@@ -1777,6 +1804,73 @@ namespace ta_test
         #endif
 
 
+        // --- LAZY TO STRING ---
+
+        // Normally `$[...]` immediately converts the argument to a string and saves it, in case the assertion fails later and we need to print the value.
+        // But this is often inefficient, so we provide an alternative behavior, where `$[...]` copies its argument itself,
+        //   and then later converts to a string if necessary.
+        // This is enabled by default for scalars, some trivial types and some others, but you can manually
+        //   opt your classes into this by specializing `CopyForLazyStringConversion` (see below).
+        // You can also save some OTHER state instead of copying, see below.
+
+        // Don't specialize this, and don't use this directly. This is specialized internally by the library.
+        // Specialize `MaybeLazyToString` instead.
+        template <typename T>
+        struct DefaultMaybeLazyToString
+        {
+            // Returns an object that will be converted to a string later.
+            // If there's no function, the `ToString()` is instead called immediately.
+            // U operator()(const T &source) const;
+        };
+
+        // Use this. You can specialize this for your types.
+        template <typename T>
+        struct MaybeLazyToString : DefaultMaybeLazyToString<T> {};
+
+        // Whether this types specializes `MaybeLazyToString` to enable some form of lazy to-string conversion.
+        // Note that the type must additionally match the `CFG_TA_ARG_STORAGE_SIZE` and `CFG_TA_ARG_STORAGE_ALIGNMENT` requirements, otherwise this is ignored.
+        template <typename T>
+        concept SupportsLazyToString = requires(MaybeLazyToString<std::remove_cvref_t<T>> trait, const std::remove_cvref_t<T> &value)
+        {
+            trait(value);
+        };
+
+        // Default specializations:
+
+        // -- Copying the whole object, such as a simple scalar.
+
+        // Don't specialize this, specialize `CopyForLazyStringConversion`.
+        template <typename T> struct DefaultCopyForLazyStringConversion : std::false_type {};
+        // You can specialize this. If true, those types will not be converted to a string by a
+        template <typename T> struct CopyForLazyStringConversion : DefaultCopyForLazyStringConversion<T> {};
+
+        template <typename T>
+            requires(
+                std::is_trivially_copy_constructible_v<T> &&
+                std::is_trivially_move_constructible_v<T> &&
+                std::is_trivially_copy_assignable_v<T> &&
+                std::is_trivially_move_assignable_v<T> &&
+                std::is_trivially_destructible_v<T>
+            )
+        struct DefaultCopyForLazyStringConversion<T> : std::true_type {};
+
+        template <typename T> requires CopyForLazyStringConversion<T>::value
+        struct DefaultMaybeLazyToString<T>
+        {
+            T operator()(const T &source) const {return source;}
+        };
+
+        // -- Copying as a string.
+
+        // Copies a string-like object into a string.
+        // This is a bit questionable, but is surely faster on the happy path?
+        template <typename T> requires std::is_same_v<T, std::string> || std::is_same_v<T, std::string_view>
+        struct DefaultMaybeLazyToString<T>
+        {
+            std::string operator()(const T &source) const {return std::string(source);}
+        };
+
+
         // --- FROM STRING ---
 
         template <typename T>
@@ -2914,31 +3008,29 @@ namespace ta_test
                 std::size_t ident_size = 0;
 
                 // Whether this argument has a complex enough spelling to require drawing a horizontal bracket.
-                // This should be automatically true for all arguments with nested arguments.
+                // This should be automatically true for all arguments with nested arguments inside of them.
                 bool need_bracket = false;
             };
 
-            // A stored argument representation as a string.
-            struct StoredArg
+            // The current runtime state of the argument.
+            enum class ArgState
             {
-                enum class State
-                {
-                    not_started, // No value yet.
-                    in_progress, // Started calculating, but no value yet.
-                    done, // Has value.
-                };
-                State state = State::not_started;
-
-                std::string value;
+                not_started, // No value yet.
+                in_progress, // Started calculating, but no value yet.
+                done, // Has value.
             };
 
-            // All those functions return spans with size `NumArgs()`.
-            // Information about each argument.
+            // Information about each argument. The size of this is `NumArgs()`.
             [[nodiscard]] virtual std::span<const ArgInfo> ArgsInfo() const = 0;
-            // Indices of the arguments (0..N-1), sorted in the preferred draw order.
+            // Indices of the arguments (0..N-1), sorted in the preferred draw order. The size of this is `NumArgs()`.
             [[nodiscard]] virtual std::span<const std::size_t> ArgsInDrawOrder() const = 0;
-            // The current values of the arguments.
-            [[nodiscard]] virtual std::span<const StoredArg> StoredArgs() const = 0;
+            // The current state of an argument.
+            // Causes a hard error if the index is out of range.
+            [[nodiscard]] virtual ArgState CurrentArgState(std::size_t index) const = 0;
+            // Returns the string representation of an argument.
+            // Causes a hard error if the index is out of range, if the argument state isn't equal to `done`.
+            // For some types this is lazy, and computes the string the first time it's called.
+            [[nodiscard]] virtual const std::string &CurrentArgValue(std::size_t index) const = 0;
         };
         struct BasicAssertionInfo : context::BasicFrame
         {
@@ -3803,32 +3895,112 @@ namespace ta_test
     {
         // --- ASSERTIONS ---
 
+        // Stores a copy of a `$[...]` argument, or its string representation.
+        struct ArgBuffer
+        {
+            alignas(CFG_TA_ARG_STORAGE_ALIGNMENT) char buffer[CFG_TA_ARG_STORAGE_SIZE];
+
+            ArgBuffer() = default;
+            ArgBuffer(const ArgBuffer &) = delete;
+            ArgBuffer &operator=(const ArgBuffer &) = delete;
+        };
+
+        template <typename T>
+        concept FitsIntoArgStorage = sizeof(T) <= CFG_TA_ARG_STORAGE_SIZE && alignof(T) <= CFG_TA_ARG_STORAGE_ALIGNMENT;
+
+        struct ArgMetadata
+        {
+            BasicModule::BasicAssertionExpr::ArgState state = BasicModule::BasicAssertionExpr::ArgState::not_started;
+
+            // Destroys the object. This can be null if the object needs no cleanup.
+            void (*cleanup_func)(ArgBuffer &buffer) = nullptr;
+
+            // Converts the object to a string. Replaces it with that string, and returns it as is the next time.
+            const std::string &(*to_string_func)(ArgMetadata &self, ArgBuffer &buffer) = nullptr;
+
+            void Destroy(ArgBuffer &buffer) noexcept
+            {
+                if (cleanup_func)
+                {
+                    cleanup_func(buffer);
+                    cleanup_func = nullptr;
+                }
+            }
+
+            template <typename T>
+            requires FitsIntoArgStorage<std::remove_cvref_t<T>>
+            std::remove_cvref_t<T> &StoreValue(ArgBuffer &buffer, T &&value)
+            {
+                Destroy(buffer);
+
+                using type = std::remove_cvref_t<T>;
+
+                auto ret = ::new((void *)buffer.buffer) type(std::forward<T>(value));
+
+                if constexpr (!std::is_trivially_destructible_v<type>)
+                    cleanup_func = [](ArgBuffer &buffer) {std::launder(reinterpret_cast<type *>(buffer.buffer))->~type();};
+
+                return *ret;
+            }
+        };
+
         // `TA_ARG` ultimately expands to this.
         // Stores a pointer to a `StoredArg` in an `AssertWrapper` where it will write the argument as a string.
         struct ArgWrapper
         {
             BasicModule::BasicAssertionInfo *assertion = nullptr;
-            BasicModule::BasicAssertionExpr::StoredArg *target = nullptr;
+            ArgBuffer *target_buffer = nullptr;
+            ArgMetadata *target_metadata = nullptr;
 
             // Raises a hard error if the assertion owning this argument isn't currently running in this thread.
             CFG_TA_API void EnsureAssertionIsRunning();
 
-            ArgWrapper(BasicModule::BasicAssertionInfo &assertion, BasicModule::BasicAssertionExpr::StoredArg &target)
-                : assertion(&assertion), target(&target)
+            ArgWrapper(BasicModule::BasicAssertionInfo &assertion, ArgBuffer &target_buffer, ArgMetadata &target_metadata)
+                : assertion(&assertion), target_buffer(&target_buffer), target_metadata(&target_metadata)
             {
                 EnsureAssertionIsRunning();
-                target.state = BasicModule::BasicAssertionExpr::StoredArg::State::in_progress;
+                target_metadata.state = BasicModule::BasicAssertionExpr::ArgState::in_progress;
             }
             ArgWrapper(const ArgWrapper &) = default;
             ArgWrapper &operator=(const ArgWrapper &) = default;
 
-            // The method name is wonky to assist with our parsing.
             template <typename T>
+            requires string_conv::SupportsToString<std::remove_cvref_t<T>>
             T &&operator[](T &&arg) &&
             {
                 EnsureAssertionIsRunning();
-                target->value = string_conv::ToString(arg);
-                target->state = BasicModule::BasicAssertionExpr::StoredArg::State::done;
+
+                using type = std::remove_cvref_t<T>;
+
+                static constexpr auto identity_to_string = [](ArgMetadata &self, ArgBuffer &buffer) -> const std::string &
+                {
+                    (void)self;
+                    return *std::launder(reinterpret_cast<std::string *>(buffer.buffer));
+                };
+
+                // If we can copy the object itself (to then convert to string lazily), do it.
+                if constexpr (FitsIntoArgStorage<type> && string_conv::SupportsLazyToString<type>)
+                {
+                    target_metadata->StoreValue(*target_buffer, std::as_const(arg));
+                    target_metadata->to_string_func = [](ArgMetadata &self, ArgBuffer &buffer) -> const std::string &
+                    {
+                        // Convert to a string.
+                        std::string string = string_conv::ToString(*std::launder(reinterpret_cast<type *>(buffer.buffer)));
+
+                        // Store the string as the new value.
+                        auto &ret = self.StoreValue(buffer, std::move(string));
+                        self.to_string_func = identity_to_string;
+
+                        return ret;
+                    };
+                }
+                else
+                {
+                    target_metadata->StoreValue(*target_buffer, string_conv::ToString(arg));
+                    target_metadata->to_string_func = identity_to_string;
+                }
+
+                target_metadata->state = BasicModule::BasicAssertionExpr::ArgState::done;
                 return std::forward<T>(arg);
             }
         };
@@ -3961,7 +4133,9 @@ namespace ta_test
             }();
 
             // The values of the arguments.
-            std::array<StoredArg, num_args> stored_args;
+            // Mutable because those sometimes use lazy to-string conversion.
+            mutable std::array<ArgBuffer, num_args> stored_arg_buffers;
+            mutable std::array<ArgMetadata, num_args> stored_arg_metadata;
 
             struct CounterIndexPair
             {
@@ -4105,10 +4279,31 @@ namespace ta_test
 
             static constexpr BasicModule::SourceLoc location{.file = FileName.view(), .line = LineNumber};
 
+            ~AssertWrapper() noexcept
+            {
+                // Destroy the stored arguments.
+                for (std::size_t i = num_args; i-- > 0;)
+                    stored_arg_metadata[i].Destroy(stored_arg_buffers[i]);
+            }
+
             std::string_view Expr() const override {return RawString.view();}
             std::span<const ArgInfo> ArgsInfo() const override {return arg_data.info;}
             std::span<const std::size_t> ArgsInDrawOrder() const override {return arg_data.args_in_draw_order;}
-            std::span<const StoredArg> StoredArgs() const override {return stored_args;}
+
+            ArgState CurrentArgState(std::size_t index) const override
+            {
+                if (index >= num_args)
+                    HardError("Assertion argument index is out of range.");
+                return stored_arg_metadata[index].state;
+            }
+
+            const std::string &CurrentArgValue(std::size_t index) const override
+            {
+                // Check if this argument was actually computed. This also validates the index for us.
+                if (CurrentArgState(index) != ArgState::done)
+                    HardError("This argument wasn't computed yet.");
+                return stored_arg_metadata[index].to_string_func(stored_arg_metadata[index], stored_arg_buffers[index]);
+            }
 
             const BasicModule::SourceLoc &SourceLocation() const override {return location;}
             DecoVar GetElement(int index) const override
@@ -4140,7 +4335,7 @@ namespace ta_test
                 if (it == arg_data.counter_to_arg_index.end() || it->counter != counter)
                     HardError("`TA_CHECK` isn't aware of this `$[...]`.");
 
-                return {*this, stored_args[it->index]};
+                return {*this, stored_arg_buffers[it->index], stored_arg_metadata[it->index]};
             }
         };
 
@@ -4397,6 +4592,7 @@ namespace ta_test
             BasicModule::BasicGenerator *untyped_generator = nullptr;
 
             // Non-null if a new generator is being created. In that case it has the same value as `untyped_generator`.
+            // Note that `HandleGenerator()` moves from this variable, so it's always null in the destructor.
             std::unique_ptr<BasicModule::BasicGenerator> created_untyped_generator;
 
             CFG_TA_API ~GenerateValueHelper();
@@ -4520,6 +4716,8 @@ namespace ta_test
             static constexpr std::size_t size = N;
 
             std::size_t index = 0;
+
+            friend bool operator==(GeneratedParamIndex, GeneratedParamIndex) = default;
         };
 
         // `TA_GENERATE_PARAM(...)` expands to this.
@@ -4550,6 +4748,8 @@ namespace ta_test
         struct VariantIndex
         {
             int value = 0;
+
+            friend bool operator==(VariantIndex, VariantIndex) = default;
 
             struct State
             {
