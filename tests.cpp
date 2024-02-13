@@ -19,8 +19,9 @@ void ThrowNested()
 TA_TEST(foo/test)
 {
     auto e = TA_MUST_THROW(ThrowNested());
-    e.CheckMessage("Outer!");
-    e.CheckMessage(ta_test::most_nested, "Iner!");
+    e.CheckMessage(2, "Outer!", ta_test::soft);
+
+    TA_CHECK(false);
 }
 
 int main(int argc, char **argv)
@@ -122,6 +123,7 @@ int main(int argc, char **argv)
 //             * Point out that you can't do proper lazyness with <<, because operands are still evaluated.
 //         * No comma weirdness in macros
 //         * Strong assertions throw rather than using `return`.
+//         * hard/soft enum is passed to assertions at runtime.
 //     * Clickthrough everywhere (i.e. file paths everywhere, that should be clickable in an IDE)
 //     * Tests in headers = bad practice, but we support it without code duplication, but still check if the test names clash (different source locations)
 //         * Compare with what gtest and catch2 do.

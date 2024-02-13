@@ -5303,7 +5303,7 @@ namespace ta_test
                     {
                         // This validates the index for us, and fails the test if out of range.
                         auto context = MakeContextGuard(flags, index);
-                        if (!bool(std::forward<F>(func)(elems[std::size_t(index)])))
+                        if (context && !bool(std::forward<F>(func)(elems[std::size_t(index)])))
                             TA_FAIL("{}", std::forward<G>(message_func)());
                     };
                     std::visit(meta::Overload{
@@ -5333,12 +5333,6 @@ namespace ta_test
                         },
                         [&](int index)
                         {
-                            if (index < 0 || std::size_t(index) >= elems.size())
-                            {
-                                TA_FAIL("Exception element index {} is out of range, have {} elements.", index, elems.size());
-                                return;
-                            }
-
                             CheckIndex(index);
                         },
                     }, elem);

@@ -148,6 +148,8 @@ std::string ta_test::string_conv::DefaultToStringTraits<ta_test::AssertFlags>::o
 
             if (!ok)
                 HardError("Unknown flag in the enum.");
+
+            value &= ~bit;
         }
         mask <<= 1;
     }
@@ -378,7 +380,7 @@ ta_test::BasicModule::BasicGenerator::OverrideStatus ta_test::BasicModule::Basic
 ta_test::BasicModule::CaughtExceptionElemGuard::CaughtExceptionElemGuard(std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags)
     : FrameGuard([&]() -> std::shared_ptr<const CaughtExceptionElemGuard>
     {
-        if (!TA_CHECK(flags, $[active_elem] != -1 || ($[bool(state)] && std::size_t(active_elem) < state->elems.size())))
+        if (!TA_CHECK(flags, $[active_elem == -1] || ($[bool(state)] && $[std::size_t(active_elem)] < $[state->elems.size()]))("Exception element index is out of range."))
             return nullptr;
         if (!state)
             return nullptr;
@@ -1210,7 +1212,9 @@ bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
         if (increment_counters)
             const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
 
-        throw InterruptTestException{};
+        // Stop the test.
+        if (!bool(self.condition_value.flags & AssertFlags::soft))
+            throw InterruptTestException{};
     }
 
     return self.condition_value_known && self.condition_value.value;
