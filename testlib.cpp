@@ -111,6 +111,51 @@ bool ta_test::text::TestNameMatchesRegex(std::string_view name, const std::regex
     return false;
 }
 
+std::string ta_test::string_conv::DefaultToStringTraits<std::nullptr_t>::operator()(std::nullptr_t) const
+{
+    return "nullptr";
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<ta_test::AssertFlags>::operator()(AssertFlags value) const
+{
+    std::string ret;
+
+    using type = std::underlying_type_t<AssertFlags>;
+    type mask = type(1);
+    do
+    {
+        if (AssertFlags bit = value & AssertFlags(mask); bool(bit) || value == AssertFlags{})
+        {
+            if (!ret.empty())
+                ret += " | ";
+
+            bool ok = false;
+            switch (bit)
+            {
+              case AssertFlags::hard:
+                ok = true;
+                ret += "hard";
+                break;
+              case AssertFlags::soft:
+                ok = true;
+                ret += "soft";
+                break;
+              case AssertFlags::no_increment_check_counters:
+                ok = true;
+                ret += "no_increment_check_counters";
+                break;
+            }
+
+            if (!ok)
+                HardError("Unknown flag in the enum.");
+        }
+        mask <<= 1;
+    }
+    while (value != AssertFlags{});
+
+    return ret;
+}
+
 std::string ta_test::string_conv::DefaultFallbackToStringTraits<char>::operator()(char value) const
 {
     char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
@@ -124,11 +169,6 @@ std::string ta_test::string_conv::DefaultFallbackToStringTraits<std::string_view
     ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
     text::escape::EscapeString(value, std::back_inserter(ret), true);
     return ret;
-}
-
-std::string ta_test::string_conv::DefaultToStringTraits<std::nullptr_t>::operator()(std::nullptr_t) const
-{
-    return "nullptr";
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<std::type_index>::operator()(std::type_index value) const
@@ -334,6 +374,18 @@ ta_test::BasicModule::BasicGenerator::OverrideStatus ta_test::BasicModule::Basic
         return OverrideStatus::no_override;
     }
 }
+
+ta_test::BasicModule::CaughtExceptionElemGuard::CaughtExceptionElemGuard(std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags)
+    : FrameGuard([&]() -> std::shared_ptr<const CaughtExceptionElemGuard>
+    {
+        if (!TA_CHECK(flags, $[active_elem] != -1 || ($[bool(state)] && std::size_t(active_elem) < state->elems.size())))
+            return nullptr;
+        if (!state)
+            return nullptr;
+        return std::shared_ptr<const CaughtExceptionElemGuard>(std::shared_ptr<void>{}, this);
+    }()),
+    state(std::move(state)), active_elem(active_elem)
+{}
 
 // Gracefully fails the current test, if not already failed.
 // Call this first, before printing any messages.
@@ -1097,7 +1149,7 @@ void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
     HardError("`$[...]` was evaluated when an assertion owning it already finished executing, or in a wrong thread.", HardErrorKind::user);
 }
 
-void ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
+bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
 {
     AssertionStackGuard stack_guard(self);
     context::FrameGuard context_guard({std::shared_ptr<void>{}, &self});
@@ -1160,6 +1212,8 @@ void ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
 
         throw InterruptTestException{};
     }
+
+    return self.condition_value_known && self.condition_value.value;
 }
 
 std::optional<std::string_view> ta_test::detail::BasicAssertWrapper::GetUserMessage() const
@@ -1421,6 +1475,8 @@ std::string ta_test::string_conv::DefaultToStringTraits<ta_test::ExceptionElem>:
         return "most_nested";
       case ExceptionElem::all:
         return "all";
+      case ExceptionElem::any:
+        return "any";
     }
     HardError("Invalid `ExceptionElem` enum.", HardErrorKind::user);
 }
@@ -1852,47 +1908,63 @@ int ta_test::Runner::Run()
 
 // --- modules::BasicExceptionContentsPrinter ---
 
-ta_test::modules::BasicExceptionContentsPrinter::BasicExceptionContentsPrinter()
-    : print_callback([](
-        const BasicExceptionContentsPrinter &self,
-        const output::Terminal &terminal,
-        output::Terminal::StyleGuard &cur_style,
-        const std::exception_ptr &e
-    )
+void ta_test::modules::BasicExceptionContentsPrinter::EnableUnicode(bool enable)
+{
+    BasicPrintingModule::EnableUnicode(enable);
+
+    if (enable)
     {
-        AnalyzeException(e, [&](const SingleException &elem)
-        {
-            if (elem.IsTypeKnown())
-            {
-                terminal.Print(cur_style, "{}{}{}{}\n{}{}{}\n",
-                    self.style_exception_type,
-                    self.chars_indent_type,
-                    elem.GetTypeName(),
-                    self.chars_type_suffix,
-                    self.style_exception_message,
-                    self.chars_indent_message,
-                    string_conv::ToString(elem.message)
-                );
-            }
-            else
-            {
-                terminal.Print(cur_style, "{}{}{}\n",
-                    self.style_exception_type,
-                    self.chars_indent_type,
-                    self.chars_unknown_exception
-                );
-            }
-        });
-    })
-{}
+        // This symbol has a tendency to be rendered with a half-character offset to the right, so we put it slightly to the left.
+        chars_indent_type_active = " \xE2\x96\xB6  "; // U+25B6 BLACK RIGHT-POINTING TRIANGLE
+    }
+    else
+    {
+        chars_indent_type_active = "  > ";
+    }
+    chars_indent_message_active = chars_indent_type_active + "    ";
+}
+
+ta_test::modules::BasicExceptionContentsPrinter::BasicExceptionContentsPrinter()
+{
+    EnableUnicode(true);
+}
 
 void ta_test::modules::BasicExceptionContentsPrinter::PrintException(
     const output::Terminal &terminal,
     output::Terminal::StyleGuard &cur_style,
-    const std::exception_ptr &e
+    const std::exception_ptr &e,
+    int active_elem
 ) const
 {
-    print_callback(*this, terminal, cur_style, e);
+    int i = 0;
+    AnalyzeException(e, [&](const SingleException &elem)
+    {
+        bool active = i++ == active_elem;
+
+        if (elem.IsTypeKnown())
+        {
+            terminal.Print(cur_style, "{}{}{}{}{}\n{}{}{}{}\n",
+                style_exception_active_marker,
+                active ? chars_indent_type_active : chars_indent_type,
+                active ? style_exception_type_active : style_exception_type,
+                elem.GetTypeName(),
+                chars_type_suffix,
+                style_exception_active_marker,
+                active ? chars_indent_message_active : chars_indent_message,
+                active ? style_exception_message_active : style_exception_message,
+                string_conv::ToString(elem.message)
+            );
+        }
+        else
+        {
+            terminal.Print(cur_style, "{}{}{}{}\n",
+                style_exception_active_marker,
+                active ? chars_indent_type_active : chars_indent_type,
+                active ? style_exception_type_active : style_exception_type,
+                chars_unknown_exception
+            );
+        }
+    });
 }
 
 // --- modules::HelpPrinter ---
@@ -3318,6 +3390,8 @@ std::vector<ta_test::flags::BasicFlag *> ta_test::modules::ProgressPrinter::GetF
 
 void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
 {
+    BasicPrintingModule::EnableUnicode(enable);
+
     if (enable)
     {
         chars_test_prefix = "\xE2\x97\x8F "; // BLACK CIRCLE, then a space.
@@ -4152,7 +4226,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
         chars_error
     );
 
-    PrintException(terminal, cur_style, e);
+    PrintException(terminal, cur_style, e, -1);
     terminal.Print("\n");
 
     output::PrintContext(cur_style);
@@ -4178,9 +4252,9 @@ bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::Sty
         PrintFrame(cur_style, *ptr->static_info, ptr->dynamic_info, nullptr, false);
         return true;
     }
-    if (auto ptr = dynamic_cast<const BasicModule::CaughtExceptionInfo *>(&frame))
+    if (auto ptr = dynamic_cast<const BasicModule::CaughtExceptionElemGuard *>(&frame))
     {
-        PrintFrame(cur_style, *ptr->static_info, ptr->dynamic_info.lock().get(), ptr, false);
+        PrintFrame(cur_style, *ptr->state->static_info, ptr->state->dynamic_info.lock().get(), ptr, false);
         return true;
     }
 
@@ -4191,7 +4265,7 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
     output::Terminal::StyleGuard &cur_style,
     const BasicModule::MustThrowStaticInfo &static_info,
     const BasicModule::MustThrowDynamicInfo *dynamic_info,
-    const BasicModule::CaughtExceptionInfo *caught,
+    const BasicModule::CaughtExceptionElemGuard *caught,
     bool is_most_nested
 ) const
 {
@@ -4204,7 +4278,7 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
             common_data.style_stack_frame,
             chars_exception_contents
         );
-        PrintException(terminal, cur_style, caught->elems.empty() ? nullptr : caught->elems.front().exception);
+        PrintException(terminal, cur_style, caught->state->elems.empty() ? nullptr : caught->state->elems.front().exception, caught->active_elem);
         terminal.Print("\n");
     }
     else if (is_most_nested)
@@ -4254,11 +4328,14 @@ bool ta_test::modules::TracePrinter::PrintContextFrame(output::Terminal::StyleGu
     {
         output::TextCanvas canvas(&common_data);
 
+        std::size_t column = 0;
+
         // Path.
-        canvas.DrawString(0, 0, common_data.LocationToString(ptr->GetLocation()), {.style = common_data.style_path, .important = true});
+        column += canvas.DrawString(0, column, common_data.LocationToString(ptr->GetLocation()), {.style = common_data.style_path, .important = true});
+        column += canvas.DrawString(0, column, ":", {.style = common_data.style_path, .important = true});
 
         // Prefix.
-        std::size_t column = 0;
+        column = 0;
         column += canvas.DrawString(1, column, chars_func_name_prefix, {.style = common_data.style_stack_frame, .important = true});
 
         std::string expr;

@@ -4,8 +4,23 @@
 
 #include "testlib.h"
 
+void ThrowNested()
+{
+    try
+    {
+        throw std::runtime_error("Inner!");
+    }
+    catch (...)
+    {
+        std::throw_with_nested(std::logic_error("Outer!"));
+    }
+}
+
 TA_TEST(foo/test)
 {
+    auto e = TA_MUST_THROW(ThrowNested());
+    e.CheckMessage("Outer!");
+    e.CheckMessage(ta_test::most_nested, "Iner!");
 }
 
 int main(int argc, char **argv)
@@ -13,27 +28,30 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
+// Move AssertFlags to be before the format message!
+//     This means that the string is computed immediately on failure, instead of the lazy crap.
+//     Then check all your TA_FAIL calls and give them the flags.
+
+// Update TA_CHECK comment for this.
+// Update TA_FAIL comment for this.
+// Update TA_MUST_THROW comment for this.
+
 // Remove the BasicModule from the header somehow.
 // Split the runner (with all modules) into a separate header? Including most utility functions too.
 
-// Better CaughtException interface?
-//     single function to check combined message
-//     or
-//     THIS: expand ForEach to allow "any" elem to be checked; expand context to allow pointing to element
+// Do we print nice errors on bad regexes?
 
-// Update TA_MUST_THROW comment for this.
-
-// Experiment with filesystem::path and wstring and wchar_t (on all compilers and on libfmt).
-//     and u8string and u16string and u32string and char{16,32,8}_t
-// If good, don't forget to enable "lazy copy for printing" for them
+// When printing generators, don't print = before an empty string
 
 // Not now? -- Move `mutable bool should_break` to a saner location, don't keep it in the context? Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
-
-// Check that paths are clickable in Visual Studio (especially when not at line start)
 
 // What about caching generator values by default, with opt-out flag? Then TA_GENERATE_PARAM needs to accept a flag parameter somehow.
 
 // TESTS!!
+
+// Support all three big compilers!
+
+// Check that paths are clickable in Visual Studio (especially when not at line start)
 
 // Should we transition to __PRETTY_FUNCTION__/__FUNCSIG__-based type names?
 //     Remove the dumb generator logic for adding references to types.
@@ -45,14 +63,17 @@ int main(int argc, char **argv)
 //     Optionally no RTTI
 //     Multithreading? Thread inheritance system.
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
+//     Experiment with filesystem::path and wstring and wchar_t (on all compilers and on libfmt), and u8string and u16string and u32string and char{16,32,8}_t
+//         If good, don't forget to enable "lazy copy for printing" for them
+//     Add explicit instantiation declarations/definitions for BasicCaughtExceptionInterface (this requires moving derived classes to namespace scope, which is sad)
+//     Experiment with function attributes ("artificial"?) for better debugging
+//     Analyzing TA_MUST_THROW must immediately point to the user code first, and not to the library internals
+//         Add an argument to AssertParam to customize the source location, and stop baking it into template parameters
 
 // Later:
-//     Lazy string conversion for ranges:
-//         Forward iterator or stronger, the element is also lazy copyable (similar range or `CopyForLazyStringConversion == true`)
-//         Copy everything to a single flat heap buffer (separate pass to calculate the buffer length)
-//             Think about range of ranges (std::filesystem::path)
-//     Option to cache the generator values somehow? Enable it by default?
 //     Soft TA_MUST_THROW? (accept AssertFlags somehow?)
+//     For CaughtException interface, something to make the error point directly to the user code.
+//     Column indicators in paths (transition to source_location entirely?)
 
 // Maybe not?
 //     Allow more characters in bracket-less form: `:`, `.`, `->`?
@@ -60,10 +81,14 @@ int main(int argc, char **argv)
 //     Signal handling?
 // Maybe not...
 //     Get terminal width, and limit separator length to that value (but still not make them longer than they currently are)
-//     Try to enforce relative paths, and try printing errors on the same line as paths.
 //     Decorate line breaks in logs with `//` as well?
-//     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
+//     Lazy string conversion for ranges:
+//         Forward iterator or stronger, the element is also lazy copyable (similar range or `CopyForLazyStringConversion == true`)
+//         Copy everything to a single flat heap buffer (separate pass to calculate the buffer length)
+//             Think about range of ranges (std::filesystem::path)
 // Probably not:
+//     Try to enforce relative paths, and try printing errors on the same line as paths.
+//     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
 //     Short macros that can be disabled in the config.
 //     After file paths, print `error: ` (on MSVC `error :` ? Check that.), and some error messages for the parsers.
 //     $[...] should tolerate non-printable arguments, but only in non-dependent context - stops being possible when we transition to `$[...]` spelling.
@@ -92,9 +117,11 @@ int main(int argc, char **argv)
 //     * Quality of life:
 //         * Using std::format/libfmt everywhere, no iostreams.
 //         * First-class nested exceptions support out of the box
+//             * Also rich exception analysis: Can check derived type and exact match (check what gtest and catch2 can do)
 //         * True lazy message evaluation
 //             * Point out that you can't do proper lazyness with <<, because operands are still evaluated.
 //         * No comma weirdness in macros
+//         * Strong assertions throw rather than using `return`.
 //     * Clickthrough everywhere (i.e. file paths everywhere, that should be clickable in an IDE)
 //     * Tests in headers = bad practice, but we support it without code duplication, but still check if the test names clash (different source locations)
 //         * Compare with what gtest and catch2 do.
@@ -197,7 +224,7 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    return type is void
+    returns the condition value (casted to bool)
     local variable capture actually works, and the values are correct
     `TA_CHECK(true, true)` shouldn't compile because of a comma
     make sure that two values can't be printed side-by-side
@@ -258,6 +285,14 @@ TA_CHECK:
         We must check all this due to the weird way TA_MUST_THROW is written.
         Make sure the stacks are printed correctly, including the function argments.
 
+    Hard and soft flags
+        also check how they are printed on failures.
+
+    Checking unknown exceptions. All functions must fail.
+
+    Specifying wrong index for ANY function (or MakeContextGuard()) fails the test
+        unless in soft mode
+
 --- TA_LOG
     \n suffix is silently stripped, but at most once.
     Don't break if an argument throws.
@@ -312,6 +347,8 @@ TA_CHECK:
     Default value of `repeat` is true.
 
     Passing an lvalue functor.
+
+    When printing a generator, don't print = before an empty string, even if the type is convertible to string.
 
     How exceptions are handled:
         when constructing the lambda
