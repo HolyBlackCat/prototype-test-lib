@@ -4,24 +4,9 @@
 
 #include "testlib.h"
 
-void ThrowNested()
-{
-    try
-    {
-        throw std::runtime_error("Inner!");
-    }
-    catch (...)
-    {
-        std::throw_with_nested(std::logic_error("Outer!"));
-    }
-}
-
 TA_TEST(foo/test)
 {
-    auto e = TA_MUST_THROW(ThrowNested());
-    e.CheckMessage(2, "Outer!", ta_test::soft);
-
-    TA_CHECK(false);
+    (void)TA_GENERATE(blah, {ta_test::string_conv::ExactString{"a"}, ta_test::string_conv::ExactString{""}});
 }
 
 int main(int argc, char **argv)
@@ -41,8 +26,6 @@ int main(int argc, char **argv)
 // Split the runner (with all modules) into a separate header? Including most utility functions too.
 
 // Do we print nice errors on bad regexes?
-
-// When printing generators, don't print = before an empty string
 
 // Not now? -- Move `mutable bool should_break` to a saner location, don't keep it in the context? Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
 
@@ -358,6 +341,8 @@ TA_CHECK:
             for the first time
             for the second+ time
 
+    [[nodiscard]] on the result
+
     Overriding values:
         =
             (...)
@@ -484,6 +469,8 @@ TA_CHECK:
         hard error by default
         interrupt-test-exception with the flag
     Build error on using a local variable
+
+    [[nodiscard]] on the result
 
 --- TA_GENERATE_PARAM
     Work with -g

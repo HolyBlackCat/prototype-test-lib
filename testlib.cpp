@@ -3281,33 +3281,37 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(output::Terminal::Sty
     // The value as a string.
     if (generator.ValueConvertibleToString())
     {
-        // The equals sign.
-        terminal.Print(cur_style, "{}{}{}",
-            st_gen.value_separator,
-            chars_generator_value_separator,
-            st_gen.value
-        );
-
-        // The value itself.
-
         std::string value = generator.ValueToString();
-        GeneratorValueShortener shortener(value, chars_generator_value_ellipsis, max_generator_value_prefix_length, max_generator_value_suffix_length);
 
-        if (shortener.is_short)
+        if (!value.empty())
         {
-            // The value is short enough to be printed completely.
-            terminal.Print("{}", value);
-        }
-        else
-        {
-            // The value is too long.
-            terminal.Print(cur_style, "{}{}{}{}{}",
-                shortener.long_prefix,
-                st_gen.value_ellipsis,
-                chars_generator_value_ellipsis,
-                st_gen.value,
-                shortener.long_suffix
+            // The equals sign.
+            terminal.Print(cur_style, "{}{}{}",
+                st_gen.value_separator,
+                chars_generator_value_separator,
+                st_gen.value
             );
+
+            // The value itself.
+
+            GeneratorValueShortener shortener(value, chars_generator_value_ellipsis, max_generator_value_prefix_length, max_generator_value_suffix_length);
+
+            if (shortener.is_short)
+            {
+                // The value is short enough to be printed completely.
+                terminal.Print("{}", value);
+            }
+            else
+            {
+                // The value is too long.
+                terminal.Print(cur_style, "{}{}{}{}{}",
+                    shortener.long_prefix,
+                    st_gen.value_ellipsis,
+                    chars_generator_value_ellipsis,
+                    st_gen.value,
+                    shortener.long_suffix
+                );
+            }
         }
     }
 
