@@ -4,9 +4,26 @@
 
 #include "testlib.h"
 
+void ThrowNested()
+{
+    try
+    {
+        throw std::runtime_error("Inner!");
+    }
+    catch (...)
+    {
+        std::throw_with_nested(std::logic_error("Outer!"));
+    }
+}
+
 TA_TEST(foo/test)
 {
-    (void)TA_GENERATE(blah, {ta_test::string_conv::ExactString{"a"}, ta_test::string_conv::ExactString{""}});
+    auto e = TA_MUST_THROW( 42 )( ta_test::soft, "Message!" );
+    e.CheckMessage("In.*");
+
+    auto g = ta_test::CaughtException{}.MakeContextGuard(0);
+
+    TA_FAIL;
 }
 
 int main(int argc, char **argv)
@@ -14,22 +31,12 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Move AssertFlags to be before the format message!
-//     This means that the string is computed immediately on failure, instead of the lazy crap.
-//     Then check all your TA_FAIL calls and give them the flags.
-
-// Update TA_CHECK comment for this.
-// Update TA_FAIL comment for this.
-// Update TA_MUST_THROW comment for this.
+// What about caching generator values by default, with opt-out flag? Then TA_GENERATE_PARAM needs to accept a flag parameter somehow.
 
 // Remove the BasicModule from the header somehow.
 // Split the runner (with all modules) into a separate header? Including most utility functions too.
 
-// Do we print nice errors on bad regexes?
-
 // Not now? -- Move `mutable bool should_break` to a saner location, don't keep it in the context? Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
-
-// What about caching generator values by default, with opt-out flag? Then TA_GENERATE_PARAM needs to accept a flag parameter somehow.
 
 // TESTS!!
 
@@ -53,6 +60,7 @@ int main(int argc, char **argv)
 //     Experiment with function attributes ("artificial"?) for better debugging
 //     Analyzing TA_MUST_THROW must immediately point to the user code first, and not to the library internals
 //         Add an argument to AssertParam to customize the source location, and stop baking it into template parameters
+//     Migrate to `std::source_location` everywhere.
 
 // Later:
 //     Soft TA_MUST_THROW? (accept AssertFlags somehow?)
@@ -226,6 +234,13 @@ TA_CHECK:
     ta_test::ExactString - control characters should be printed as unicode replacements
     Compilation error on comma
 
+    Check all overloads of the second (...)
+        flags
+        flags, location
+        message...
+        flags, message...
+        flags, location, message...
+
     Does `$[...]` has top-level (...) in expansion? I think not. Add a negative test.
 
     Try passing an rvalue to $[...] that has CopyForLazyStringConversion specialzied to true. It must not be moved by the `$[...]` itself.
@@ -245,6 +260,8 @@ TA_CHECK:
     "in here" context for nested brackets (should show the most nested one)
 
     What if wrong thread evaluates the $[...]? That should be a hard error.
+
+    Multiline user messages.
 
 --- TA_FAIL
     With and without the message.
@@ -277,6 +294,15 @@ TA_CHECK:
 
     Specifying wrong index for ANY function (or MakeContextGuard()) fails the test
         unless in soft mode
+
+    CaughtException should be default-constructible
+
+    Empty CaughtException should pass all checks.
+        MakeContextGuard for it should be a no-op
+
+    Moved-from CaughtException should fail all checks.
+
+    Multiline user messages.
 
 --- TA_LOG
     \n suffix is silently stripped, but at most once.

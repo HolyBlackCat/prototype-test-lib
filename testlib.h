@@ -264,24 +264,33 @@
 #define TA_TEST(name) DETAIL_TA_TEST(name)
 
 // Check condition. If it's false or throws, the test is marked as false, and also `InterruptTestException` is thrown to quickly exit the test.
-// You can pass an instance of `ta_test::AssertFlags` before the condition (in particular, `ta_test::soft` to not throw).
-// You can also pass an instance of `ta_test::AssertParam` as the only parameter, which contains both the flags and the condition.
-// The first parentheses can be followed by another one, containing the custom message, and possibly formatting arguments for it.
-// The custom message is evaluated only if the condition is false, so you can use expensive function calls in it.
 // You can wrap any part of the condition in `$[...]` to print it on failure (there can be several, possibly nested).
-// Returns the condition boolean (which can only be true unless you passed `ta_test::soft`).
 // Usage:
-//     TA_CHECK(x == 42); // You won't know the value of `x` on failure.
-//     TA_CHECK($[x] == 42); // `$` will print the value of `x` on failure.
-//     TA_CHECK($[x] == 42)("Checking stuff!"); // Add a custom message.
-//     TA_CHECK($[x] == 42)("Checking {}!", "stuff"); // Custom message with formatting.
-//     TA_CHECK(ta_test::soft, $[x] == 42); // Let the test continue after a failure.
+//     TA_CHECK( x == 42 ); // You won't know the value of `x` on failure.
+//     TA_CHECK( $[x] == 42 ); // `$` will print the value of `x` on failure.
+// The first parenthesis can be followed by another one, containing extra parameters that are evaluated on failure. Following overloads are available:
+//     TA_CHECK(condition)(message...)
+//     TA_CHECK(condition)(flags)
+//     TA_CHECK(condition)(flags, message...)
+//     TA_CHECK(condition)(flags, source_loc)
+//     TA_CHECK(condition)(flags, source_loc, message...)
+// Where:
+// * `message...` is a string literal, possibly followed by format arguments (as for `std::format`).
+// * `flags` is an instance of `ta_test::AssertFlags`. In particular, passing `ta_test::soft` disables throwing on failure.
+// * `source_loc` should rarely be used. It's an instance of `BasicModule::SourceLoc`,
+//     which lets you override the filename and line number that will be displayed in the error message.
+// More examples:
+//     TA_CHECK( $[x] == 42 )("Checking stuff!"); // Add a custom message.
+//     TA_CHECK( $[x] == 42 )("Checking {}!", "stuff"); // Custom message with formatting.
+//     TA_CHECK( $[x] == 42 )(ta_test::soft); // Let the test continue after a failure.
 #define TA_CHECK(...) DETAIL_TA_CHECK("TA_CHECK", #__VA_ARGS__, __VA_ARGS__)
 // Equivalent to `TA_CHECK(false)`, except the printed message is slightly different.
+// Like `TA_CHECK(...)`, can be followed by optional arguments.
 // Usage:
 //     TA_FAIL;
-//     TA_FAIL("Stuff failed!");
-//     TA_FAIL("Stuff {}!", "failed");
+//     TA_FAIL("Stuff failed!"); // With a message.
+//     TA_FAIL("Stuff {}!", "failed"); // With a message and formatting.
+//     TA_FAIL(ta_test::soft); // Let the test continue after the failure.
 #define TA_FAIL DETAIL_TA_FAIL
 // Stops the test immediately, not necessarily failing it.
 // Equivalent to throwing `ta_test::InterruptTestException`.
@@ -296,8 +305,21 @@
 #define TA_ARG DETAIL_TA_ARG
 #endif
 
-// Checks that `...` throws an exception (it can even contain more than one statement), otherwise fails the test immediately.
-// Returns the information about the exception, which you can additionally validate.
+// Checks that `...` throws an exception (`...` can contain more than one statement, and can contain semicolons).
+// If there is no exception, fails the test and throws `InterruptTestException{}` to quickly stop it.
+// Returns an instance of `ta_test::CaughtException`, which contains information about the exception and lets you validate its type and message.
+// Example usage:
+//     TA_MUST_THROW( throw std::runtime_error("Foo!") );
+//     TA_MUST_THROW( throw std::runtime_error("Foo!") ).CheckMessage(".*!"); // E.g. you can validate the message with a regex. See `class CaughtException` for more.
+//     TA_MUST_THROW( std::vector<int> x; x.at(0); ).CheckMessage(".*!"); // Multiple statements are allowed.
+// Like `TA_CHECK(...)`, can be followed by a second parenthesis with optional parameters. Following overloads are available:
+//     TA_MUST_THROW(body)(message...)
+//     TA_MUST_THROW(body)(flags)
+//     TA_MUST_THROW(body)(flags, message...)
+// Where:
+// * `message...` is a string literal, possibly followed by format arguments (as for `std::format`).
+// * `flags` is an instance of `ta_test::AssertFlags`. In particular, passing `ta_test::soft` disables throwing on failure.
+// Unlike `TA_CHECK(...)`, `TA_MUST_THROW` doesn't support overriding the source location information.
 #define TA_MUST_THROW(...) \
     DETAIL_TA_MUST_THROW("TA_MUST_THROW", #__VA_ARGS__, __VA_ARGS__)
 
@@ -434,17 +456,17 @@
 #define DETAIL_TA_CHECK(macro_name_, str_, ...) \
     /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
     ~::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__>(\
-        [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(::ta_test::AssertParam(__VA_ARGS__));},\
+        [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(__VA_ARGS__);},\
         []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
     )\
-    .DETAIL_TA_ADD_MESSAGE
+    .DETAIL_TA_ADD_EXTRAS
 
 #define DETAIL_TA_FAIL DETAIL_TA_CHECK("", "", false)
 
 #define DETAIL_TA_INTERRUPT_TEST (throw ::ta_test::InterruptTestException{})
 
-#define DETAIL_TA_ADD_MESSAGE(...) \
-    AddMessage([&](auto &&_ta_add_message){_ta_add_message(__VA_ARGS__);})
+#define DETAIL_TA_ADD_EXTRAS(...) \
+    AddExtras([&](auto &&_ta_add_extras){_ta_add_extras(__VA_ARGS__);})
 
 #define DETAIL_TA_ARG \
     _ta_assert._ta_handle_arg_(__COUNTER__)
@@ -455,7 +477,7 @@
         [&]{CFG_TA_IGNORE_UNUSED_VALUE(__VA_ARGS__;)},\
         []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
     )\
-    .DETAIL_TA_ADD_MESSAGE
+    .DETAIL_TA_ADD_EXTRAS
 
 #define DETAIL_TA_LOG(...) \
     ::ta_test::detail::AddLogEntry(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
@@ -629,34 +651,9 @@ namespace ta_test
         hard = 0,
         // Don't throw `InterruptTestException` on failure, but the test still fails.
         soft = 1 << 0,
-        // Don't increment the statistics counters which are printed at the end of execution.
-        // This is mostly for internal use.
-        no_increment_check_counters = 1 << 1,
     };
     DETAIL_TA_FLAG_OPERATORS(AssertFlags)
     using enum AssertFlags;
-
-    // Arguments of `TA_CHECK(...)` are passed to the constructor of this class.
-    // You can pass an instance of this directly to `TA_CHECK(...)` too.
-    struct AssertParam
-    {
-        AssertFlags flags{};
-        bool value = false;
-
-        constexpr AssertParam() {}
-
-        template <typename T>
-        constexpr AssertParam(T &&value)
-        requires requires{std::forward<T>(value) ? true : false;}
-            : value(std::forward<T>(value) ? true : false)
-        {}
-
-        template <typename T>
-        constexpr AssertParam(AssertFlags flags, T &&value)
-        requires requires{std::forward<T>(value) ? true : false;}
-            : flags(flags), value(std::forward<T>(value) ? true : false)
-        {}
-    };
 
     // Flags for `TA_GENERATE(...)` and others.
     enum class GeneratorFlags
@@ -2522,7 +2519,8 @@ namespace ta_test
     };
 
     // Given an exception, tries to get an error message from it, using the current modules. Shouldn't throw.
-    // Returns a vector with at least one element. The last element may or may not have `IsTypeKnown() == false`, and other elements will always be known.
+    // Normally runs the callback at least once. The last element may or may not have `IsTypeKnown() == false`, and other elements will always be known.
+    // If `e` is null, does nothing (doesn't not run the callback).
     CFG_TA_API void AnalyzeException(const std::exception_ptr &e, const std::function<void(SingleException elem)> &func);
 
 
@@ -3048,11 +3046,11 @@ namespace ta_test
             const BasicAssertionInfo *enclosing_assertion = nullptr;
 
             // Where the assertion is located in the source.
+            // On failure this can be overridden to point somewhere else.
             [[nodiscard]] virtual const SourceLoc &SourceLocation() const = 0;
 
-            // Returns the user message.
-            // This is lazy, the first call evaluates the message. This means it's not thread-safe.
-            [[nodiscard]] virtual std::optional<std::string_view> GetUserMessage() const = 0;
+            // Returns the user message. Until the assertion fails, this is always empty.
+            [[nodiscard]] virtual std::optional<std::string_view> UserMessage() const = 0;
 
             // The assertion is printed as a sequence of the elements below:
 
@@ -3092,9 +3090,8 @@ namespace ta_test
             ~MustThrowDynamicInfo() = default;
 
           public:
-            // This is lazy, the first call constructs the message.
-            // This makes it not thread-safe.
-            virtual std::optional<std::string_view> GetUserMessage() const = 0;
+            // This is set only if the exception is missing.
+            virtual std::optional<std::string_view> UserMessage() const = 0;
         };
         // This in the context stack means that a `TA_MUST_THROW(...)` is currently executing.
         struct MustThrowInfo : context::BasicFrame
@@ -3114,7 +3111,7 @@ namespace ta_test
             std::weak_ptr<const MustThrowDynamicInfo> dynamic_info;
         };
         // This in the context stack means that we're currently checking one or more elements of a `CaughtException` returned from `TA_MUST_THROW(...)`.
-        struct CaughtExceptionElemGuard : context::BasicFrame, context::FrameGuard
+        struct CaughtExceptionContext : context::BasicFrame, context::FrameGuard
         {
             std::shared_ptr<const CaughtExceptionInfo> state;
 
@@ -3125,7 +3122,7 @@ namespace ta_test
             // `state` can be null.
             // `active_elem` is either -1 or an index into `state->elems`.
             // `flags` affect how we check the correctness of `active_elem` (on soft failure a null instance is constructed).
-            CFG_TA_API CaughtExceptionElemGuard(std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags);
+            CFG_TA_API CaughtExceptionContext(std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, BasicModule::SourceLoc source_loc);
         };
 
         // This is called when `TA_MUST_THROW` doesn't throw an exception.
@@ -3846,28 +3843,45 @@ namespace ta_test
             : BasicTrace(true, true, nullptr, file, line, func)
         {}
 
-        struct ExtractArgsTo
+        struct HideParams
+        {
+            const BasicTrace *target = nullptr;
+        };
+
+        BasicTrace(HideParams hide)
+            : BasicTrace(false, false, nullptr, hide.target->loc.file, hide.target->loc.line, hide.target->func)
+        {}
+
+        struct ExtractArgsParams
         {
             BasicTrace *target = nullptr;
         };
 
-        BasicTrace(ExtractArgsTo extract, std::string_view file, int line, std::string_view func)
-            : BasicTrace(false, extract.target->accept_args, &extract.target->GetArgs(), file, line, func)
+        BasicTrace(ExtractArgsParams extract)
+            : BasicTrace(false, extract.target->accept_args, &extract.target->GetArgs(), extract.target->loc.file, extract.target->loc.line, extract.target->func)
         {}
 
       public:
         BasicTrace &operator=(const BasicTrace &) = delete;
         BasicTrace &operator=(BasicTrace &&) = delete;
 
-        // `operator bool` is inherited. It returns false when constructed from `NoTrace{}` or `.ExtractArgs()`.
+        // `operator bool` is inherited. It returns false when constructed from `.Hide()` or `.ExtractArgs()`.
 
         [[nodiscard]] const BasicModule::SourceLoc &GetLocation() const {return loc;}
         [[nodiscard]] const std::vector<std::string> &GetFuncArgs() const {return GetArgs().func_args;}
         [[nodiscard]] const std::vector<std::string> &GetTemplateArgs() const {return GetArgs().template_args;}
         [[nodiscard]] std::string_view GetFuncName() const {return func;}
 
-        // Pass this to the constructor of `Trace` to make it write its arguments into the current object.
-        [[nodiscard]] ExtractArgsTo ExtractArgs()
+        // Pass this to the constructor of `Trace` to disable tracing the callee.
+        // This also copies the location information to the callee.
+        [[nodiscard]] HideParams Hide() const
+        {
+            return {this};
+        }
+
+        // Pass this to the constructor of `Trace` to disable the tracing of the callee and make it write its arguments into the current object.
+        // This also copies the location information to the callee.
+        [[nodiscard]] ExtractArgsParams ExtractArgs()
         {
             return {this};
         }
@@ -3895,14 +3909,12 @@ namespace ta_test
             return *this;
         }
     };
-    // A tag for a `Trace` constructor, constructs a null object that doesn't trace.
-    struct NoTrace {};
     // Add this as the last function parameter: `Trace<"MyFunc"> trace = {}` to show this function call as the context when a test fails.
     // You can optionally do `trace.AddArgs/AddTemplateTypes/AddTemplateValues()` to also display information about the function arguments.
     // Those functions are not lazy, and calculate the new strings immediately, so don't overuse them.
-    // You can construct from `NoTrace{}` instead of `{}` to disable tracing for that specific object.
-    // You can construct from a different trace from `other_trace.ExtractArgs()`. This is similar to `NoTrace{}`,
-    //   but the target function will write its arguments into `other_trace`.
+    // You can construct from a different trace in several different ways:
+    // * From `outer_trace.Hide()`. This will disable tracing the callee.
+    // * From `outer_trace.ExtractArgs()`. This will disable tracing the callee, and will redirect all arguments from it to `outer_trace`.
     // You can call the inherited `Reset()` to disarm a `Trace` to remove it from the stack.
     template <meta::ConstString FuncName>
     class Trace : public BasicTrace
@@ -3913,13 +3925,12 @@ namespace ta_test
         Trace(std::string_view file = __builtin_FILE(), int line = __builtin_LINE(), std::string_view func = FuncName.view())
             : BasicTrace(file, line, func)
         {}
-        // This doesn't trace at all.
-        Trace(NoTrace) {}
-        // This doesn't trace, but writes function arguments to the specified instace of `Trace`.
+        // This doesn't trace, but copies the location information to the callee.
         // Usage: `foo(..., /*.trace=*/trace.ExtractArgs())`.
-        Trace(ExtractArgsTo extract, std::string_view file = __builtin_FILE(), int line = __builtin_LINE(), std::string_view func = FuncName.view())
-            : BasicTrace(extract, file, line, func)
-        {}
+        Trace(HideParams hide) : BasicTrace(hide) {}
+        // This doesn't trace, but writes function arguments to the specified instace of `Trace`. Also copies the location information to the callee.
+        // Usage: `foo(..., /*.trace=*/trace.ExtractArgs())`.
+        Trace(ExtractArgsParams extract) : BasicTrace(extract) {}
     };
 
 
@@ -4042,23 +4053,19 @@ namespace ta_test
         // You can also inherit custom assertion classes from this, if they don't need the expression decomposition provided by `AssertWrapper<T>`.
         class BasicAssertWrapper : public BasicModule::BasicAssertionInfo
         {
-            AssertParam condition_value = false;
+            bool condition_value = false;
 
             // User condition was evaluated to completion.
             bool condition_value_known = false;
 
-            // This is called to evaluate the user condition.
-            void (*condition_func)(BasicAssertWrapper &self, const void *data) = nullptr;
-            const void *condition_data = nullptr;
+            // This is called to get the optional user message, flags, etc (null if none of that).
+            void (*extras_func)(BasicAssertWrapper &self, const void *data) = nullptr;
+            const void *extras_data = nullptr;
+            // The user message (if any) is written here on failure.
+            std::optional<std::string> user_message;
 
-            // Call to trigger a breakpoint at the macro call site.
-            void (*break_func)() = nullptr;
-
-            // This is called to get the optional user message (null if no message).
-            std::string (*message_func)(const void *data) = nullptr;
-            const void *message_data = nullptr;
-            // The user message is cached here.
-            mutable std::optional<std::string> message_cache;
+            // This is only set on failure.
+            AssertFlags flags{};
 
             // Pushes and pops this into the assertion stack.
             struct AssertionStackGuard
@@ -4099,47 +4106,71 @@ namespace ta_test
                 CFG_TA_API bool operator~();
             };
 
+          protected:
+            // This is called to evaluate the user condition.
+            void (*condition_func)(BasicAssertWrapper &self, const void *data) = nullptr;
+            const void *condition_data = nullptr;
+
+            // Call to trigger a breakpoint at the macro call site.
+            void (*break_func)() = nullptr;
+
+            // This can be overridden on failure, but not necessarily. Otherwise (and by defualt) points to the actual location.
+            BasicModule::SourceLoc source_loc;
+
           public:
             // Note the weird variable name, it helps with our macro syntax that adds optional messages.
-            Evaluator DETAIL_TA_ADD_MESSAGE{*this};
+            Evaluator DETAIL_TA_ADD_EXTRAS{*this};
 
-            template <typename F>
-            BasicAssertWrapper(const F &func, void (*break_func)())
-                : break_func(break_func)
-            {
-                condition_func = [](BasicAssertWrapper &self, const void *data)
-                {
-                    return (*static_cast<const F *>(data))(self);
-                };
-                condition_data = &func;
-            }
+            BasicAssertWrapper() {}
 
             BasicAssertWrapper(const BasicAssertWrapper &) = delete;
             BasicAssertWrapper &operator=(const BasicAssertWrapper &) = delete;
 
-            void EvalCond(AssertParam param)
+            template <typename T>
+            void EvalCond(T &&value)
             {
-                condition_value = param;
+                condition_value = (std::forward<T>(value) ? true : false); // Using `? :` to force a contextual bool conversion.
                 condition_value_known = true;
             }
 
             template <typename F>
-            Evaluator &AddMessage(const F &func)
+            Evaluator &AddExtras(const F &func)
             {
-                message_func = [](const void *data)
+                extras_func = [](BasicAssertWrapper &self, const void *data)
                 {
-                    std::string ret;
-                    (*static_cast<const F *>(data))([&]<typename ...P>(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
-                    {
-                        ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                    (*static_cast<const F *>(data))(meta::Overload{
+                        [&]<typename ...P>(AssertFlags flags)
+                        {
+                            self.flags = flags;
+                        },
+                        [&]<typename ...P>(AssertFlags flags, BasicModule::SourceLoc loc)
+                        {
+                            self.flags = flags;
+                            self.source_loc = loc;
+                        },
+                        [&]<typename ...P>(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+                        {
+                            self.user_message = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                        },
+                        [&]<typename ...P>(AssertFlags flags, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+                        {
+                            self.flags = flags; // Do this first, in case formatting throws.
+                            self.user_message = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                        },
+                        [&]<typename ...P>(AssertFlags flags, BasicModule::SourceLoc loc, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+                        {
+                            self.flags = flags; // Do this first, in case formatting throws.
+                            self.source_loc = loc; // Same.
+                            self.user_message = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                        },
                     });
-                    return ret;
                 };
-                message_data = &func;
-                return DETAIL_TA_ADD_MESSAGE;
+                extras_data = &func;
+                return DETAIL_TA_ADD_EXTRAS;
             }
 
-            CFG_TA_API std::optional<std::string_view> GetUserMessage() const override;
+            CFG_TA_API const BasicModule::SourceLoc &SourceLocation() const override;
+            CFG_TA_API std::optional<std::string_view> UserMessage() const override;
 
             virtual ArgWrapper _ta_handle_arg_(int counter) = 0;
         };
@@ -4150,7 +4181,20 @@ namespace ta_test
             (RawString.view().find("_ta_handle_arg_(") == std::string_view::npos)
         struct AssertWrapper : BasicAssertWrapper, BasicModule::BasicAssertionExpr
         {
-            using BasicAssertWrapper::BasicAssertWrapper;
+            template <typename F>
+            AssertWrapper(const F &func, void (*breakpoint_func)())
+            {
+                condition_func = [](BasicAssertWrapper &self, const void *data)
+                {
+                    return (*static_cast<const F *>(data))(self);
+                };
+                condition_data = &func;
+
+                break_func = breakpoint_func;
+
+                // This constructor is not in the parents because of this line. We don't know the source location in the parent.
+                source_loc = {.file = FileName.view(), .line = LineNumber};
+            }
 
             // The number of arguments.
             static constexpr std::size_t num_args = []{
@@ -4310,8 +4354,6 @@ namespace ta_test
                 return ret;
             }();
 
-            static constexpr BasicModule::SourceLoc location{.file = FileName.view(), .line = LineNumber};
-
             ~AssertWrapper() noexcept
             {
                 // Destroy the stored arguments.
@@ -4338,7 +4380,6 @@ namespace ta_test
                 return stored_arg_metadata[index].to_string_func(stored_arg_metadata[index], stored_arg_buffers[index]);
             }
 
-            const BasicModule::SourceLoc &SourceLocation() const override {return location;}
             DecoVar GetElement(int index) const override
             {
                 if constexpr (RawString.view().empty())
@@ -4610,7 +4651,7 @@ namespace ta_test
                 // Using the assertion macro to nicely print exceptions, and to fail the test if this throws something.
                 // We can't rely on automatic test failure on exceptions, because this function can get called outside of the test-wide try-catch,
                 //   when `--generate` is involved.
-                TA_CHECK( no_increment_check_counters, generate_value() )("Generating a value in `TA_GENERATE(...)`.");
+                TA_CHECK( generate_value() )("Generating a value in `TA_GENERATE(...)`.");
 
                 this->this_value_is_custom = false;
                 this->num_generated_values++;
@@ -5164,15 +5205,15 @@ namespace ta_test
             // While it exists, all failed assertions will mention that they happened while examining this exception.
             // All high-level functions below do this automatically, and redundant contexts are silently ignored.
             // `index` is the element index (into `GetElems()`) of the element you're examining, or `-1` if not specified.
-            // Fails the test if the is invalid.
-            [[nodiscard]] BasicModule::CaughtExceptionElemGuard MakeContextGuard(AssertFlags flags = {}, int index = -1) const
+            // Fails the test if the is index invalid. `flags` affects how this validity check is handled.
+            [[nodiscard]] BasicModule::CaughtExceptionContext MakeContextGuard(int index = -1, AssertFlags flags = {}, BasicModule::SourceLoc source_loc = {__builtin_FILE(), __builtin_LINE()}) const
             {
                 if constexpr (IsWrapper)
                     return State().FrameGuard();
                 else
                 {
                     // This nicely handles null state and/or bad indices.
-                    return BasicModule::CaughtExceptionElemGuard(State(), index, flags);
+                    return BasicModule::CaughtExceptionContext(State(), index, flags, source_loc);
                 }
             }
 
@@ -5198,7 +5239,7 @@ namespace ta_test
             {
                 // No need to wrap this.
                 trace.AddArgs(regex, flags);
-                return CheckMessage(ExceptionElem::top_level, regex, flags, NoTrace{});
+                return CheckMessage(ExceptionElem::top_level, regex, flags, trace.Hide());
             }
             // Checks that the exception message matches the regex.
             // The entire message must match, not just a part of it.
@@ -5216,7 +5257,7 @@ namespace ta_test
                     {
                         return CFG_TA_FMT_NAMESPACE::format("The exception message doesn't match the regex `{}`.", regex);
                     },
-                    flags, NoTrace{}
+                    flags, trace.Hide()
                 );
             }
 
@@ -5238,7 +5279,7 @@ namespace ta_test
                         return CFG_TA_FMT_NAMESPACE::format("The exception type is not `{}`.", text::TypeName<T>());
                     },
                     flags,
-                    NoTrace{}
+                    trace.Hide()
                 );
             }
 
@@ -5274,7 +5315,7 @@ namespace ta_test
                         return CFG_TA_FMT_NAMESPACE::format("The exception type is not derived from `{}`.", text::TypeName<T>());
                     },
                     flags,
-                    NoTrace{}
+                    trace.Hide()
                 );
             }
 
@@ -5296,15 +5337,17 @@ namespace ta_test
                 {
                     if (elem.valueless_by_exception())
                         HardError("Invalid `ExceptionElemVar` variant.");
-                    if (!State() || State()->elems.empty())
-                        return ReturnedRef(*this); // Should be good enough. This shouldn't normally happen.
+                    if (!State())
+                        TA_FAIL(flags, trace.GetLocation(), "Attempt to analyze a null `CaughtException`.");
+                    if (State()->elems.empty())
+                        return ReturnedRef(*this); // This was returned from a failed soft `TA_MUST_THROW`, silently pass all checks.
                     const auto &elems = State()->elems;
                     auto CheckIndex = [&](int index)
                     {
                         // This validates the index for us, and fails the test if out of range.
-                        auto context = MakeContextGuard(flags, index);
+                        auto context = MakeContextGuard(index, flags);
                         if (context && !bool(std::forward<F>(func)(elems[std::size_t(index)])))
-                            TA_FAIL("{}", std::forward<G>(message_func)());
+                            TA_FAIL(flags, trace.GetLocation(), "{}", std::forward<G>(message_func)());
                     };
                     std::visit(meta::Overload{
                         [&](ExceptionElem elem)
@@ -5323,9 +5366,9 @@ namespace ta_test
                                 return;
                               case ExceptionElem::any:
                                 {
-                                    auto context = MakeContextGuard(flags);
+                                    auto context = MakeContextGuard(-1, flags);
                                     if (std::none_of(elems.begin(), elems.end(), func))
-                                        TA_FAIL("{}", std::forward<G>(message_func)());
+                                        TA_FAIL(flags, trace.GetLocation(), "{}", std::forward<G>(message_func)());
                                 }
                                 return;
                             }
@@ -5403,7 +5446,7 @@ namespace ta_test
                     info.dynamic_info = this;
                 }
 
-                CFG_TA_API std::optional<std::string_view> GetUserMessage() const;
+                CFG_TA_API std::optional<std::string_view> UserMessage() const;
             };
             // This is a `shared_ptr` to allow us to detect when the object goes out of scope.
             // After that we refuse to evaluate the user message.
@@ -5417,10 +5460,11 @@ namespace ta_test
             void (*break_func)() = nullptr;
 
             // This is called to get the optional user message (null if no message).
-            std::string (*message_func)(const void *data) = nullptr;
-            const void *message_data = nullptr;
-            // The user message is cached here.
-            mutable std::optional<std::string> message_cache;
+            std::string (*extras_func)(MustThrowWrapper &self, const void *data) = nullptr;
+            const void *extras_data = nullptr;
+            // The user message.
+            std::optional<std::string> user_message;
+            AssertFlags flags{};
 
             template <typename F>
             MustThrowWrapper(const F &func, void (*break_func)(), const BasicModule::MustThrowStaticInfo *static_info)
@@ -5458,8 +5502,8 @@ namespace ta_test
             // There's a lot of really moist code here.
             // * We want to return `CaughtException` from `TA_MUST_THROW(...)`, but we can't just do that, because we also must support optional messages,
             //   and there's no way to make them work if we immediately return the right type.
-            // * Therefore, `TA_MUST_THROW(...)` expands to `~foo(...).DETAIL_TA_ADD_MESSAGE`, and `~` is doing all the work, regardless if there are
-            //   parentheses on the right with the user message. `DETAIL_TA_ADD_MESSAGE`, when not expanded as a macro, is an instance of `class Evaluator`.
+            // * Therefore, `TA_MUST_THROW(...)` expands to `~foo(...).DETAIL_TA_ADD_EXTRAS`, and `~` is doing all the work, regardless if there are
+            //   parentheses on the right with the user message. `DETAIL_TA_ADD_EXTRAS`, when not expanded as a macro, is an instance of `class Evaluator`.
             // * This works perfectly for `TA_CHECK(...)`, but here in `TA_MUST_THROW(...)` the user can do a oneliner: `TA_MUST_THROW(...).Check...(foo)`,
             //   and that messes up with the priority of `~`.
             // * To work around all that, we do something really stupid. There are three different classes with the exact same interface,
@@ -5492,7 +5536,7 @@ namespace ta_test
 
           public:
             // The weird name helps with supporting optional messages.
-            Evaluator DETAIL_TA_ADD_MESSAGE = *this;
+            Evaluator DETAIL_TA_ADD_EXTRAS = *this;
 
             // Makes an instance of this class.
             template <meta::ConstString File, int Line, meta::ConstString MacroName, meta::ConstString Expr, typename F>
@@ -5512,22 +5556,31 @@ namespace ta_test
             MustThrowWrapper(const MustThrowWrapper &) = delete;
             MustThrowWrapper &operator=(const MustThrowWrapper &) = delete;
 
-            // This doesn't return `Evaluator &`, even though that would make sense for consistency.
-            // Doing that would prevent a `TA_MUST_THROW(...).Check...()` oneliner from working.
             template <typename F>
-            Evaluator &AddMessage(const F &func)
+            Evaluator &AddExtras(const F &func)
             {
-                message_func = [](const void *data)
+                extras_func = [](MustThrowWrapper &self, const void *data)
                 {
                     std::string ret;
-                    (*static_cast<const F *>(data))([&]<typename ...P>(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
-                    {
-                        ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                    (*static_cast<const F *>(data))(meta::Overload{
+                        [&]<typename ...P>(AssertFlags flags)
+                        {
+                            self.flags = flags;
+                        },
+                        [&]<typename ...P>(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+                        {
+                            ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                        },
+                        [&]<typename ...P>(AssertFlags flags, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+                        {
+                            self.flags = flags; // Do this first, in case message formatting throws.
+                            ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                        },
                     });
                     return ret;
                 };
-                message_data = &func;
-                return DETAIL_TA_ADD_MESSAGE;
+                extras_data = &func;
+                return DETAIL_TA_ADD_EXTRAS;
             }
         };
     }
@@ -5844,7 +5897,11 @@ namespace ta_test
             CFG_TA_API BasicExceptionContentsPrinter();
 
             // If `active_elem` is not -1, it's the index of the nested exception that should be highlighted.
-            CFG_TA_API virtual void PrintException(const output::Terminal &terminal, output::Terminal::StyleGuard &cur_style, const std::exception_ptr &e, int active_elem) const;
+            // If `only_one_element` is true, the `active_elem` highlight is modified with the assumption that there's only one element.
+            CFG_TA_API virtual void PrintException(
+                const output::Terminal &terminal, output::Terminal::StyleGuard &cur_style,
+                const std::exception_ptr &e, int active_elem, bool only_one_element
+            ) const;
         };
 
         // --- MODULES ---
@@ -6565,7 +6622,7 @@ namespace ta_test
                 output::Terminal::StyleGuard &cur_style,
                 const BasicModule::MustThrowStaticInfo &static_info,
                 const BasicModule::MustThrowDynamicInfo *dynamic_info, // Optional.
-                const BasicModule::CaughtExceptionElemGuard *caught, // Optional. If set, we're analyzing a caught exception. If null, we're looking at a macro call.
+                const BasicModule::CaughtExceptionContext *caught, // Optional. If set, we're analyzing a caught exception. If null, we're looking at a macro call.
                 bool is_most_nested // Must be false if `caught` is set.
             ) const;
         };

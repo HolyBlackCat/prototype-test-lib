@@ -140,10 +140,6 @@ std::string ta_test::string_conv::DefaultToStringTraits<ta_test::AssertFlags>::o
                 ok = true;
                 ret += "soft";
                 break;
-              case AssertFlags::no_increment_check_counters:
-                ok = true;
-                ret += "no_increment_check_counters";
-                break;
             }
 
             if (!ok)
@@ -279,6 +275,9 @@ void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<
     if (!thread_state.current_test)
         HardError("The current thread currently isn't running any test, can't use `AnalyzeException()`.", HardErrorKind::user);
 
+    if (!e)
+        return; // This should only happen if the top-level call passed `e = nullptr`. Nested calls should be unable to pass a null.
+
     for (auto *m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicModule::OnExplainException>())
     {
         std::optional<BasicModule::ExplainedException> opt;
@@ -377,14 +376,21 @@ ta_test::BasicModule::BasicGenerator::OverrideStatus ta_test::BasicModule::Basic
     }
 }
 
-ta_test::BasicModule::CaughtExceptionElemGuard::CaughtExceptionElemGuard(std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags)
-    : FrameGuard([&]() -> std::shared_ptr<const CaughtExceptionElemGuard>
+ta_test::BasicModule::CaughtExceptionContext::CaughtExceptionContext(
+    std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, BasicModule::SourceLoc source_loc
+)
+    : FrameGuard([&]() -> std::shared_ptr<const CaughtExceptionContext>
     {
-        if (!TA_CHECK(flags, $[active_elem == -1] || ($[bool(state)] && $[std::size_t(active_elem)] < $[state->elems.size()]))("Exception element index is out of range."))
-            return nullptr;
+        // A null instance.
         if (!state)
+            TA_FAIL(flags, source_loc, "Attempt to analyze a null `CaughtException`.");
+        // This was returned from a failed soft `TA_MUST_THROW`, silently do nothing.
+        if (state->elems.empty())
             return nullptr;
-        return std::shared_ptr<const CaughtExceptionElemGuard>(std::shared_ptr<void>{}, this);
+
+        if (!TA_CHECK($[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()])(flags, source_loc, "Exception element index is out of range."))
+            return nullptr;
+        return std::shared_ptr<const CaughtExceptionContext>(std::shared_ptr<void>{}, this);
     }()),
     state(std::move(state)), active_elem(active_elem)
 {}
@@ -1162,8 +1168,13 @@ bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
     if (thread_state.current_assertion != &self)
         HardError("The assertion being evaluated is not on the top of the assertion stack.");
 
+    // Increment total checks counter.
+    const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_total++;
+
     bool should_catch = true;
     thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreTryCatch>(should_catch);
+
+    std::exception_ptr uncaught_exception;
 
     if (should_catch)
     {
@@ -1178,10 +1189,7 @@ bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
         }
         catch (...)
         {
-            thread_state.FailCurrentTest();
-
-            auto e = std::current_exception();
-            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnUncaughtException>(*thread_state.current_test, &self, e);
+            uncaught_exception = std::current_exception();
         }
     }
     else
@@ -1189,49 +1197,61 @@ bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
         self.condition_func(self, self.condition_data);
     }
 
+    // Evaluate the message and other stuff if the condition is false.
+    if (self.extras_func)
+    {
+        try
+        {
+            self.extras_func(self, self.extras_data);
+        }
+        catch (...)
+        {
+            self.user_message = "[uncaught exception while evaluating the user message]";
+        }
+    }
+
     // Fail if the condition is false.
-    if (self.condition_value_known && !self.condition_value.value)
+    if (self.condition_value_known && !self.condition_value)
     {
         thread_state.FailCurrentTest();
         thread_state.current_test->all_tests->modules->Call<&BasicModule::OnAssertionFailed>(self);
+    }
+    // Fail on an exception.
+    else if (!self.condition_value_known)
+    {
+        thread_state.FailCurrentTest();
+        thread_state.current_test->all_tests->modules->Call<&BasicModule::OnUncaughtException>(*thread_state.current_test, &self, uncaught_exception);
     }
 
     // Break if a module callback (either on failed assertion or on exception) wants to.
     if (self.should_break)
         self.break_func();
 
-    // Increment total checks counter. I'd do it before running the callback, but we need to know the flags.
-    bool increment_counters = !bool(self.condition_value.flags & AssertFlags::no_increment_check_counters);
-    if (increment_counters)
-        const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_total++;
-
     // Interrupt the test if the condition is false or on an exception.
-    if (!self.condition_value_known || !self.condition_value.value)
+    if (!self.condition_value_known || !self.condition_value)
     {
         // Increment failed checks counter.
-        if (increment_counters)
-            const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
+        const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
 
         // Stop the test.
-        if (!bool(self.condition_value.flags & AssertFlags::soft))
+        if (!bool(self.flags & AssertFlags::soft))
             throw InterruptTestException{};
     }
 
-    return self.condition_value_known && self.condition_value.value;
+    return self.condition_value_known && self.condition_value;
 }
 
-std::optional<std::string_view> ta_test::detail::BasicAssertWrapper::GetUserMessage() const
+const ta_test::BasicModule::SourceLoc &ta_test::detail::BasicAssertWrapper::SourceLocation() const
 {
-    if (message_func)
-    {
-        if (!message_cache)
-            message_cache = message_func(message_data);
-        return *message_cache;
-    }
+    return source_loc;
+}
+
+std::optional<std::string_view> ta_test::detail::BasicAssertWrapper::UserMessage() const
+{
+    if (user_message)
+        return *user_message;
     else
-    {
         return {};
-    }
 }
 
 void ta_test::detail::GlobalState::SortTestListInExecutionOrder(std::span<std::size_t> indices) const
@@ -1518,18 +1538,12 @@ ta_test::CaughtException::CaughtException(
     });
 }
 
-std::optional<std::string_view> ta_test::detail::MustThrowWrapper::Info::GetUserMessage() const
+std::optional<std::string_view> ta_test::detail::MustThrowWrapper::Info::UserMessage() const
 {
-    if (self.message_func)
-    {
-        if (!self.message_cache)
-            self.message_cache = self.message_func(self.message_data);
-        return *self.message_cache;
-    }
+    if (self.user_message)
+        return *self.user_message;
     else
-    {
         return {};
-    }
 }
 
 ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~() const
@@ -1556,6 +1570,15 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
         );
     }
 
+    try
+    {
+        self.extras_func(self, self.extras_data);
+    }
+    catch (...)
+    {
+        self.user_message = "[uncaught exception while evaluating the user message]";
+    }
+
     thread_state.FailCurrentTest();
 
     bool should_break = false;
@@ -1565,6 +1588,17 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
 
     // Increment failed checks counter.
     const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
+
+    // If there's no exception in soft mode, return an empty list of exceptions (but not a null instance, that's handled differently).
+    // The resulting instance should silently pass all checks, unlike a true null instance, which should fail all checks.
+    if (bool(self.flags & AssertFlags::soft))
+    {
+        return CaughtException(
+            self.info->info.static_info,
+            std::shared_ptr<const BasicModule::MustThrowDynamicInfo>{self.info, self.info->info.dynamic_info},
+            nullptr
+        );
+    }
 
     throw InterruptTestException{};
 }
@@ -1937,24 +1971,26 @@ void ta_test::modules::BasicExceptionContentsPrinter::PrintException(
     const output::Terminal &terminal,
     output::Terminal::StyleGuard &cur_style,
     const std::exception_ptr &e,
-    int active_elem
+    int active_elem,
+    bool only_one_element
 ) const
 {
     int i = 0;
     AnalyzeException(e, [&](const SingleException &elem)
     {
-        bool active = i++ == active_elem;
+        bool active = i++ == active_elem && !only_one_element;
+        bool draw_arrows = active;
 
         if (elem.IsTypeKnown())
         {
             terminal.Print(cur_style, "{}{}{}{}{}\n{}{}{}{}\n",
                 style_exception_active_marker,
-                active ? chars_indent_type_active : chars_indent_type,
+                draw_arrows ? chars_indent_type_active : chars_indent_type,
                 active ? style_exception_type_active : style_exception_type,
                 elem.GetTypeName(),
                 chars_type_suffix,
                 style_exception_active_marker,
-                active ? chars_indent_message_active : chars_indent_message,
+                draw_arrows ? chars_indent_message_active : chars_indent_message,
                 active ? style_exception_message_active : style_exception_message,
                 string_conv::ToString(elem.message)
             );
@@ -1963,7 +1999,7 @@ void ta_test::modules::BasicExceptionContentsPrinter::PrintException(
         {
             terminal.Print(cur_style, "{}{}{}{}\n",
                 style_exception_active_marker,
-                active ? chars_indent_type_active : chars_indent_type,
+                draw_arrows ? chars_indent_type_active : chars_indent_type,
                 active ? style_exception_type_active : style_exception_type,
                 chars_unknown_exception
             );
@@ -3961,14 +3997,14 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
             column += canvas.DrawString(line_counter, column, has_elems ? chars_assertion_failed : chars_assertion_failed_no_cond, {.style = common_data.style_error, .important = true});
 
             // Add a `:` or `.`.
-            column += canvas.DrawString(line_counter, column, has_elems || data.GetUserMessage() ? ":" : ".", {.style = common_data.style_error, .important = true});
+            column += canvas.DrawString(line_counter, column, has_elems || data.UserMessage() ? ":" : ".", {.style = common_data.style_error, .important = true});
         }
         else
         {
             column += canvas.DrawString(line_counter, column, chars_in_assertion, {.style = common_data.style_stack_frame, .important = true});
         }
 
-        if (auto message = data.GetUserMessage())
+        if (auto message = data.UserMessage())
             canvas.DrawString(line_counter, column + 1, *message, {.style = common_data.style_user_message, .important = true});
 
         line_counter++;
@@ -4234,7 +4270,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
         chars_error
     );
 
-    PrintException(terminal, cur_style, e, -1);
+    PrintException(terminal, cur_style, e, -1, false); // Passing `only_one_elem = false`. This doesn't matter when no element is highlighted anyway.
     terminal.Print("\n");
 
     output::PrintContext(cur_style);
@@ -4260,7 +4296,7 @@ bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::Sty
         PrintFrame(cur_style, *ptr->static_info, ptr->dynamic_info, nullptr, false);
         return true;
     }
-    if (auto ptr = dynamic_cast<const BasicModule::CaughtExceptionElemGuard *>(&frame))
+    if (auto ptr = dynamic_cast<const BasicModule::CaughtExceptionContext *>(&frame))
     {
         PrintFrame(cur_style, *ptr->state->static_info, ptr->state->dynamic_info.lock().get(), ptr, false);
         return true;
@@ -4273,7 +4309,7 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
     output::Terminal::StyleGuard &cur_style,
     const BasicModule::MustThrowStaticInfo &static_info,
     const BasicModule::MustThrowDynamicInfo *dynamic_info,
-    const BasicModule::CaughtExceptionElemGuard *caught,
+    const BasicModule::CaughtExceptionContext *caught,
     bool is_most_nested
 ) const
 {
@@ -4286,7 +4322,7 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
             common_data.style_stack_frame,
             chars_exception_contents
         );
-        PrintException(terminal, cur_style, caught->state->elems.empty() ? nullptr : caught->state->elems.front().exception, caught->active_elem);
+        PrintException(terminal, cur_style, caught->state->elems.empty() ? nullptr : caught->state->elems.front().exception, caught->active_elem, caught->state->elems.size() == 1);
         terminal.Print("\n");
     }
     else if (is_most_nested)
@@ -4306,7 +4342,7 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
     );
     if (dynamic_info)
     {
-        if (auto message = dynamic_info->GetUserMessage())
+        if (auto message = dynamic_info->UserMessage())
         {
             terminal.Print(cur_style, " {}{}",
                 common_data.style_user_message,
