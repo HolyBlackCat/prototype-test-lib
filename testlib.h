@@ -4644,6 +4644,9 @@ namespace ta_test
                     // I tried, got some weird build error in some edge case, and decided not to bother.
                     this->storage.template emplace<1>(func.func, this->repeat);
 
+                    // On success, decrement the assertion counter to counteract `TA_CHECK` incrementing it.
+                    const_cast<BasicModule::RunTestsProgress *>(ThreadState().current_test->all_tests)->num_checks_total--;
+
                     guard.ok = true;
                     return true;
                 };
