@@ -7,9 +7,9 @@ This is a WIP testing framework, nothing to see here yet.
 > adjective<br/>
 > &nbsp; 1\. having no give or slack, tightly drawn<br/>
 > &nbsp; 2\. kept in proper order or condition<br/>
-> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; — [Merriam-Webster dictionary](https://www.merriam-webster.com/dictionary/taut)
+> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; — [Merriam-Webster dictionary](https://www.merriam-webster.com/dictionary/taut)
 
-**T**aut is **a** **u**nit **t**est framework[*](https://en.wikipedia.org/wiki/Recursive_acronym) for modern C++. It prioritizes having a clean minimal API (exactly one way of doing things; while not compromising on features) and good diagnostics, and uses a new kind of assertion syntax.
+**T**aut is **a** **u**nit **t**est framework[*](https://en.wikipedia.org/wiki/Recursive_acronym) for modern C++. It prioritizes having a clean API (exactly one way of doing things) and good diagnostics, and uses a new kind of assertion syntax.
 
 ---
 
