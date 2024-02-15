@@ -521,8 +521,8 @@
         } \
         .template operator()<first_elem __VA_OPT__(,) __VA_ARGS__>(), \
         /* Another lambda to convert arguments to strings. */\
-        ::ta_test::detail::ParamNameFunc<[]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) _ta_test_NameOf>(::ta_test::meta::PreferenceTagB) -> std::string \
-        {constexpr auto s = ::ta_test::detail::ParseEntityNameFromString<CFG_TA_THIS_FUNC_NAME>(); return {s.data(), s.data() + s.size() - 1};}> \
+        ::ta_test::detail::ParamNameFunc<[]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) _ta_test_NameOf>(::ta_test::meta::PreferenceTagB) -> std::string_view \
+        {return ::ta_test::detail::ParseEntityNameFromString<CFG_TA_THIS_FUNC_NAME>();}> \
         >{} \
     ->* [&]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME(param)>()
 
@@ -4725,7 +4725,7 @@ namespace ta_test
 
         // Parses a name from a `CFG_TA_THIS_FUNC_NAME` from a specially crafted lambda.
         template <meta::ConstString S>
-        constexpr auto ParseEntityNameFromString()
+        constexpr auto entity_name_from_string_storage = []
         {
             constexpr std::string_view view = S.view();
             #ifdef _MSC_VER
@@ -4745,6 +4745,12 @@ namespace ta_test
             std::array<char, view.size() - n - prefix.size() - suffix.size() + 1> ret{};
             std::copy(view.data() + n + prefix.size(), view.data() + view.size() - suffix.size(), ret.begin());
             return ret;
+        }();
+        template <meta::ConstString S>
+        [[nodiscard]] std::string_view ParseEntityNameFromString()
+        {
+            const auto &array = entity_name_from_string_storage<S>;
+            return {array.data(), array.data() + array.size() - 1};
         }
 
         // This is used to get template parameter names. `F` is a lambda that returns a `__PRETTY_FUNC__`/`__FUNCSIG__`-based name.
@@ -4955,7 +4961,7 @@ namespace ta_test
     {
         std::string operator()(detail::GeneratedParamIndex<N, NameLambda> value) const
         {
-            return NameLambda{}(value.index);
+            return std::string(NameLambda{}(value.index));
         }
     };
     template <std::size_t N, typename NameLambda>
@@ -4971,8 +4977,8 @@ namespace ta_test
             else
             {
                 // Prepare a list of names. Stable-sort by decreasing length, to give longer strings priority.
-                static const std::vector<std::pair<std::string, std::size_t>> list = []{
-                    std::vector<std::pair<std::string, std::size_t>> ret;
+                static const std::vector<std::pair<std::string_view, std::size_t>> list = []{
+                    std::vector<std::pair<std::string_view, std::size_t>> ret;
                     ret.reserve(N);
                     for (std::size_t i = 0; i < N; i++)
                         ret.emplace_back(NameLambda{}(i), i);
@@ -4995,11 +5001,11 @@ namespace ta_test
                     std::string error = "Expected one of: ";
 
                     // To make sure we don't print the same element twice.
-                    std::set<std::string> elems;
+                    std::set<std::string_view> elems;
 
                     for (std::size_t i = 0; i < N; i++)
                     {
-                        std::string elem = NameLambda{}(i);
+                        std::string_view elem = NameLambda{}(i);
                         if (!elems.insert(elem).second)
                             continue; // Refuse to print the same element twice.
 
