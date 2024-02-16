@@ -305,7 +305,7 @@
 #define TA_ARG DETAIL_TA_ARG
 #endif
 
-// Checks that `...` throws an exception (`...` can contain more than one statement, and can contain semicolons).
+// Checks that the argument throws an exception (then argument can contain more than one statement, and may contain semicolons).
 // If there is no exception, fails the test and throws `InterruptTestException{}` to quickly stop it.
 // Returns an instance of `ta_test::CaughtException`, which contains information about the exception and lets you validate its type and message.
 // Example usage:
@@ -339,7 +339,7 @@
 // Can evaluate the message more than once. You can utilize this to display the current variable values.
 #define TA_CONTEXT_LAZY(...) DETAIL_TA_CONTEXT_LAZY(__VA_ARGS__)
 
-// Repeats the test for all values in the range `...`. (Which is either a `{...}` or a C++20 range.)
+// Repeats the test for all values in the range, which is either a braced list or a C++20 range.
 // Example usage: `int x = TA_GENERATE(foo, {1,2,3});`.
 // `name` is the name for logging purposes, it must be a valid identifier. It's also used for controlling the generator from the command line.
 // You can't use any local variables in `...`, that's a compilation error.
@@ -350,12 +350,14 @@
 #define TA_GENERATE(name, ...) DETAIL_TA_GENERATE(name, __VA_ARGS__)
 
 // Repeats the test for all values returned by the lambda.
-// Usage: `T x = TA_GENERATE_FUNC(name, lambda);`.
+// Usage: `T x = TA_GENERATE_FUNC(name, [flags,] lambda);`.
 // NOTE: Since the lambda will outlive the test, make sure your captures don't dangle.
 // The lambda must be `(bool &repeat) -> ??`. The return type can be anything, possibly a reference.
 // Saves the return value from the lambda and returns it from `TA_GENERATE(...)`.
 // `repeat` receives `true` by default. If it remains true, the test will be restarted and the lambda will be called again to compute the new value.
 // If it's set to false, the return value becomes the last one in the sequence, and the lambda is discarded.
+// Example usage:
+//     int x = TA_GENERATE_FUNC(blah, [i = 10](bool &repeat) mutable {repeat = i < 15; return i++;});
 // The value is returned by const reference: `const decltype(func(...)) &`.
 // Note that this means that if `func()` returns by reference, the possible lack of constness of the reference is preserved:
 //   Lambda returns | TA_GENERATE_FUNC returns
@@ -366,11 +368,10 @@
 // The lambda is not evaluated/constructed at all when reentering `TA_GENERATE_FUNC(...)`, if we already have one from the previous run.
 // We guarantee that the lambda isn't copied or moved AT ALL.
 // The lambda can be preceded by an optional parameter of type `ta_test::GeneratorFlags`.
-// Or you can pass an instance of `ta_test::GenerateFuncParam`, which combines both arguments.
+// Or you can pass an instance of `ta_test::GenerateFuncParam`, which combines the flags and the lambda into one object.
 #define TA_GENERATE_FUNC(name, ...) DETAIL_TA_GENERATE_FUNC(name, __VA_ARGS__)
 
 // A version of `TA_GENERATE` for generating types (and other template parameters, such as constant values or templates).
-// Currently this version doesn't accept flags.
 // Despite how the syntax looks like, the whole test is repeated for each type/value, not just the braced block.
 // Example usage:
 //     TA_GENERATE_PARAM(typename T, int, float, double)
@@ -379,27 +380,30 @@
 //         // ...
 //     };
 // Note the trailing `;`.
-// The first argument must be a template parameter declaration of the form `<kind> <name>`,
-//   where `<name>` is a valid identifier. If `<kind>` isn't one of: `typename`, `class`, `auto` (such as a specific type,
-//     a concept, or a template template parameter, it must be parenthesized).
-//   Here's an example with a template template parameter:
-//       TA_GENERATE_PARAM((template <typename...> typename) T, std::vector, std::deque)
-//       {
-//           T<int> x = {1,2,3};
-//           // ...
-//       };
-//   Certain non-type parameters are impossible to express with this syntax (pointers/references to functions/arrays),
-//   because a part of the type goes after the parameter name. For those, either typedef the type, or just use `auto`.
-// The remaining arguments are a non-empty list of parameter arguments.
+// The full syntax is `TA_GENERATE_PARAM(kind name, list [,flags])`
+// * The first argument must be a template parameter declaration, where `name` is a valid identifier.
+//     If `kind` isn't one of: `typename`, `class`, `auto` (such as a specific type, a concept, or a template template parameter), it must be parenthesized.
+//       Here's an example with a template template parameter:
+//           TA_GENERATE_PARAM((template <typename...> typename) T, std::vector, std::deque)
+//           {
+//               T<int> x = {1,2,3};
+//               // ...
+//           };
+//     Certain non-type parameters are impossible to express with this syntax (pointers/references to functions/arrays),
+//       because a part of the type goes after the parameter name. For those, either typedef the type, or just use `auto`.
+// * The list can be parenthesized. It must be parenthesized if flags are specified, if the list is empty, or if it starts with `(` (e.g. starts with a C-style cast).
+// * The optional `flags` is an instace of `ta_test::GeneratorFlags`.
 // The `{...}` body is a lambda (with `[&]` capture) that is called immediately. You can return something from it, then the macro returns the same thing.
 //   As usual, the default return type is `auto`, but you can add `-> ...` after the macro to change the type (and possibly return by reference).
 //   Like with `std::visit`, the return type can't depend on the template parameter.
-// You can extract the argument list from a template instead of hardcoding it, using `ta_test::expand` like this:
+// You can extract the argument list from a template instead of hardcoding it, by putting `ta_test::expand` before it like this:
 //     TA_GENERATE_PARAM(typename T, ta_test::expand, std::tuple<A, B, C>)
 // Which is equivalent to:
 //     TA_GENERATE_PARAM(typename T, A, B, C)
 // `ta_test::expand` must be followed by exactly one type, which must be a template specialization `T<U...>` (where `U` can be anything, not necessarily a type).
-#define TA_GENERATE_PARAM(param, first_elem, ...) DETAIL_TA_GENERATE_PARAM(param, first_elem, __VA_ARGS__)
+// Here's an example with `expand` and flags:
+//     TA_GENERATE_PARAM(typename T, (ta_test::expand, std::tuple<A,B,C>), ta_test::interrupt_test_if_empty)
+#define TA_GENERATE_PARAM(param, ...) DETAIL_TA_GENERATE_PARAM(param, __VA_ARGS__)
 
 // Repeats the test several times, once for each of the several code fragments (a spin on `TA_GENERATE(...)`).
 // Example usage:
@@ -431,6 +435,17 @@
 // --- INTERNAL MACROS ---
 
 #define DETAIL_TA_NULL(...)
+#define DETAIL_TA_IDENTITY(...) __VA_ARGS__
+
+#define DETAIL_TA_EXPECT_EMPTY()
+
+// Like `DETAIL_TA_IDENTITY(...)`, but errors out if the argument is empty.
+#define DETAIL_TA_NONEMPTY_IDENTITY(...) DETAIL_TA_NONEMPTY_IDENTITY_CAT(DETAIL_TA_NONEMPTY_IDENTITY_A_,__VA_OPT__(0))(__VA_ARGS__)
+#define DETAIL_TA_NONEMPTY_IDENTITY_A_() DETAIL_TA_NONEMPTY_IDENTITY_B(x)
+#define DETAIL_TA_NONEMPTY_IDENTITY_A_0(...) __VA_ARGS__
+#define DETAIL_TA_NONEMPTY_IDENTITY_B()
+#define DETAIL_TA_NONEMPTY_IDENTITY_CAT(x, y) DETAIL_TA_NONEMPTY_IDENTITY_CAT_(x, y)
+#define DETAIL_TA_NONEMPTY_IDENTITY_CAT_(x, y) x##y
 
 #define DETAIL_TA_STR(...) DETAIL_TA_STR_(__VA_ARGS__)
 #define DETAIL_TA_STR_(...) #__VA_ARGS__
@@ -492,7 +507,7 @@
 #define DETAIL_TA_GENERATE_FUNC(name, ...) \
     ::ta_test::detail::GenerateValue<#name, __FILE__, __LINE__, __COUNTER__>([&]{return ::ta_test::GenerateFuncParam(__VA_ARGS__);})
 
-#define DETAIL_TA_GENERATE_PARAM(param, first_elem, ...) \
+#define DETAIL_TA_GENERATE_PARAM(param, ...) \
     ::ta_test::detail::ParamGenerator<\
         __FILE__, __LINE__, __COUNTER__, \
         /* Parameter name string. */\
@@ -504,7 +519,8 @@
             { \
                 return []<typename _ta_test_F, typename ..._ta_test_Q>() \
                 { \
-                    return ::std::array{+[](_ta_test_F &&f, _ta_test_Q &&... q) -> decltype(auto) {return f.template operator()<_ta_test_P>(std::forward<_ta_test_Q>(q)...);}...}; \
+                    if constexpr (sizeof...(_ta_test_P) == 0) return std::array<void(*)(_ta_test_F &&, _ta_test_Q &&...), 0>{}; \
+                    else return ::std::array{+[](_ta_test_F &&f, _ta_test_Q &&... q) -> decltype(auto) {return f.template operator()<_ta_test_P>(std::forward<_ta_test_Q>(q)...);}...}; \
                 }; \
             }, \
             /* Parameter list expanded from a user type. */\
@@ -514,16 +530,17 @@
                 { \
                     return []<typename _ta_test_F, typename ..._ta_test_Q>() \
                     { \
+                        if constexpr (sizeof...(_ta_test_P) == 0) return std::array<void(*)(_ta_test_F &&, _ta_test_Q &&...), 0>{}; \
                         return ::std::array{+[](_ta_test_F &&f, _ta_test_Q &&... q) -> decltype(auto) {return f.template operator()<_ta_test_P>(std::forward<_ta_test_Q>(q)...);}...}; \
                     }; \
                 }(::ta_test::meta::TypeTag<_ta_test_L>{}); \
             } \
         } \
-        .template operator()<first_elem __VA_OPT__(,) __VA_ARGS__>(), \
+        .template operator()<DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST(__VA_ARGS__)>(), \
         /* Another lambda to convert arguments to strings. */\
         ::ta_test::detail::ParamNameFunc<[]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) _ta_test_NameOf>(::ta_test::meta::PreferenceTagB) -> std::string_view \
         {return ::ta_test::detail::ParseEntityNameFromString<CFG_TA_THIS_FUNC_NAME>();}> \
-        >{} \
+        >( DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS(__VA_ARGS__) ) \
     ->* [&]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME(param)>()
 
 #define DETAIL_TA_SELECT(name, ...) \
@@ -590,6 +607,24 @@
 #define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_C_typename
 #define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_C_class
 #define DETAIL_TA_GENERATE_PARAM_EXTRACT_NAME_C_auto
+
+// Internal macro for `DETAIL_TA_GENERATE_PARAM(...)`.
+// If `...` is `(a) b`, returns `a`. Otherwise returns `...` unchanged.
+// Errors out if `...` is empty (but not if it starts with an empty (...)`.
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST(...) DETAIL_TA_CAT( DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST_C_, DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST_A(__VA_ARGS__) )
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST_A(...) DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST_B __VA_ARGS__ )
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST_B(...) 0 __VA_ARGS__ DETAIL_TA_NULL(
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST_C_0
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST_C_DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST_B DETAIL_TA_NONEMPTY_IDENTITY(
+
+// Internal macro for `DETAIL_TA_GENERATE_PARAM(...)`.
+// If `...` is `(a), b`, returns `b`. If the argument doesn't start with `(`, returns nothing.
+// Should error out if `(...)` isn't followed by `,`, or if `,` isn't followed by anything.
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS(...) DETAIL_TA_CAT( DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS_B_, DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS_A __VA_ARGS__ ) )
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS_A(...) 0
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS_B_0 DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS_C(
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS_B_DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS_A DETAIL_TA_NULL(
+#define DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS_C(x, ...) DETAIL_TA_EXPECT_EMPTY(x) __VA_ARGS__
 
 // --- ENUM FLAGS MACROS ---
 
@@ -4805,17 +4840,33 @@ namespace ta_test
 
         // `TA_GENERATE_PARAM(...)` expands to this.
         template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString Name, auto ListLambda, typename NameLambda>
-        struct ParamGenerator
+        class ParamGenerator
         {
+            GeneratorFlags flags{};
+
+          public:
+            constexpr ParamGenerator() {}
+            ParamGenerator(GeneratorFlags flags) : flags(flags) {}
+
             template <typename F>
             [[nodiscard]] decltype(auto) operator->*(F &&func)
             {
-                auto name_lambda_wrapped = [](std::size_t i){return ListLambda.template operator()<NameLambda, meta::PreferenceTagA>()[i](NameLambda{}, meta::PreferenceTagA{});};
-
                 static constexpr auto arr = ListLambda.template operator()<F>();
+
+                if (arr.empty())
+                    flags |= GeneratorFlags::generate_nothing;
+
+                auto name_lambda_wrapped = [](std::size_t i)
+                {
+                    if constexpr (arr.size() == 0)
+                        return std::string_view{};
+                    else
+                        return ListLambda.template operator()<NameLambda, meta::PreferenceTagA>()[i](NameLambda{}, meta::PreferenceTagA{});
+                };
+
                 auto index = (GenerateValue<Name, LocFile, LocLine, LocCounter>)(
-                    []{
-                        return GenerateFuncParam([i = std::size_t{}](bool &repeat) mutable
+                    [this]{
+                        return GenerateFuncParam(flags, [i = std::size_t{}](bool &repeat) mutable
                         {
                             repeat = i + 1 < arr.size();
                             return GeneratedParamIndex<arr.size(), decltype(name_lambda_wrapped)>{i++};

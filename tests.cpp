@@ -4,6 +4,12 @@
 
 #include "testlib.h"
 
+// Should we support an empty list in TA_GENERATE_PARAM? Probably yes?
+//     If not, add a comment that it's not supported.
+// Go make your flag that enables re-generation on each call, and disable it by default
+
+// Make `noop_if_empty` for generators where it makes sense? Probably not.
+
 void ThrowNested()
 {
     try
@@ -18,12 +24,17 @@ void ThrowNested()
 
 TA_TEST(foo/test)
 {
-    auto e = TA_MUST_THROW( 42 )( ta_test::soft, "Message!" );
-    e.CheckMessage("In.*");
+    TA_GENERATE_PARAM(typename T, int, float, double)
+    {
+        std::cout << sizeof(T) << '\n';
+    };
 
-    auto g = ta_test::CaughtException{}.MakeContextGuard(0);
+    // auto e = TA_MUST_THROW( 42 )( ta_test::soft, "Message!" );
+    // e.CheckMessage("In.*");
 
-    TA_FAIL;
+    // auto g = ta_test::CaughtException{}.MakeContextGuard(0);
+
+    // TA_FAIL;
 }
 
 int main(int argc, char **argv)
@@ -49,6 +60,8 @@ int main(int argc, char **argv)
 
 // Add CMakeLists.txt!
 
+//     Migrate to `std::source_location` everywhere! Or in v2?
+
 // v0.2:
 //     Optionally no exceptions
 //     Optionally no RTTI
@@ -60,7 +73,7 @@ int main(int argc, char **argv)
 //     Experiment with function attributes ("artificial"?) for better debugging
 //     Analyzing TA_MUST_THROW must immediately point to the user code first, and not to the library internals
 //         Add an argument to AssertParam to customize the source location, and stop baking it into template parameters
-//     Migrate to `std::source_location` everywhere.
+//     In TA_GENERATE_PARAM, move the fat lambdas to a template IF the parameter kind is unparenthesized.
 
 // Later:
 //     Soft TA_MUST_THROW? (accept AssertFlags somehow?)
@@ -518,7 +531,16 @@ TA_CHECK:
     User can -> override return type (check that references are forwarded correctly)
 
     Single arg = ok
-    0 args = nice error
+
+    (typename T) = build error
+    (typename T,) = build error
+    (typename T, int) = ok
+    (typename T, (int)) = ok
+    (typename T, ()) = OK
+    (typename T, (int), ta_test::GeneratorFlags{}) = ok
+    (typename T, (), ta_test::GeneratorFlags{}) = ok
+    (typename T, (int),) = ok? (doesn't look good, but doesn't worth the effort checking for?)
+    (typename T, (),) = ok? (same)
 
     `auto` uses `string_conv::ToString()` to print stuff (because MSVC prints template param `int`s in hex otherwise, which is lame),
         but falling back to native printing
