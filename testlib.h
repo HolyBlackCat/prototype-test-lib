@@ -653,6 +653,7 @@ namespace ta_test
     namespace detail
     {
         class GenerateValueHelper;
+        struct SpecificGeneratorGenerateGuard;
     }
 
 
@@ -667,7 +668,7 @@ namespace ta_test
 
     // We try to classify the hard errors into interal ones and user-induced ones, but this is only an approximation.
     enum class HardErrorKind {internal, user};
-    // Aborts the application with an error.
+    // Aborts the application with an error. Mostly for internal use.
     [[noreturn]] CFG_TA_API void HardError(std::string_view message, HardErrorKind kind = HardErrorKind::internal);
 
     // We throw this to abort a test (not necessarily fail it).
@@ -693,14 +694,19 @@ namespace ta_test
     // Flags for `TA_GENERATE(...)` and others.
     enum class GeneratorFlags
     {
+        // By default if the same generator is reached twice during one test execution, the second call simply returns a copy of the first value.
+        // With this flag, each call generates a new value (essentially giving you a cartesian product).
+        // This flag prevents a read from the storage, but doesn't prevent a write to it. (So the flag has no effect when reaching a generator for the first time,
+        //   and has no effect on the future calls to the same generator).
+        new_value_when_revisiting = 1 << 0,
         // Don't emit a hard error if the range is empty, instead throw `InterruptTestException` to abort the test.
-        interrupt_test_if_empty = 1 << 0,
+        interrupt_test_if_empty = 1 << 1,
         // Generate no elements.
-        // This causes a hard error, or, if `interrupt_test_if_empty` is also set, an `InterruptTestException`.
+        // This causes a hard error, or, if `interrupt_test_if_empty` is also set, throws an `InterruptTestException`.
         // That is, unless `--generate` is used to add custom values to this generator.
         // This is primarily useful when generating from a callback. When generating from a range, this has the same effect as passing an empty range.
         // The callback or range are still used to deduce the return type, but are otherwise ignored.
-        generate_nothing = 1 << 1,
+        generate_nothing = 1 << 2,
     };
     DETAIL_TA_FLAG_OPERATORS(GeneratorFlags)
     using enum GeneratorFlags;
@@ -2649,6 +2655,7 @@ namespace ta_test
         struct BasicGenerator
         {
             friend detail::GenerateValueHelper;
+            friend detail::SpecificGeneratorGenerateGuard;
 
             BasicGenerator() = default;
             BasicGenerator(const BasicGenerator &) = delete;
@@ -2947,16 +2954,28 @@ namespace ta_test
             const RunTestsProgress *all_tests = nullptr;
             const BasicTestInfo *test = nullptr;
 
+            // True when entering the test for the first time, as opposed to repeating it because of a generator.
+            // This is set to `generator_stack.empty()` when entering the test.
+            bool is_first_generator_repetition = false;
+
             // The generator stack.
             // This starts empty when entering the test for the first time.
             // Reaching `TA_GENERATE` can push or modify the last element of the stack.
             // Right after `OnPostRunSingleTest`, any trailing elements with `.IsLastValue() == true` are pruned.
             // If the stack isn't empty after that, the test is restarted with the same stack.
+            // NOTE! If you want to pop from this (internally in the library), don't forget to run `OnPrePruneGenerator()` on the modules.
             std::vector<std::unique_ptr<const BasicGenerator>> generator_stack;
 
-            // True when entering the test for the first time, as opposed to repeating it because of a generator.
-            // This is set to `generator_stack.empty()` when entering the test.
-            bool is_first_generator_repetition = false;
+            // This is mostly internall stuff:
+
+            // Unlike `generator_stack`, this doesn't persist between test repetition.
+            // This remembers all visited generators, and maps them to the indices in `generator_stack`.
+            // If a generator doesn't specify `new_value_when_revisiting`, it'll try to take a value from this map instead of generating a new one.
+            // And if it does take a value from here, it's not added to the stack at all.
+            std::map<SourceLocWithCounter, std::size_t> visited_generator_cache;
+
+            // This is used to prevent recursive usage of generators.
+            bool currently_in_generator = false;
         };
         struct RunSingleTestProgress : RunSingleTestInfo
         {
@@ -3225,7 +3244,7 @@ namespace ta_test
         };
         // For internal use, don't use and don't override. Returns the mask of functions implemented by this class.
         [[nodiscard]] virtual unsigned int Detail_ImplementedFunctionsMask() const noexcept = 0;
-        // For internal use. Returns true if the specified function is overriden in the derived class.
+        // For internal use. Returns true if the specified function is overridden in the derived class.
         [[nodiscard]] bool ImplementsFunction(InterfaceFunc func) const noexcept
         {
             using MaskType = decltype(Detail_ImplementedFunctionsMask());
@@ -4601,6 +4620,19 @@ namespace ta_test
 
         // --- GENERATORS ---
 
+        // Used internally by `SpecificGenerator`.
+        struct SpecificGeneratorGenerateGuard
+        {
+            BasicModule::BasicGenerator &self;
+            bool ok = false;
+
+            SpecificGeneratorGenerateGuard(BasicModule::BasicGenerator &self) : self(self) {}
+            SpecificGeneratorGenerateGuard(const SpecificGeneratorGenerateGuard &) = delete;
+            SpecificGeneratorGenerateGuard &operator=(const SpecificGeneratorGenerateGuard &) = delete;
+
+            CFG_TA_API ~SpecificGeneratorGenerateGuard();
+        };
+
         template <
             // Manually specified:
             meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter, typename F,
@@ -4648,28 +4680,9 @@ namespace ta_test
             {
                 auto generate_value = [&]
                 {
-                    struct Guard
-                    {
-                        SpecificGenerator &self;
-                        bool ok = false;
-
-                        ~Guard()
-                        {
-                            if (!ok)
-                            {
-                                auto &thread_state = ThreadState();
-
-                                self.callback_threw_exception = true;
-
-                                // Kick the generator from the stack if it died before generating the first value, and if it's the last one in the stack.
-                                if (!thread_state.current_test->generator_stack.empty() && thread_state.current_test->generator_stack.back().get() == &self && !self.HasValue())
-                                    thread_state.current_test->generator_stack.pop_back();
-
-                                // Can't touch `self` beyond this point.
-                            }
-                        }
-                    };
-                    Guard guard{.self = *this};
+                    // This guard can kick this generator from the stack if it failed before generating the first value.
+                    // We need this here, because otherwise the assertion failure handler would try to read the value from this generator, when it has none.
+                    SpecificGeneratorGenerateGuard guard(*this);
 
                     // Here the default value of `repeat` is `true`.
                     // This is to match the programming pattern of `if (...) break;` with `if (...) repeat = false;`,
@@ -4698,17 +4711,32 @@ namespace ta_test
 
         class GenerateValueHelper
         {
+            // All those are set internally by `HandleGenerator()`:
+
+            bool creating_new_generator = false;
             bool generating_new_value = false;
 
+            // This is set internally by `HandleGenerator()` when we're sure that we don't want to pop the generator from the stack on failure.
+            bool generator_stays_in_stack = false;
+
           public:
+            // This must be filled with the source location.
+            BasicModule::SourceLocWithCounter source_loc;
+
+            // The caller places the current generator here.
             BasicModule::BasicGenerator *untyped_generator = nullptr;
 
-            // Non-null if a new generator is being created. In that case it has the same value as `untyped_generator`.
+            // The caller sets this if a new generator is being created. In that case it must have the same value as `untyped_generator`.
             // Note that `HandleGenerator()` moves from this variable, so it's always null in the destructor.
             std::unique_ptr<BasicModule::BasicGenerator> created_untyped_generator;
 
+            CFG_TA_API GenerateValueHelper(BasicModule::SourceLocWithCounter source_loc);
+
+            GenerateValueHelper(const GenerateValueHelper &) = delete;
+            GenerateValueHelper &operator=(const GenerateValueHelper &) = delete;
+
             CFG_TA_API ~GenerateValueHelper();
-            CFG_TA_API void HandleGenerator(const BasicModule::SourceLoc &source_loc);
+            CFG_TA_API void HandleGenerator();
         };
 
         // `TA_GENERATE_FUNC(...)` expands to this.
@@ -4723,13 +4751,14 @@ namespace ta_test
         [[nodiscard]] auto GenerateValue(F &&func)
             -> const typename SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>::return_type &
         {
+            using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>;
+
             auto &thread_state = ThreadState();
             if (!thread_state.current_test)
                 HardError("Can't use `TA_GENERATE(...)` when no test is running.", HardErrorKind::user);
 
-            GenerateValueHelper guard;
+            GenerateValueHelper guard({{LocFile.view(), LocLine}, LocCounter});
 
-            using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>;
             GeneratorType *typed_generator = nullptr;
 
             if (thread_state.current_test->generator_index < thread_state.current_test->generator_stack.size())
@@ -4745,12 +4774,26 @@ namespace ta_test
             {
                 // Visiting a generator for the first time.
 
+                // Argh! How do we avoid this allocation if we just need to look at the `` flag?
                 auto new_generator = std::make_unique<GeneratorType>(std::forward<F>(func));
+
+                // Try to reuse a cached value.
+                if (!bool(new_generator->GetFlags() & GeneratorFlags::new_value_when_revisiting))
+                {
+                    auto iter = thread_state.current_test->visited_generator_cache.find(guard.source_loc);
+                    if (iter != thread_state.current_test->visited_generator_cache.end())
+                    {
+                        if (iter->second >= thread_state.current_test->generator_stack.size())
+                            HardError("Cached generator index is somehow out of range?");
+                        return dynamic_cast<GeneratorType &>(const_cast<BasicModule::BasicGenerator &>(*thread_state.current_test->generator_stack[iter->second])).GetValue();
+                    }
+                }
+
                 guard.untyped_generator = typed_generator = new_generator.get();
                 guard.created_untyped_generator = std::move(new_generator);
             }
 
-            guard.HandleGenerator({LocFile.view(), LocLine});
+            guard.HandleGenerator();
 
             return typed_generator->GetValue();
         }
@@ -5652,7 +5695,7 @@ namespace ta_test
     {
 
 
-        // Inherits from a user module, and checks which virtual functions were overriden.
+        // Inherits from a user module, and checks which virtual functions were overridden.
         template <typename T>
         struct ModuleWrapper final : T
         {

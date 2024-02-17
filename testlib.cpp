@@ -1375,6 +1375,41 @@ ta_test::detail::BasicScopedLogGuard::~BasicScopedLogGuard()
     thread_state.scoped_log.pop_back();
 }
 
+ta_test::detail::SpecificGeneratorGenerateGuard::~SpecificGeneratorGenerateGuard()
+{
+    if (!ok)
+    {
+        auto &thread_state = ThreadState();
+
+        self.callback_threw_exception = true;
+
+        // Kick the generator from the stack if it died before generating the first value, and if it's the last one in the stack.
+        if (!thread_state.current_test->generator_stack.empty() && thread_state.current_test->generator_stack.back().get() == &self && !self.HasValue())
+        {
+            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPrePruneGenerator>(*thread_state.current_test);
+            thread_state.current_test->generator_stack.pop_back();
+        }
+
+        // Can't touch `self` beyond this point.
+    }
+}
+
+ta_test::detail::GenerateValueHelper::GenerateValueHelper(BasicModule::SourceLocWithCounter source_loc)
+    : source_loc(source_loc)
+{
+    if (ThreadState().current_test->currently_in_generator)
+    {
+        HardError(
+            CFG_TA_FMT_NAMESPACE::format("Using a generator inside of another generator callback is not allowed, at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`.",
+                source_loc.file, source_loc.line
+            ),
+            HardErrorKind::user
+        );
+    }
+
+    ThreadState().current_test->currently_in_generator = true;
+}
+
 ta_test::detail::GenerateValueHelper::~GenerateValueHelper()
 {
     if (untyped_generator)
@@ -1387,25 +1422,46 @@ ta_test::detail::GenerateValueHelper::~GenerateValueHelper()
             thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get() == untyped_generator
         )
         {
-            // Post callback.
-            BasicModule::GeneratorCallInfo callback_data{
-                .test = thread_state.current_test,
-                .generator = untyped_generator,
-                .generating_new_value = generating_new_value,
-            };
-            thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
+            if (creating_new_generator && !generator_stays_in_stack)
+            {
+                // If we're still in the stack on failure (e.g. when overriding a generator to produce no values,
+                //   when `interrupt_test_if_empty` is also set), pop ourselves from the stack.
 
-            thread_state.current_test->generator_index++;
+                thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPrePruneGenerator>(*thread_state.current_test);
+                thread_state.current_test->generator_stack.pop_back();
+            }
+            else
+            {
+                // Post callback.
+                BasicModule::GeneratorCallInfo callback_data{
+                    .test = thread_state.current_test,
+                    .generator = untyped_generator,
+                    .generating_new_value = generating_new_value,
+                };
+                thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPostGenerate>(callback_data);
+
+                // Add the generator to the cache.
+                // This happens unconditionally, regardless of the flags. Only the read depends on the flags.
+                // This also happens regardless of whether we just created the generator, or are revisiting it.
+                [&]() noexcept {
+                    // Intentionally overwriting the old value, if any.
+                    thread_state.current_test->visited_generator_cache.insert_or_assign(source_loc, thread_state.current_test->generator_index);
+                }();
+
+                thread_state.current_test->generator_index++;
+            }
         }
     }
+
+    ThreadState().current_test->currently_in_generator = false;
 }
 
-void ta_test::detail::GenerateValueHelper::HandleGenerator(const BasicModule::SourceLoc &source_loc)
+void ta_test::detail::GenerateValueHelper::HandleGenerator()
 {
     auto &thread_state = ThreadState();
 
     // Need this variable, because the generator is later moved-from.
-    bool creating_new_generator = bool(created_untyped_generator);
+    creating_new_generator = bool(created_untyped_generator);
 
     // If creating a new generator...
     if (creating_new_generator)
@@ -1461,6 +1517,8 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator(const BasicModule::So
                 source_loc.file, source_loc.line
             ), HardErrorKind::user);
         }
+
+        generator_stays_in_stack = true;
     }
 
     generating_new_value = thread_state.current_test->generator_index + 1 == thread_state.current_test->generator_stack.size();
@@ -1477,16 +1535,33 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator(const BasicModule::So
             // Nothing.
             break;
           case BasicModule::BasicGenerator::OverrideStatus::no_more_values:
-            HardError(
-                CFG_TA_FMT_NAMESPACE::format(
-                    "Generator `{}` was overriden to generate no values. This is not supported, you must avoid reaching the generator in the first place.",
-                    untyped_generator->GetName()
-                ),
-                HardErrorKind::user
-            );
+            if (creating_new_generator)
+            {
+                if (bool(untyped_generator->GetFlags() & GeneratorFlags::interrupt_test_if_empty))
+                {
+                    throw InterruptTestException{};
+                }
+                else
+                {
+                    HardError(
+                        CFG_TA_FMT_NAMESPACE::format(
+                            "The generator `{}` at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "` was overridden to generate no values, "
+                            "but it doesn't specify the `ta_test::interrupt_test_if_empty` flag.",
+                            untyped_generator->GetName(), source_loc.file, source_loc.line
+                        ),
+                        HardErrorKind::user
+                    );
+                }
+            }
+            else
+            {
+                HardError("How did we run out of generated values while overriding?");
+            }
             break;
         }
     }
+
+    generator_stays_in_stack = true;
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<ta_test::ExceptionElem>::operator()(const ExceptionElem &value) const
@@ -1734,7 +1809,7 @@ void ta_test::Runner::ProcessFlags(std::function<std::optional<std::string_view>
 
 int ta_test::Runner::Run()
 {
-    auto& thread_state = detail::ThreadState();
+    auto &thread_state = detail::ThreadState();
 
     if (thread_state.current_test)
         HardError("This thread is already running a test.", HardErrorKind::user);

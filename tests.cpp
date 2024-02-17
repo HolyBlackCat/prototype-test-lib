@@ -4,45 +4,20 @@
 
 #include "testlib.h"
 
-// Should we support an empty list in TA_GENERATE_PARAM? Probably yes?
-//     If not, add a comment that it's not supported.
-// Go make your flag that enables re-generation on each call, and disable it by default
-
-// Make `noop_if_empty` for generators where it makes sense? Probably not.
-
-void ThrowNested()
+int GenerateSign()
 {
-    try
-    {
-        throw std::runtime_error("Inner!");
-    }
-    catch (...)
-    {
-        std::throw_with_nested(std::logic_error("Outer!"));
-    }
+    return TA_GENERATE(sign, ta_test::new_value_when_revisiting, {-1, 0, 1});
 }
 
 TA_TEST(foo/test)
 {
-    TA_GENERATE_PARAM(typename T, int, float, double)
-    {
-        std::cout << sizeof(T) << '\n';
-    };
-
-    // auto e = TA_MUST_THROW( 42 )( ta_test::soft, "Message!" );
-    // e.CheckMessage("In.*");
-
-    // auto g = ta_test::CaughtException{}.MakeContextGuard(0);
-
-    // TA_FAIL;
+    std::cerr << std::format("{} {}\n", GenerateSign(), GenerateSign());
 }
 
 int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
-
-// What about caching generator values by default, with opt-out flag? Then TA_GENERATE_PARAM needs to accept a flag parameter somehow.
 
 // Remove the BasicModule from the header somehow.
 // Split the runner (with all modules) into a separate header? Including most utility functions too.
@@ -104,6 +79,7 @@ int main(int argc, char **argv)
 //         they can also open the console themselves.
 
 // Unclear how:
+//     To actually read the `new_value_when_revisiting` flag, the lambda needs to be constructed, which sucks dick. But there's probably no workaround?
 //     `noop_if_empty` flag for generators. This will work for `TA_GENERATE_PARAM` and `TA_SELECT`, but what to do with others to have feature parity?
 //     In `TA_GENERATE_PARAM`, an extra list can only runs on demand from the command line.
 //     Draw a fat bracket while explaining each test failure?
@@ -131,6 +107,8 @@ int main(int argc, char **argv)
 //     * Clickthrough everywhere (i.e. file paths everywhere, that should be clickable in an IDE)
 //     * Tests in headers = bad practice, but we support it without code duplication, but still check if the test names clash (different source locations)
 //         * Compare with what gtest and catch2 do.
+//
+// Do gtest and catch2 support non-default-constructible type parameters? Check.
 
 
 /* Pending tests:
@@ -381,6 +359,8 @@ TA_CHECK:
             for the second+ time
 
     [[nodiscard]] on the result
+
+    Ban nested calls (generating from a generator callback)
 
     Overriding values:
         =
