@@ -51,8 +51,9 @@ void ta_test::HardError(std::string_view message, HardErrorKind kind)
     );
 
     // Stop.
-    // Don't need to check whether the debugger is attached, a crash is fine.
+    // Don't need to check whether the debugger is attached, a crash here is fine.
     CFG_TA_BREAKPOINT();
+    // If a debugger is attached and we lived past the previous statement, kill the program here.
     std::terminate();
 }
 
@@ -1880,20 +1881,22 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
         );
     }
 
-    try
+    if (self.extras_func)
     {
-        self.extras_func(self, self.extras_data);
-    }
-    catch (...)
-    {
-        self.user_message = "[uncaught exception while evaluating the user message]";
+        try
+        {
+            self.extras_func(self, self.extras_data);
+        }
+        catch (...)
+        {
+            self.user_message = "[uncaught exception while evaluating the user message]";
+        }
     }
 
     thread_state.FailCurrentTest();
 
-    bool should_break = false;
-    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(self.info->info, should_break);
-    if (should_break)
+    thread_state.current_test->all_tests->modules->Call<&BasicModule::OnMissingException>(self.info->info);
+    if (self.info->info.should_break)
         self.break_func();
 
     // Increment failed checks counter.
@@ -4628,10 +4631,8 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const data::RunSing
 
 // --- modules::MustThrowPrinter ---
 
-void ta_test::modules::MustThrowPrinter::OnMissingException(const data::MustThrowInfo &data, bool &should_break) noexcept
+void ta_test::modules::MustThrowPrinter::OnMissingException(const data::MustThrowInfo &data) noexcept
 {
-    (void)should_break;
-
     auto cur_style = terminal.MakeStyleGuard();
 
     output::PrintLog(cur_style);
@@ -4808,8 +4809,8 @@ ta_test::modules::DebuggerDetector::DebuggerDetector()
         }
     ),
     flag_catch("catch", "Catch exceptions. Disabling this means that the application will terminate on the first exception, "
-        "but this improves debugging experience by letting you configure your debugger to only break on uncaught exceptions, "
-        "which means you don't need to manually skip the ones that are thrown and successfully caught. Enabling this while debugging "
+        "which improves debugging experience (especially if you configure your debugger to only break on uncaught exceptions, "
+        "which seems to be the default on both LLDB, GDB, and VS debugger). Enabling this while debugging "
         "will give you only approximate exception locations (the innermost enclosing assertion or test), rather than precise ones. (By default enabled if a debugger is not attached.)",
         [](const Runner &runner, BasicModule &this_module, bool enable)
         {
@@ -4845,11 +4846,10 @@ void ta_test::modules::DebuggerDetector::OnUncaughtException(const data::RunSing
         assertion->should_break = true;
 }
 
-void ta_test::modules::DebuggerDetector::OnMissingException(const data::MustThrowInfo &data, bool &should_break) noexcept
+void ta_test::modules::DebuggerDetector::OnMissingException(const data::MustThrowInfo &data) noexcept
 {
-    (void)data;
     if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
-        should_break = true;
+        data.should_break = true;
 }
 
 void ta_test::modules::DebuggerDetector::OnPreTryCatch(bool &should_catch) noexcept

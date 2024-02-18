@@ -78,10 +78,9 @@
 #endif
 #endif
 
-// Override to change what we call to terminate the application.
+// How to trigger a breakpoint.
+// By default we should be only running this when a debugger is attached, so it's not a big deal that those seem to terminate a program if no debugger is attached.
 // The logic is mostly copied from `SDL_TriggerBreakpoint()`.
-// This can be empty, we follow up with a forced termination anyway.
-// Note, this failed for me at least once when resuming from being paused on an exception (didn't show the line number; on Linux Clang).
 #ifndef CFG_TA_BREAKPOINT
 #if defined(_MSC_VER) // MSVC.
 #define CFG_TA_BREAKPOINT() __debugbreak()
@@ -463,7 +462,7 @@
             ::ta_test::detail::SpecificTest<static_cast<void(*)(\
                 ::ta_test::meta::ConstStringTag<#name>\
             )>(_ta_test_func),\
-            []{CFG_TA_BREAKPOINT(); ::std::terminate();},\
+            []{CFG_TA_BREAKPOINT();},\
             #name, __FILE__, __LINE__>\
         >\
     >{})) {} \
@@ -473,7 +472,7 @@
     /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
     ~::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__>(\
         [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(__VA_ARGS__);},\
-        []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
+        []{CFG_TA_BREAKPOINT();}\
     )\
     .DETAIL_TA_ADD_EXTRAS
 
@@ -2361,6 +2360,9 @@ namespace ta_test
         // This in the context stack means that a `TA_MUST_THROW(...)` is currently executing.
         struct MustThrowInfo : context::BasicFrame
         {
+            // You can set this to true to trigger a breakpoint.
+            mutable bool should_break = false;
+
             // Never null.
             const MustThrowStaticInfo *static_info = nullptr;
             // Never null.
@@ -3503,7 +3505,8 @@ namespace ta_test
 
             void Run() const override
             {
-                P({}/* Name tag. */);
+                // `{}` is for the name tag.
+                P({});
             }
 
             void Breakpoint() const override

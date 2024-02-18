@@ -4,22 +4,15 @@
 
 #include <taut/taut.hpp>
 
-int GenerateSign()
-{
-    return TA_GENERATE(sign, ta_test::new_value_when_revisiting, {-1, 0, 1});
-}
-
 TA_TEST(foo/test)
 {
-    std::cerr << std::format("{} {}\n", GenerateSign(), GenerateSign());
+    TA_CHECK(false);
 }
 
 int main(int argc, char **argv)
 {
     return ta_test::RunSimple(argc, argv);
 }
-
-// Not now? -- Move `mutable bool should_break` to a saner location, don't keep it in the context? Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
 
 // TESTS!!
 
@@ -35,6 +28,9 @@ int main(int argc, char **argv)
 //     Migrate to `std::source_location` everywhere! Or in v2?
 
 // Introduction and license in headers? Maybe not the license? A short introduction in modules.hpp too.
+
+// Documentation!
+//     Document configuring different IDEs/debuggers.
 
 // v0.2:
 //     Optionally no exceptions
@@ -103,6 +99,7 @@ int main(int argc, char **argv)
 //         * No comma weirdness in macros
 //         * Strong assertions throw rather than using `return`.
 //         * hard/soft enum is passed to assertions at runtime.
+//         * Good automatic breakpoints! Do other frameworks do that?
 //     * Clickthrough everywhere (i.e. file paths everywhere, that should be clickable in an IDE)
 //     * Tests in headers = bad practice, but we support it without code duplication, but still check if the test names clash (different source locations)
 //         * Compare with what gtest and catch2 do.
@@ -647,6 +644,17 @@ strictness of identifiers:
     Must immediately report bad names:
         test names
         all generator macros
+
+breakpoints?
+    TA_CHECK
+        if condition is false
+        if exception falls out (only visible in debugger with `--catch`)
+    TA_MUST_THROW
+        if exception is missing
+    TA_TEST
+        if exception falls out (only visible in debugger with `--catch`)
+        after any test failure (after continuing after a failure)
+
 
 ---------------
 

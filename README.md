@@ -11,6 +11,15 @@ This is a WIP testing framework, nothing to see here yet.
 
 **T**aut is **a** **u**nit **t**est framework[*](https://en.wikipedia.org/wiki/Recursive_acronym) for modern C++. It prioritizes having a clean API (exactly one way of doing things) and good diagnostics, and uses a new kind of assertion syntax.
 
+## Usage
+
+### Debugging tips
+
+#### CodeLLDB
+
+* Set "Disassembly" to "never" (on the bottom panel, or `"lldb.showDisassembly": "never",` in `settings.json`), to avoid manually having to skip uninteresting assembly stack frames.
+* Disable `on throw` and `on catch` in 'Breakpoints' to only break on uncaught exceptions.
+
 ---
 
 ### Platform quirks

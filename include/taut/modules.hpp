@@ -232,8 +232,7 @@ namespace ta_test
         virtual void OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept {(void)test; (void)assertion; (void)e;}
 
         // This is called when `TA_MUST_THROW` doesn't throw an exception.
-        // If `should_break` ends up true (it's false by default), then a breakpoint at the call site will be triggered.
-        virtual void OnMissingException(const data::MustThrowInfo &data, bool &should_break) noexcept {(void)data; (void)should_break;}
+        virtual void OnMissingException(const data::MustThrowInfo &data) noexcept {(void)data;}
 
         // --- MISC ---
 
@@ -1752,7 +1751,7 @@ namespace ta_test
             std::string chars_exception_contents = "While analyzing exception:";
             std::string chars_throw_location = "Thrown here:";
 
-            void OnMissingException(const data::MustThrowInfo &data, bool &should_break) noexcept override;
+            void OnMissingException(const data::MustThrowInfo &data) noexcept override;
             bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept override;
 
             CFG_TA_API void PrintFrame(
@@ -1791,7 +1790,7 @@ namespace ta_test
             CFG_TA_API bool IsDebuggerAttached() const;
             void OnAssertionFailed(const data::BasicAssertionInfo &data) noexcept override;
             void OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept override;
-            void OnMissingException(const data::MustThrowInfo &data, bool &should_break) noexcept override;
+            void OnMissingException(const data::MustThrowInfo &data) noexcept override;
             void OnPreTryCatch(bool &should_catch) noexcept override;
             void OnPostRunSingleTest(const data::RunSingleTestResults &data) noexcept override;
         };
