@@ -2,7 +2,7 @@
 #include <iostream>
 #include <deque>
 
-#include "testlib.h"
+#include <taut/taut.hpp>
 
 int GenerateSign()
 {
@@ -19,9 +19,6 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Remove the BasicModule from the header somehow.
-// Split the runner (with all modules) into a separate header? Including most utility functions too.
-
 // Not now? -- Move `mutable bool should_break` to a saner location, don't keep it in the context? Review it in all locations (TA_CHECK, TA_MUST_THROW, etc).
 
 // TESTS!!
@@ -36,6 +33,8 @@ int main(int argc, char **argv)
 // Add CMakeLists.txt!
 
 //     Migrate to `std::source_location` everywhere! Or in v2?
+
+// Introduction and license in headers? Maybe not the license? A short introduction in modules.hpp too.
 
 // v0.2:
 //     Optionally no exceptions
@@ -132,7 +131,7 @@ int main(int argc, char **argv)
     Reject duplicate keys in sets and maps
     Reject spaces before and after:
         scalars
-        strings
+        strings, chars
         containers
     Containers:
         empty containers
@@ -143,8 +142,9 @@ int main(int argc, char **argv)
         how many chars we consume in the escape sequences
         reject large escapes (note that \0xx and \x should not produce multibyte chars?)
         uppercase and lowercase hex
-        `char` should reject multibyte characters. And even characters with codes > 0x7f.
-        `char` should reject empty literals: ''.
+        single `char`:
+            reject multibyte characters. And even characters with codes > 0x7f.
+            reject empty literals: ''.
 
 --- Expression colorizer
 
@@ -194,6 +194,11 @@ Non-zero exit code when all tests are skipped, or none are registered
 Test both shared and static library builds.
     Static library only once, and prefer shared for all tests.
     On Linux also add `-fvisibility-hidden` to catch missing `CFG_TA_API` calls.
+
+Big-ass test:
+    with different macro values
+        CFG_TA_FMT_HAS_FILE_VPRINT=0
+        CFG_TA_FMT_HAS_RANGE_FORMAT=0
 
 TA_TEST
     Name validation

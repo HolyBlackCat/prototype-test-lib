@@ -2,7 +2,8 @@
 #define CFG_TA_API __declspec(dllexport)
 #endif
 
-#include "testlib.h"
+#include <taut/taut.hpp>
+#include <taut/modules.hpp>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -59,6 +60,231 @@ bool ta_test::IsFailing()
 {
     auto &thread_state = detail::ThreadState();
     return thread_state.current_test && thread_state.current_test->failed;
+}
+
+void ta_test::text::escape::EscapeString(std::string_view source, std::string &output, bool double_quotes)
+{
+    output += "'\""[double_quotes];
+
+    for (char signed_ch : source)
+    {
+        unsigned char ch = (unsigned char)signed_ch;
+
+        bool should_escape = (ch < ' ') || ch == 0x7f || (ch == (double_quotes ? '"' : '\''));
+
+        if (!should_escape)
+        {
+            output += signed_ch;
+            continue;
+        }
+
+        switch (ch)
+        {
+            case '\0': output += '\\'; output += '0'; break;
+            case '\'': output += '\\'; output += '\''; break;
+            case '\"': output += '\\'; output += '"'; break;
+            case '\\': output += '\\'; output += '\\'; break;
+            case '\a': output += '\\'; output += 'a'; break;
+            case '\b': output += '\\'; output += 'b'; break;
+            case '\f': output += '\\'; output += 'f'; break;
+            case '\n': output += '\\'; output += 'n'; break;
+            case '\r': output += '\\'; output += 'r'; break;
+            case '\t': output += '\\'; output += 't'; break;
+            case '\v': output += '\\'; output += 'v'; break;
+
+          default:
+            // The syntax with braces is from C++23. Without braces the escapes could consume extra characters on the right.
+            // Octal escapes don't do that, but they're just inherently ugly.
+            char buffer[7]; // 7 bytes for: \ x { N N } \0
+            std::snprintf(buffer, sizeof buffer, "\\x{%02x}", ch);
+            for (char *ptr = buffer; *ptr;)
+                output += *ptr++;
+            break;
+        }
+    }
+
+    output += "'\""[double_quotes];
+}
+
+std::string ta_test::text::escape::UnescapeString(const char *&source, std::string &output, char quote_char, bool only_single_char)
+{
+    // Consumes digits for an escape sequence.
+    // If `hex == true` those are hex digits, otherwise octal.
+    // `max_digits` is how many digits we can consume, or `-1` to consume as many as possible, or `-2` to wait for a `}`.
+    // `max_value` is the max value we're allowing, inclusive.
+    // Writes the resulting number to `result`. Returns the error on failure, or an empty string on success.
+    auto ConsumeDigits = [&] CFG_TA_NODISCARD_LAMBDA (char32_t &result, bool hex, int max_digits, char32_t max_value) -> std::string
+    {
+        result = 0;
+
+        int i = 0;
+        while (true)
+        {
+            bool is_digit = false;
+            bool is_decimal = false;
+            bool is_hex_lowercase = false;
+            bool is_hex_uppercase = false;
+
+            if (hex)
+            {
+                is_digit =
+                    (is_decimal = *source >= '0' && *source <= '9') ||
+                    (is_hex_lowercase = *source >= 'a' && *source <= 'f') ||
+                    (is_hex_uppercase = *source >= 'A' && *source <= 'F');
+            }
+            else
+            {
+                is_decimal = true;
+                is_digit = *source >= '0' && *source <= '7';
+            }
+
+            if (!is_digit)
+            {
+                if (max_digits < 0 && i > 0)
+                    break;
+                else
+                    return CFG_TA_FMT_NAMESPACE::format("Expected {} digit in escape sequence.", hex ? "hexadecimal" : "octal");
+            }
+
+            char32_t new_result = result * (hex ? 16 : 8) + char32_t(is_decimal ? *source - '0' : is_hex_lowercase ? *source - 'a' + 10 : *source - 'A' + 10);
+            if (new_result > max_value)
+                return "Escape sequence is out of range.";
+
+            result = new_result;
+
+            source++;
+            i++;
+            if (i == max_digits)
+                break;
+        }
+
+        if (max_digits == -2)
+        {
+            if (*source != '}')
+                return "Expected `}` to close the escape sequence.";
+            source++;
+        }
+
+        return "";
+    };
+
+    if (quote_char)
+    {
+        if (*source != quote_char)
+            return CFG_TA_FMT_NAMESPACE::format("Expected opening `{}`.", quote_char);
+        source++;
+    }
+
+    std::size_t char_counter = 0;
+
+    while (*source != '\0' && *source != quote_char)
+    {
+        char_counter++;
+        if (only_single_char && char_counter == 2)
+            break;
+
+        if (*source != '\\')
+        {
+            output += *source++;
+            continue;
+        }
+        source++;
+
+        switch (*source++)
+        {
+            case 'N': source--; return "Named character escapes are not supported.";
+
+            case '\'': output += '\''; break;
+            case '"':  output += '"';  break;
+            case '\\': output += '\\'; break;
+            case 'a':  output += '\a'; break;
+            case 'b':  output += '\b'; break;
+            case 'f':  output += '\f'; break;
+            case 'n':  output += '\n'; break;
+            case 'r':  output += '\r'; break;
+            case 't':  output += '\t'; break;
+            case 'v':  output += '\v'; break;
+
+          case 'o':
+            {
+                if (*source != '{')
+                    return "Expected `{` to begin the escape sequence.";
+                source++;
+                char32_t n = 0;
+                if (auto error = ConsumeDigits(n, false, -2, 0xff); !error.empty())
+                    return error;
+                output += char(n);
+            }
+            break;
+
+          case 'x':
+            {
+                char32_t n = 0;
+                if (*source == '{')
+                {
+                    source++;
+                    if (auto error = ConsumeDigits(n, true, -2, 0xff); !error.empty())
+                        return error;
+                }
+                else
+                {
+                    if (auto error = ConsumeDigits(n, true, -1, 0xff); !error.empty())
+                        return error;
+                }
+                output += char(n);
+            }
+            break;
+
+          case 'u':
+          case 'U':
+            {
+                char32_t n = 0;
+                if (*source == '{')
+                {
+                    source++;
+                    if (auto error = ConsumeDigits(n, true, -2, uni::max_char_value); !error.empty())
+                        return error;
+                }
+                else
+                {
+                    if (auto error = ConsumeDigits(n, true, source[-1] == 'u' ? 4 : 8, uni::max_char_value); !error.empty())
+                        return error;
+                }
+
+                char buffer[uni::max_char_len];
+                std::size_t len = uni::EncodeCharToBuffer(n, buffer);
+                if (only_single_char && n > 0x7f)
+                    return "Escape sequence is too large for this character type.";
+                for (std::size_t i = 0; i < len; i++)
+                    output += buffer[i];
+            }
+            break;
+
+          default:
+            source--;
+            if (*source >= '0' && *source <= '7')
+            {
+                char32_t n = 0;
+                if (auto error = ConsumeDigits(n, false, 3, 0xff); !error.empty())
+                    return error;
+                output += char(n);
+                break;
+            }
+            return "Invalid escape sequence.";
+        }
+    }
+
+    if (only_single_char && char_counter == 0)
+        return "Expected a character.";
+
+    if (quote_char)
+    {
+        if (*source != quote_char)
+            return CFG_TA_FMT_NAMESPACE::format("Expected closing `{}`.", quote_char);
+        source++;
+    }
+
+    return "";
 }
 
 ta_test::text::Demangler::Demangler() {}
@@ -156,8 +382,8 @@ std::string ta_test::string_conv::DefaultToStringTraits<ta_test::AssertFlags>::o
 
 std::string ta_test::string_conv::DefaultFallbackToStringTraits<char>::operator()(char value) const
 {
-    char ret[12]; // Should be at most 9: `'\x{??}'\0`, but throwing in a little extra space.
-    *text::escape::EscapeString({&value, 1}, ret, false) = '\0';
+    std::string ret; // If you decide to change this to a fixed buffer, this should be at most 9 characters: `'\x{??}'\0`.
+    text::escape::EscapeString({&value, 1}, ret, false);
     return ret;
 }
 
@@ -165,7 +391,7 @@ std::string ta_test::string_conv::DefaultFallbackToStringTraits<std::string_view
 {
     std::string ret;
     ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-    text::escape::EscapeString(value, std::back_inserter(ret), true);
+    text::escape::EscapeString(value, ret, true);
     return ret;
 }
 
@@ -176,7 +402,14 @@ std::string ta_test::string_conv::DefaultToStringTraits<std::type_index>::operat
 
 std::string ta_test::string_conv::DefaultFromStringTraits<char>::operator()(char &target, const char *&string) const
 {
-    return text::escape::UnescapeString(string, '\'', &target, true);
+    std::string output;
+    std::string error = text::escape::UnescapeString(string, output, '\'', true);
+    if (!error.empty())
+        return error;
+    if (output.size() != 1)
+        HardError("Expected to get exactly one character.");
+    target = output.front();
+    return error; // This is empty here, but still returning it for NRVO.
 }
 
 std::string ta_test::string_conv::DefaultFromStringTraits<std::nullptr_t>::operator()(std::nullptr_t &target, const char *&string) const
@@ -203,6 +436,8 @@ std::string ta_test::string_conv::DefaultFromStringTraits<std::nullptr_t>::opera
 
     return "Expected one of: `nullptr`, `0x0`, `0`.";
 }
+
+
 
 ta_test::context::Context ta_test::context::CurrentContext()
 {
@@ -280,7 +515,7 @@ void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<
 
     for (auto *m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicModule::OnExplainException>())
     {
-        std::optional<BasicModule::ExplainedException> opt;
+        std::optional<data::ExplainedException> opt;
         try
         {
             opt = m->OnExplainException(e);
@@ -307,7 +542,7 @@ void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<
     func({});
 }
 
-std::string ta_test::BasicModule::BasicGenerator::GetTypeName() const
+std::string ta_test::data::BasicGenerator::GetTypeName() const
 {
     // This can return one of the two possible forms.
     // For sufficiently simple types, we just return `[const] [volatile] Type [&[&]]`.
@@ -361,7 +596,7 @@ std::string ta_test::BasicModule::BasicGenerator::GetTypeName() const
     return ret;
 }
 
-ta_test::BasicModule::BasicGenerator::OverrideStatus ta_test::BasicModule::BasicGenerator::RunGeneratorOverride()
+ta_test::data::BasicGenerator::OverrideStatus ta_test::data::BasicGenerator::RunGeneratorOverride()
 {
     if (overriding_module)
     {
@@ -376,8 +611,8 @@ ta_test::BasicModule::BasicGenerator::OverrideStatus ta_test::BasicModule::Basic
     }
 }
 
-ta_test::BasicModule::CaughtExceptionContext::CaughtExceptionContext(
-    std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, BasicModule::SourceLoc source_loc
+ta_test::data::CaughtExceptionContext::CaughtExceptionContext(
+    std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, data::SourceLoc source_loc
 )
     : FrameGuard([&]() -> std::shared_ptr<const CaughtExceptionContext>
     {
@@ -1145,7 +1380,7 @@ void ta_test::BasicPrintingModule::PrintNote(output::Terminal::StyleGuard &cur_s
 
 void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
 {
-    const BasicModule::BasicAssertionInfo *cur = ThreadState().current_assertion;
+    const data::BasicAssertionInfo *cur = ThreadState().current_assertion;
 
     while (cur)
     {
@@ -1169,7 +1404,7 @@ bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
         HardError("The assertion being evaluated is not on the top of the assertion stack.");
 
     // Increment total checks counter.
-    const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_total++;
+    const_cast<data::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_total++;
 
     bool should_catch = true;
     thread_state.current_test->all_tests->modules->Call<&BasicModule::OnPreTryCatch>(should_catch);
@@ -1231,7 +1466,7 @@ bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
     if (!self.condition_value_known || !self.condition_value)
     {
         // Increment failed checks counter.
-        const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
+        const_cast<data::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
 
         // Stop the test.
         if (!bool(self.flags & AssertFlags::soft))
@@ -1241,7 +1476,7 @@ bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
     return self.condition_value_known && self.condition_value;
 }
 
-const ta_test::BasicModule::SourceLoc &ta_test::detail::BasicAssertWrapper::SourceLocation() const
+const ta_test::data::SourceLoc &ta_test::detail::BasicAssertWrapper::SourceLocation() const
 {
     return source_loc;
 }
@@ -1305,8 +1540,8 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
         if (it->first == name)
         {
             // This test is already registered. Make sure it comes from the same source file and line, then stop.
-            BasicModule::SourceLoc old_loc = state.tests[it->second]->Location();
-            BasicModule::SourceLoc new_loc = singleton->Location();
+            data::SourceLoc old_loc = state.tests[it->second]->Location();
+            data::SourceLoc new_loc = singleton->Location();
             if (new_loc != old_loc)
             {
                 HardError(CFG_TA_FMT_NAMESPACE::format(
@@ -1394,7 +1629,7 @@ ta_test::detail::SpecificGeneratorGenerateGuard::~SpecificGeneratorGenerateGuard
     }
 }
 
-ta_test::detail::GenerateValueHelper::GenerateValueHelper(BasicModule::SourceLocWithCounter source_loc)
+ta_test::detail::GenerateValueHelper::GenerateValueHelper(data::SourceLocWithCounter source_loc)
     : source_loc(source_loc)
 {
     if (ThreadState().current_test->currently_in_generator)
@@ -1433,7 +1668,7 @@ ta_test::detail::GenerateValueHelper::~GenerateValueHelper()
             else
             {
                 // Post callback.
-                BasicModule::GeneratorCallInfo callback_data{
+                data::GeneratorCallInfo callback_data{
                     .test = thread_state.current_test,
                     .generator = untyped_generator,
                     .generating_new_value = generating_new_value,
@@ -1528,13 +1763,13 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator()
     {
         switch (untyped_generator->RunGeneratorOverride())
         {
-          case BasicModule::BasicGenerator::OverrideStatus::no_override:
+          case data::BasicGenerator::OverrideStatus::no_override:
             untyped_generator->Generate();
             break;
-          case BasicModule::BasicGenerator::OverrideStatus::success:
+          case data::BasicGenerator::OverrideStatus::success:
             // Nothing.
             break;
-          case BasicModule::BasicGenerator::OverrideStatus::no_more_values:
+          case data::BasicGenerator::OverrideStatus::no_more_values:
             if (creating_new_generator)
             {
                 if (bool(untyped_generator->GetFlags() & GeneratorFlags::interrupt_test_if_empty))
@@ -1598,11 +1833,11 @@ const std::vector<ta_test::SingleException> &ta_test::detail::GetEmptyExceptionL
 }
 
 ta_test::CaughtException::CaughtException(
-    const BasicModule::MustThrowStaticInfo *static_info,
-    std::weak_ptr<const BasicModule::MustThrowDynamicInfo> dynamic_info,
+    const data::MustThrowStaticInfo *static_info,
+    std::weak_ptr<const data::MustThrowDynamicInfo> dynamic_info,
     const std::exception_ptr &e
 )
-    : state(std::make_shared<BasicModule::CaughtExceptionInfo>())
+    : state(std::make_shared<data::CaughtExceptionInfo>())
 {
     state->static_info = static_info;
     state->dynamic_info = std::move(dynamic_info);
@@ -1629,7 +1864,7 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
         HardError("Attempted to use `TA_MUST_THROW(...)`, but no test is currently running.", HardErrorKind::user);
 
     // Increment total checks counter.
-    const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_total++;
+    const_cast<data::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_total++;
 
     try
     {
@@ -1640,7 +1875,7 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
     {
         return CaughtException(
             self.info->info.static_info,
-            std::shared_ptr<const BasicModule::MustThrowDynamicInfo>{self.info, self.info->info.dynamic_info},
+            std::shared_ptr<const data::MustThrowDynamicInfo>{self.info, self.info->info.dynamic_info},
             std::current_exception()
         );
     }
@@ -1662,7 +1897,7 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
         self.break_func();
 
     // Increment failed checks counter.
-    const_cast<BasicModule::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
+    const_cast<data::RunTestsProgress *>(thread_state.current_test->all_tests)->num_checks_failed++;
 
     // If there's no exception in soft mode, return an empty list of exceptions (but not a null instance, that's handled differently).
     // The resulting instance should silently pass all checks, unlike a true null instance, which should fail all checks.
@@ -1670,13 +1905,17 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
     {
         return CaughtException(
             self.info->info.static_info,
-            std::shared_ptr<const BasicModule::MustThrowDynamicInfo>{self.info, self.info->info.dynamic_info},
+            std::shared_ptr<const data::MustThrowDynamicInfo>{self.info, self.info->info.dynamic_info},
             nullptr
         );
     }
 
     throw InterruptTestException{};
 }
+
+// Must define those at a point where `BasicModule` is visible, otherwise we get a compilation error.
+ta_test::ModulePtr::ModulePtr() {}
+ta_test::ModulePtr::~ModulePtr() {}
 
 void ta_test::Runner::SetDefaultModules()
 {
@@ -1833,7 +2072,7 @@ int ta_test::Runner::Run()
         state.SortTestListInExecutionOrder(ordered_tests);
     }
 
-    BasicModule::RunTestsResults results;
+    data::RunTestsResults results;
     results.modules = &module_lists;
     results.num_tests = ordered_tests.size();
     results.num_tests_with_skipped = state.tests.size();
@@ -1845,7 +2084,7 @@ int ta_test::Runner::Run()
         const detail::BasicTest *test = state.tests[test_index];
 
         // This stores the generator stack between iterations.
-        std::vector<std::unique_ptr<const BasicModule::BasicGenerator>> next_generator_stack;
+        std::vector<std::unique_ptr<const data::BasicGenerator>> next_generator_stack;
 
         // Whether any of the repetitions have failed.
         bool any_repetition_failed = false;
@@ -1855,7 +2094,7 @@ int ta_test::Runner::Run()
         {
             struct StateGuard
             {
-                BasicModule::RunSingleTestResults state;
+                data::RunSingleTestResults state;
                 StateGuard() {detail::ThreadState().current_test = &state;}
                 StateGuard(const StateGuard &) = delete;
                 StateGuard &operator=(const StateGuard &) = delete;
@@ -1951,15 +2190,15 @@ int ta_test::Runner::Run()
 
                         try
                         {
-                            switch (const_cast<BasicModule::BasicGenerator &>(this_generator).RunGeneratorOverride())
+                            switch (const_cast<data::BasicGenerator &>(this_generator).RunGeneratorOverride())
                             {
-                              case BasicModule::BasicGenerator::OverrideStatus::no_override:
+                              case data::BasicGenerator::OverrideStatus::no_override:
                                 should_pop = this_generator.IsLastValue();
                                 break;
-                              case BasicModule::BasicGenerator::OverrideStatus::success:
+                              case data::BasicGenerator::OverrideStatus::success:
                                 // Nothing.
                                 break;
-                              case BasicModule::BasicGenerator::OverrideStatus::no_more_values:
+                              case data::BasicGenerator::OverrideStatus::no_more_values:
                                 should_pop = true;
                                 break;
                             }
@@ -2017,6 +2256,40 @@ int ta_test::Runner::Run()
     module_lists.Call<&BasicModule::OnPostRunTests>(results);
 
     return results.failed_tests.size() > 0 ? int(ExitCode::test_failed) : 0;
+}
+
+void ta_test::Runner::SetOutputStream(FILE *stream) const
+{
+    SetTerminalSettings([&](output::Terminal &terminal)
+    {
+        terminal = output::Terminal(stream);
+    });
+}
+
+void ta_test::Runner::SetEnableColor(bool enable) const
+{
+    SetTerminalSettings([&](output::Terminal &terminal)
+    {
+        terminal.enable_color = enable;
+    });
+}
+
+void ta_test::Runner::SetEnableUnicode(bool enable) const
+{
+    for (const auto &m : modules)
+    {
+        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+            base->EnableUnicode(enable);
+    }
+}
+
+void ta_test::Runner::SetTerminalSettings(std::function<void(output::Terminal &terminal)> func) const
+{
+    for (const auto &m : modules)
+    {
+        if (auto base = dynamic_cast<BasicPrintingModule *>(m.get()))
+            func(base->terminal);
+    }
 }
 
 // --- modules::BasicExceptionContentsPrinter ---
@@ -2147,7 +2420,7 @@ std::vector<ta_test::flags::BasicFlag *> ta_test::modules::TestSelector::GetFlag
     return {&flag_include, &flag_exclude};
 }
 
-void ta_test::modules::TestSelector::OnFilterTest(const BasicTestInfo &test, bool &enable) noexcept
+void ta_test::modules::TestSelector::OnFilterTest(const data::BasicTestInfo &test, bool &enable) noexcept
 {
     if (patterns.empty())
         return;
@@ -2200,7 +2473,7 @@ ta_test::flags::StringFlag::Callback ta_test::modules::TestSelector::GetFlagCall
     };
 }
 
-void ta_test::modules::TestSelector::OnPreRunTests(const RunTestsInfo &data) noexcept
+void ta_test::modules::TestSelector::OnPreRunTests(const data::RunTestsInfo &data) noexcept
 {
     (void)data;
 
@@ -2320,13 +2593,13 @@ std::vector<ta_test::flags::BasicFlag *> ta_test::modules::GeneratorOverrider::G
     return {&flag_override, &flag_local_help};
 }
 
-void ta_test::modules::GeneratorOverrider::OnPreRunTests(const RunTestsInfo &data) noexcept
+void ta_test::modules::GeneratorOverrider::OnPreRunTests(const data::RunTestsInfo &data) noexcept
 {
     (void)data;
     test_state = {};
 }
 
-void ta_test::modules::GeneratorOverrider::OnPostRunTests(const RunTestsResults &data) noexcept
+void ta_test::modules::GeneratorOverrider::OnPostRunTests(const data::RunTestsResults &data) noexcept
 {
     (void)data;
 
@@ -2443,7 +2716,7 @@ void ta_test::modules::GeneratorOverrider::OnPostRunTests(const RunTestsResults 
     }
 }
 
-void ta_test::modules::GeneratorOverrider::OnPostRunSingleTest(const RunSingleTestResults &data) noexcept
+void ta_test::modules::GeneratorOverrider::OnPostRunSingleTest(const data::RunSingleTestResults &data) noexcept
 {
     if (data.is_last_generator_repetition && test_state)
     {
@@ -2451,7 +2724,7 @@ void ta_test::modules::GeneratorOverrider::OnPostRunSingleTest(const RunSingleTe
     }
 }
 
-bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const RunSingleTestProgress &test, const BasicGenerator &generator) noexcept
+bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const data::RunSingleTestProgress &test, const data::BasicGenerator &generator) noexcept
 {
     // If we don't have an active `--generate` flag, try to find one.
     if (!test_state)
@@ -2501,7 +2774,7 @@ bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const Run
     return false;
 }
 
-bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTestProgress &test, BasicGenerator &generator) noexcept
+bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const data::RunSingleTestProgress &test, data::BasicGenerator &generator) noexcept
 {
     if (!test_state)
         HardError("A generator override is requested, but we don't have an active state.");
@@ -2747,7 +3020,7 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const RunSingleTe
     }
 }
 
-void ta_test::modules::GeneratorOverrider::OnPrePruneGenerator(const RunSingleTestProgress &test) noexcept
+void ta_test::modules::GeneratorOverrider::OnPrePruneGenerator(const data::RunSingleTestProgress &test) noexcept
 {
     if (test.generator_stack.back()->OverridingModule() == this)
     {
@@ -3223,7 +3496,7 @@ ta_test::modules::ProgressPrinter::GeneratorValueShortener::GeneratorValueShorte
 
 void ta_test::modules::ProgressPrinter::PrintContextLinePrefix(
     output::Terminal::StyleGuard &cur_style,
-    const RunTestsProgress &all_tests,
+    const data::RunTestsProgress &all_tests,
     TestCounterStyle test_counter_style
 ) const
 {
@@ -3306,7 +3579,9 @@ void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(output::Term
         terminal.Print("{}", chars_indentation);
 }
 
-void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(output::Terminal::StyleGuard &cur_style, const RunSingleTestProgress &test, const BasicGenerator &generator, bool repeating_info)
+void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(
+    output::Terminal::StyleGuard &cur_style, const data::RunSingleTestProgress &test, const data::BasicGenerator &generator, bool repeating_info
+)
 {
     PrintContextLinePrefix(cur_style, *test.all_tests, state.per_test.per_repetition.printed_counter ? TestCounterStyle::none : TestCounterStyle::repeated);
 
@@ -3429,13 +3704,13 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(output::Terminal::Sty
     terminal.Print("\n");
 }
 
-std::string ta_test::modules::ProgressPrinter::MakeGeneratorSummary(const RunSingleTestProgress &test) const
+std::string ta_test::modules::ProgressPrinter::MakeGeneratorSummary(const data::RunSingleTestProgress &test) const
 {
     std::string ret;
 
     for (std::size_t i = 0; i < test.generator_index; i++)
     {
-        const BasicGenerator &gen = *test.generator_stack[i];
+        const data::BasicGenerator &gen = *test.generator_stack[i];
 
         // Print the value as a string.
         if (gen.ValueConvertibleToString() && gen.ValueConvertibleFromString())
@@ -3537,7 +3812,7 @@ void ta_test::modules::ProgressPrinter::EnableUnicode(bool enable)
     }
 }
 
-void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data) noexcept
+void ta_test::modules::ProgressPrinter::OnPreRunTests(const data::RunTestsInfo &data) noexcept
 {
     state = {};
 
@@ -3561,7 +3836,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunTests(const RunTestsInfo &data) 
     }
 }
 
-void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &data) noexcept
+void ta_test::modules::ProgressPrinter::OnPostRunTests(const data::RunTestsResults &data) noexcept
 {
     if (!data.failed_tests.empty())
     {
@@ -3576,7 +3851,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
         std::size_t prefix_width = text::uni::CountFirstBytes(chars_test_prefix);
 
         // Determine how much space to leave for the test name tree.
-        for (const BasicTestInfo *test : data.failed_tests)
+        for (const data::BasicTestInfo *test : data.failed_tests)
         {
             std::string_view test_name = test->Name();
 
@@ -3593,7 +3868,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
         }
 
         std::vector<std::string_view> stack;
-        for (const BasicTestInfo *test : data.failed_tests)
+        for (const data::BasicTestInfo *test : data.failed_tests)
         {
             ProduceTree(stack, test->Name(), [&](std::size_t segment_index, std::string_view segment, bool is_last_segment)
             {
@@ -3639,7 +3914,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const RunTestsResults &da
     state = {};
 }
 
-void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data) noexcept
+void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const data::RunSingleTestInfo &data) noexcept
 {
     // Reset the state.
     if (data.is_first_generator_repetition)
@@ -3697,7 +3972,7 @@ void ta_test::modules::ProgressPrinter::OnPreRunSingleTest(const RunSingleTestIn
     }
 }
 
-void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestResults &data) noexcept
+void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const data::RunSingleTestResults &data) noexcept
 {
     auto cur_style = terminal.MakeStyleGuard();
 
@@ -3841,7 +4116,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const RunSingleTestR
     }
 }
 
-void ta_test::modules::ProgressPrinter::OnPostGenerate(const GeneratorCallInfo &data) noexcept
+void ta_test::modules::ProgressPrinter::OnPostGenerate(const data::GeneratorCallInfo &data) noexcept
 {
     if (show_progress)
     {
@@ -3851,7 +4126,7 @@ void ta_test::modules::ProgressPrinter::OnPostGenerate(const GeneratorCallInfo &
     }
 }
 
-void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgress &data) noexcept
+void ta_test::modules::ProgressPrinter::OnPreFailTest(const data::RunSingleTestProgress &data) noexcept
 {
     // Remember the failed generator stack.
     std::vector<State::PerTest::FailedGenerator> failed_generator_stack;
@@ -3929,7 +4204,7 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const RunSingleTestProgres
 
 // --- modules::ResultsPrinter ---
 
-void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &data) noexcept
+void ta_test::modules::ResultsPrinter::OnPostRunTests(const data::RunTestsResults &data) noexcept
 {
     auto cur_style = terminal.MakeStyleGuard();
 
@@ -4036,7 +4311,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const RunTestsResults &dat
 
 // --- modules::AssertionPrinter ---
 
-void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionInfo &data) noexcept
+void ta_test::modules::AssertionPrinter::OnAssertionFailed(const data::BasicAssertionInfo &data) noexcept
 {
     auto cur_style = terminal.MakeStyleGuard();
     output::PrintLog(cur_style);
@@ -4046,7 +4321,7 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const BasicAssertionI
 
 bool ta_test::modules::AssertionPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept
 {
-    if (auto assertion_frame = dynamic_cast<const BasicAssertionInfo *>(&frame))
+    if (auto assertion_frame = dynamic_cast<const data::BasicAssertionInfo *>(&frame))
     {
         PrintAssertionFrameLow(cur_style, *assertion_frame, false);
         return true;
@@ -4055,7 +4330,7 @@ bool ta_test::modules::AssertionPrinter::PrintContextFrame(output::Terminal::Sty
     return false;
 }
 
-void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const BasicAssertionInfo &data, bool is_most_nested) const
+void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const data::BasicAssertionInfo &data, bool is_most_nested) const
 {
     output::TextCanvas canvas(&common_data);
     std::size_t line_counter = 0;
@@ -4088,7 +4363,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
     line_counter++;
 
     // This is set later if we actually have an expression to print.
-    const BasicModule::BasicAssertionExpr *expr = nullptr;
+    const data::BasicAssertionExpr *expr = nullptr;
     std::size_t expr_line = line_counter;
     std::size_t expr_column = 0; // This is also set later.
 
@@ -4107,15 +4382,15 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
 
             std::visit(meta::Overload{
                 [&](std::monostate) {},
-                [&](const BasicAssertionInfo::DecoFixedString &deco)
+                [&](const data::BasicAssertionInfo::DecoFixedString &deco)
                 {
                     column += canvas.DrawString(line_counter, column, deco.string, assertion_macro_cell_info);
                 },
-                [&](const BasicAssertionInfo::DecoExpr &deco)
+                [&](const data::BasicAssertionInfo::DecoExpr &deco)
                 {
                     column += output::expr::DrawToCanvas(canvas, line_counter, column, deco.string);
                 },
-                [&](const BasicAssertionInfo::DecoExprWithArgs &deco)
+                [&](const data::BasicAssertionInfo::DecoExprWithArgs &deco)
                 {
                     column += common_data.spaces_in_macro_call_parentheses;
                     expr = deco.expr;
@@ -4149,12 +4424,12 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
         for (std::size_t i = 0; i < expr->NumArgs(); i++)
         {
             const std::size_t arg_index = expr->ArgsInDrawOrder()[i];
-            BasicAssertionExpr::ArgState this_state = expr->CurrentArgState(arg_index);
-            const BasicAssertionExpr::ArgInfo &this_info = expr->ArgsInfo()[arg_index];
+            data::BasicAssertionExpr::ArgState this_state = expr->CurrentArgState(arg_index);
+            const data::BasicAssertionExpr::ArgInfo &this_info = expr->ArgsInfo()[arg_index];
 
             bool dim_parentheses = true;
 
-            if (this_state == BasicAssertionExpr::ArgState::in_progress)
+            if (this_state == data::BasicAssertionExpr::ArgState::in_progress)
             {
                 if (num_overline_parts == 0)
                 {
@@ -4176,7 +4451,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
                 num_overline_parts++;
             }
 
-            if (this_state == BasicAssertionExpr::ArgState::done)
+            if (this_state == data::BasicAssertionExpr::ArgState::done)
             {
                 text::uni::Decode(expr->CurrentArgValue(arg_index), this_value);
 
@@ -4270,13 +4545,13 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
 
 // --- modules::LogPrinter
 
-void ta_test::modules::LogPrinter::OnPreRunSingleTest(const RunSingleTestInfo &data) noexcept
+void ta_test::modules::LogPrinter::OnPreRunSingleTest(const data::RunSingleTestInfo &data) noexcept
 {
     (void)data;
     unscoped_log_pos = 0;
 }
 
-void ta_test::modules::LogPrinter::OnPostRunSingleTest(const RunSingleTestResults &data) noexcept
+void ta_test::modules::LogPrinter::OnPostRunSingleTest(const data::RunSingleTestResults &data) noexcept
 {
     // Doing it in both places (before and after a test) is redundant, but doesn't hurt.
     (void)data;
@@ -4331,7 +4606,7 @@ bool ta_test::modules::LogPrinter::PrintLogEntries(output::Terminal::StyleGuard 
 
 // --- modules::ExceptionPrinter ---
 
-void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept
+void ta_test::modules::ExceptionPrinter::OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept
 {
     (void)test;
     (void)assertion;
@@ -4353,7 +4628,7 @@ void ta_test::modules::ExceptionPrinter::OnUncaughtException(const RunSingleTest
 
 // --- modules::MustThrowPrinter ---
 
-void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo &data, bool &should_break) noexcept
+void ta_test::modules::MustThrowPrinter::OnMissingException(const data::MustThrowInfo &data, bool &should_break) noexcept
 {
     (void)should_break;
 
@@ -4366,12 +4641,12 @@ void ta_test::modules::MustThrowPrinter::OnMissingException(const MustThrowInfo 
 
 bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept
 {
-    if (auto ptr = dynamic_cast<const BasicModule::MustThrowInfo *>(&frame))
+    if (auto ptr = dynamic_cast<const data::MustThrowInfo *>(&frame))
     {
         PrintFrame(cur_style, *ptr->static_info, ptr->dynamic_info, nullptr, false);
         return true;
     }
-    if (auto ptr = dynamic_cast<const BasicModule::CaughtExceptionContext *>(&frame))
+    if (auto ptr = dynamic_cast<const data::CaughtExceptionContext *>(&frame))
     {
         PrintFrame(cur_style, *ptr->state->static_info, ptr->state->dynamic_info.lock().get(), ptr, false);
         return true;
@@ -4382,9 +4657,9 @@ bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::Sty
 
 void ta_test::modules::MustThrowPrinter::PrintFrame(
     output::Terminal::StyleGuard &cur_style,
-    const BasicModule::MustThrowStaticInfo &static_info,
-    const BasicModule::MustThrowDynamicInfo *dynamic_info,
-    const BasicModule::CaughtExceptionContext *caught,
+    const data::MustThrowStaticInfo &static_info,
+    const data::MustThrowDynamicInfo *dynamic_info,
+    const data::CaughtExceptionContext *caught,
     bool is_most_nested
 ) const
 {
@@ -4556,13 +4831,13 @@ bool ta_test::modules::DebuggerDetector::IsDebuggerAttached() const
     return platform::IsDebuggerAttached();
 }
 
-void ta_test::modules::DebuggerDetector::OnAssertionFailed(const BasicAssertionInfo &data) noexcept
+void ta_test::modules::DebuggerDetector::OnAssertionFailed(const data::BasicAssertionInfo &data) noexcept
 {
     if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
         data.should_break = true;
 }
 
-void ta_test::modules::DebuggerDetector::OnUncaughtException(const RunSingleTestInfo &test, const BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept
+void ta_test::modules::DebuggerDetector::OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept
 {
     (void)test;
     (void)e;
@@ -4570,7 +4845,7 @@ void ta_test::modules::DebuggerDetector::OnUncaughtException(const RunSingleTest
         assertion->should_break = true;
 }
 
-void ta_test::modules::DebuggerDetector::OnMissingException(const MustThrowInfo &data, bool &should_break) noexcept
+void ta_test::modules::DebuggerDetector::OnMissingException(const data::MustThrowInfo &data, bool &should_break) noexcept
 {
     (void)data;
     if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
@@ -4583,7 +4858,7 @@ void ta_test::modules::DebuggerDetector::OnPreTryCatch(bool &should_catch) noexc
         should_catch = false;
 }
 
-void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const RunSingleTestResults &data) noexcept
+void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const data::RunSingleTestResults &data) noexcept
 {
     if (data.failed && (break_on_failure ? *break_on_failure : IsDebuggerAttached()))
         data.should_break = true;
@@ -4591,7 +4866,7 @@ void ta_test::modules::DebuggerDetector::OnPostRunSingleTest(const RunSingleTest
 
 // --- modules::DebuggerStatePrinter ---
 
-void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const RunTestsInfo &data) noexcept
+void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const data::RunTestsInfo &data) noexcept
 {
     data.modules->FindModule<DebuggerDetector>([this](DebuggerDetector &detector)
     {
