@@ -458,7 +458,7 @@
     inline void _ta_test_func(::ta_test::meta::ConstStringTag<#name>); \
     /* This must be non-inline, because we want to repeat registration for each TU, to detect source location mismatches. */\
     /* But the test body is inline to reduce bloat when tests are in headers. */\
-    [[maybe_unused]] static constexpr auto _ta_registration_helper(::ta_test::meta::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
+    [[maybe_unused]] static constexpr auto _ta_test_registration_helper(::ta_test::meta::ConstStringTag<#name>) -> decltype(void(::std::integral_constant<\
         const std::nullptr_t *, &::ta_test::detail::register_test_helper<\
             ::ta_test::detail::SpecificTest<static_cast<void(*)(\
                 ::ta_test::meta::ConstStringTag<#name>\
@@ -485,7 +485,7 @@
     AddExtras([&](auto &&_ta_add_extras){_ta_add_extras(__VA_ARGS__);})
 
 #define DETAIL_TA_ARG \
-    _ta_assert._ta_handle_arg_(__COUNTER__)
+    _ta_assert._ta_arg_(__COUNTER__)
 
 #define DETAIL_TA_MUST_THROW(macro_name_, str_, ...) \
     /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
@@ -3165,13 +3165,13 @@ namespace ta_test
             CFG_TA_API const data::SourceLoc &SourceLocation() const override;
             CFG_TA_API std::optional<std::string_view> UserMessage() const override;
 
-            virtual ArgWrapper _ta_handle_arg_(int counter) = 0;
+            virtual ArgWrapper _ta_arg_(int counter) = 0;
         };
 
         template <meta::ConstString MacroName, meta::ConstString RawString, meta::ConstString ExpandedString, meta::ConstString FileName, int LineNumber>
         requires
             // Check (at compile-time) that `$[...]` weren't expanded too early by another macro.
-            (RawString.view().find("_ta_handle_arg_(") == std::string_view::npos)
+            (RawString.view().find("_ta_arg_(") == std::string_view::npos)
         struct AssertWrapper : BasicAssertWrapper, data::BasicAssertionExpr
         {
             template <typename F>
@@ -3241,7 +3241,7 @@ namespace ta_test
                     {
                         (void)depth;
 
-                        if (!exiting || name != "_ta_handle_arg_")
+                        if (!exiting || name != "_ta_arg_")
                             return;
 
                         if (pos >= num_args)
@@ -3394,7 +3394,7 @@ namespace ta_test
                 }
             }
 
-            [[nodiscard]] ArgWrapper _ta_handle_arg_(int counter) override
+            [[nodiscard]] ArgWrapper _ta_arg_(int counter) override
             {
                 auto it = std::partition_point(arg_data.counter_to_arg_index.begin(), arg_data.counter_to_arg_index.end(),
                     [&](const CounterIndexPair &pair){return pair.counter < counter;}
