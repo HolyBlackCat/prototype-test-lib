@@ -1202,18 +1202,94 @@ namespace ta_test
 
             // Demangles a name.
             // On GCC ang Clang invokes `__cxa_demangle()`, on MSVC returns the string unchanged.
-            // The returned pointer remains as long as both the passed string and the class instance are alive.
+            // The returned pointer remains valid as long as both the passed string and the class instance are alive.
             // Preserve the class instance between calls to potentially reuse the buffer.
             [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
         };
 
-        // Caches type names produced by `Demangler`.
-        // NOTE: This ignores cvref-qualifiers (because `typeid` does too).
-        template <typename T>
-        [[nodiscard]] const std::string &TypeName()
+        namespace type_name_details
         {
-            static const std::string ret = Demangler{}(typeid(T).name());
-            return ret;
+            template <typename T>
+            constexpr std::string_view RawTypeName() {return CFG_TA_THIS_FUNC_NAME;}
+
+            // This is only valid for `T = int`. Using a template to hopefully prevent redundant calculations.
+            template <typename T = int>
+            constexpr std::size_t prefix_len = RawTypeName<T>().rfind("int");
+
+            // This is only valid for `T = int`. Using a template to hopefully prevent redundant calculations.
+            template <typename T = int>
+            constexpr std::size_t suffix_len = RawTypeName<T>().size() - prefix_len<T> - 3;
+
+            template <std::size_t N>
+            struct BufferAndLen
+            {
+                std::array<char, N> buffer;
+                std::size_t len = 0;
+            };
+
+            template <typename T>
+            constexpr auto storage = []{
+                #ifndef _MSC_VER
+                // On GCC and Clang, return the name as is.
+                constexpr auto raw_name = RawTypeName<T>();
+                std::array<char, raw_name.size() - prefix_len<> - suffix_len<> + 1> ret{};
+                std::copy_n(raw_name.begin() + prefix_len<>, ret.size() - 1, ret.begin());
+                return ret;
+                #else
+                // On MSVC, strip `class ` and some other junk strings.
+                constexpr auto trimmed_name = []{
+                    constexpr auto raw_name = RawTypeName<T>();
+                    BufferAndLen<raw_name.size() - prefix_len<> - suffix_len<> + 1> ret{};
+                    std::copy_n(raw_name.begin() + prefix_len<>, ret.buffer.size() - 1, ret.buffer.begin());
+
+                    std::string_view view(ret.buffer.data(), ret.buffer.size()); // Yes, with the null at the end.
+
+                    auto RemoveTypePrefix = [&](std::string_view to_remove)
+                    {
+                        std::size_t region_start = 0;
+                        std::size_t source_pos = 0;
+                        std::size_t target_pos = 0;
+                        while (true)
+                        {
+                            source_pos = view.find(to_remove, source_pos);
+                            if (source_pos == std::string_view::npos)
+                                break;
+                            if (source_pos == 0 || !chars::IsIdentifierCharStrict(view[source_pos - 1]))
+                            {
+                                std::size_t n = source_pos - region_start;
+                                std::copy_n(view.begin() + region_start, n, ret.buffer.begin() + target_pos);
+                                target_pos += n;
+                                source_pos += to_remove.size();
+                                region_start = source_pos;
+                            }
+                        }
+                        std::size_t n = view.size() - region_start;
+                        std::copy_n(view.begin() + region_start, n, ret.buffer.begin() + target_pos);
+                        target_pos += n;
+                        view = std::string_view(view.data(), target_pos);
+                    };
+
+                    RemoveTypePrefix("struct ");
+                    RemoveTypePrefix("class ");
+                    RemoveTypePrefix("union ");
+                    RemoveTypePrefix("enum ");
+
+                    ret.len = view.size();
+                    return ret;
+                }();
+
+                std::array<char, trimmed_name.len> ret{};
+                std::copy_n(trimmed_name.buffer.begin(), trimmed_name.len, ret.begin());
+                return ret;
+                #endif
+            }();
+        }
+
+        // Returns the type name (using `__PRETTY_FUNCTION__` or `__FUNCSIG__`, depending on the compiler).
+        template <typename T>
+        [[nodiscard]] constexpr std::string_view TypeName()
+        {
+            return std::string_view(type_name_details::storage<T>.data(), type_name_details::storage<T>.size() - 1);
         }
 
         // Parsing C++ expressions.
@@ -2408,26 +2484,10 @@ namespace ta_test
             // The identifier passed to `TA_GENERATE(...)`.
             [[nodiscard]] virtual std::string_view GetName() const = 0;
 
-            // The return type.
-            // Note that `std::type_index` can't encode cvref-qualifiers, see `GetTypeFlags()` for those.
+            // The return type. But without cvref-qualifiers, since `std::type_index` doesn't support those.
             [[nodiscard]] virtual std::type_index GetType() const = 0;
-
-            enum class TypeFlags
-            {
-                unqualified = 0,
-                const_ = 1 << 0,
-                volatile_ = 1 << 1,
-                lvalue_ref = 1 << 2,
-                rvalue_ref = 1 << 3,
-                any_ref = lvalue_ref | rvalue_ref,
-            };
-            DETAIL_TA_FLAG_OPERATORS_IN_CLASS(TypeFlags)
-            using enum TypeFlags;
-            // Returns cvref-qualifiers of the type, since they don't fit into `std::type_index`.
-            [[nodiscard]] virtual TypeFlags GetTypeFlags() const = 0;
-
-            // Demangles the type from `GetType()`, and adds qualifiers from `GetTypeFlags()`.
-            [[nodiscard]] CFG_TA_API std::string GetTypeName() const;
+            // Returns the name of the return type. Unlike `GetType()` this properly reports cvref-qualifiers.
+            [[nodiscard]] virtual std::string_view GetTypeName() const = 0;
 
             // The generator flags.
             [[nodiscard]] virtual GeneratorFlags GetFlags() const = 0;
@@ -2571,13 +2631,10 @@ namespace ta_test
             {
                 return typeid(ReturnType);
             }
-            [[nodiscard]] TypeFlags GetTypeFlags() const override final
+
+            [[nodiscard]] std::string_view GetTypeName() const override final
             {
-                return
-                    TypeFlags::const_ * std::is_const_v<ReturnType> |
-                    TypeFlags::volatile_ * std::is_volatile_v<ReturnType> |
-                    TypeFlags::lvalue_ref * std::is_lvalue_reference_v<ReturnType> |
-                    TypeFlags::rvalue_ref * std::is_rvalue_reference_v<ReturnType>;
+                return text::TypeName<ReturnType>();
             }
 
             [[nodiscard]] bool HasValue() const override final
@@ -2893,7 +2950,7 @@ namespace ta_test
         BasicTrace &AddTemplateTypes()
         {
             if (accept_args)
-                (void(GetArgs().template_args.push_back(text::TypeName<P>())), ...);
+                (void(GetArgs().template_args.push_back(std::string(text::TypeName<P>()))), ...);
             return *this;
         }
         template <typename ...P>

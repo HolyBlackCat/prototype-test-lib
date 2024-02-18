@@ -543,60 +543,6 @@ void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<
     func({});
 }
 
-std::string ta_test::data::BasicGenerator::GetTypeName() const
-{
-    // This can return one of the two possible forms.
-    // For sufficiently simple types, we just return `[const] [volatile] Type [&[&]]`.
-    // But if the type looks complex, we instead replace the type with a placeholder ("T"),
-    // and follow up by `; T = ...` adding the full type name.
-
-    TypeFlags flags = GetTypeFlags();
-
-    std::string ret;
-
-    if (bool(flags & TypeFlags::const_))
-    {
-        if (!ret.empty()) ret += ' ';
-        ret += "const";
-    }
-    if (bool(flags & TypeFlags::volatile_))
-    {
-        if (!ret.empty()) ret += ' ';
-        ret += "volatile";
-    }
-
-    text::Demangler demangler;
-    std::string_view type_name = demangler(GetType().name());
-    bool use_short_form =
-        // Either this is one long template...
-        type_name.ends_with('>') ||
-        // Or one long type name, possibly qualified.
-        std::all_of(type_name.begin(), type_name.end(), [](char ch)
-        {
-            return text::chars::IsIdentifierChar(ch) || ch == ':';
-        });
-    std::string_view long_form_placeholder = "T";
-
-    if (!ret.empty()) ret += ' ';
-    ret += use_short_form ? type_name : long_form_placeholder;
-
-    if (bool(flags & TypeFlags::any_ref))
-    {
-        if (!ret.empty()) ret += ' ';
-        ret += bool(flags & TypeFlags::lvalue_ref) ? "&" : "&&";
-    }
-
-    if (!use_short_form)
-    {
-        ret += "; ";
-        ret += long_form_placeholder;
-        ret += " = ";
-        ret += type_name;
-    }
-
-    return ret;
-}
-
 ta_test::data::BasicGenerator::OverrideStatus ta_test::data::BasicGenerator::RunGeneratorOverride()
 {
     if (overriding_module)

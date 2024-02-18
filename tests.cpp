@@ -6,7 +6,10 @@
 
 TA_TEST(foo/test)
 {
-    TA_CHECK(false);
+    TA_GENERATE_PARAM(auto T, 1, 2u, 3ll)
+    {
+        std::cout << T << '\n';
+    };
 }
 
 int main(int argc, char **argv)
@@ -14,18 +17,15 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
+// Review the API for consistency?
+
 // TESTS!!
 
 // Support all three big compilers!
 
 // Check that paths are clickable in Visual Studio (especially when not at line start)
 
-// Should we transition to __PRETTY_FUNCTION__/__FUNCSIG__-based type names?
-//     Remove the dumb generator logic for adding references to types.
-
 // Add CMakeLists.txt!
-
-//     Migrate to `std::source_location` everywhere! Or in v2?
 
 // Introduction and license in headers? Maybe not the license? A short introduction in modules.hpp too.
 
@@ -46,9 +46,7 @@ int main(int argc, char **argv)
 //     In TA_GENERATE_PARAM, move the fat lambdas to a template IF the parameter kind is unparenthesized.
 
 // Later:
-//     Soft TA_MUST_THROW? (accept AssertFlags somehow?)
-//     For CaughtException interface, something to make the error point directly to the user code.
-//     Column indicators in paths (transition to source_location entirely?)
+//     Column indicators in paths, and transition to source_location entirely?
 
 // Maybe not?
 //     Allow more characters in bracket-less form: `:`, `.`, `->`?
