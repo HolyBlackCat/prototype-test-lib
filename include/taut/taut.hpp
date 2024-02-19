@@ -135,6 +135,16 @@
 #endif
 #endif
 
+// Whether we should clean up type names by removing "class" from them, and other similar strings.
+// This should only be necessary on MSVC.
+#ifndef CFG_TA_CLEAN_UP_TYPE_NAMES
+#ifdef _MSC_VER
+#define CFG_TA_CLEAN_UP_TYPE_NAMES 1
+#else
+#define CFG_TA_CLEAN_UP_TYPE_NAMES 0
+#endif
+#endif
+
 // A comma-separated list of macro names defined to be equivalent to `TA_ARG`.
 // `$` and `TA_ARG` are added automatically.
 // NOTE! This should have the same value in all TUs to avoid ODR violations.
@@ -537,7 +547,8 @@
             } \
         } \
         .template operator()<DETAIL_TA_GENERATE_PARAM_EXTRACT_LIST(__VA_ARGS__)>(), \
-        /* Another lambda to convert arguments to strings. */\
+        /* A lambda to convert arguments to strings. */\
+        /* If you change the return type here, you must also change the one in `ParamNameFunc::operator()`. */\
         ::ta_test::detail::ParamNameFunc<[]<DETAIL_TA_GENERATE_PARAM_EXTRACT_KIND(param) _ta_test_NameOf>(::ta_test::meta::PreferenceTagB) -> std::string_view \
         {return ::ta_test::detail::ParseEntityNameFromString<CFG_TA_THIS_FUNC_NAME>();}> \
         >( DETAIL_TA_GENERATE_PARAM_EXTRACT_FLAGS(__VA_ARGS__) ) \
@@ -1186,7 +1197,106 @@ namespace ta_test
             CFG_TA_API std::string UnescapeString(const char *&source, std::string &output, char quote_char, bool only_single_char);
         }
 
+        namespace type_name_details
+        {
+            template <typename T>
+            constexpr std::string_view RawTypeName() {return CFG_TA_THIS_FUNC_NAME;}
+
+            // This is only valid for `T = int`. Using a template to hopefully prevent redundant calculations.
+            template <typename T = int>
+            constexpr std::size_t prefix_len = RawTypeName<T>().rfind("int");
+
+            // This is only valid for `T = int`. Using a template to hopefully prevent redundant calculations.
+            template <typename T = int>
+            constexpr std::size_t suffix_len = RawTypeName<T>().size() - prefix_len<T> - 3;
+
+            // On MSVC, removes `class` and other unnecessary strings from type names.
+            // Returns the new length.
+            // It's recommended to include the null terminator in `size`, then we also null-terminate the resulting string and include it in the resulting length.
+            constexpr std::size_t CleanUpTypeName(char *buffer, std::size_t size)
+            {
+                #if !CFG_TA_CLEAN_UP_TYPE_NAMES
+                (void)buffer;
+                return size;
+                #else
+                std::string_view view(buffer, size); // Yes, with the null at the end.
+
+                auto RemoveTypePrefix = [&](std::string_view to_remove)
+                {
+                    std::size_t region_start = 0;
+                    std::size_t source_pos = 0;
+                    std::size_t target_pos = 0;
+                    while (true)
+                    {
+                        source_pos = view.find(to_remove, source_pos);
+                        if (source_pos == std::string_view::npos)
+                            break;
+                        if (source_pos == 0 || !chars::IsIdentifierCharStrict(view[source_pos - 1]))
+                        {
+                            std::size_t n = source_pos - region_start;
+                            std::copy_n(view.begin() + region_start, n, buffer + target_pos);
+                            target_pos += n;
+                            source_pos += to_remove.size();
+                            region_start = source_pos;
+                        }
+                    }
+                    std::size_t n = view.size() - region_start;
+                    std::copy_n(view.begin() + region_start, n, buffer + target_pos);
+                    target_pos += n;
+                    view = std::string_view(view.data(), target_pos);
+                };
+
+                RemoveTypePrefix("struct ");
+                RemoveTypePrefix("class ");
+                RemoveTypePrefix("union ");
+                RemoveTypePrefix("enum ");
+
+                return view.size();
+                #endif
+            }
+
+            template <std::size_t N>
+            struct BufferAndLen
+            {
+                std::array<char, N> buffer;
+                std::size_t len = 0;
+            };
+
+            template <typename T>
+            constexpr auto storage = []{
+                #if !CFG_TA_CLEAN_UP_TYPE_NAMES
+                // On GCC and Clang, return the name as is.
+                constexpr auto raw_name = RawTypeName<T>();
+                std::array<char, raw_name.size() - prefix_len<> - suffix_len<> + 1> ret{};
+                std::copy_n(raw_name.begin() + prefix_len<>, ret.size() - 1, ret.begin());
+                return ret;
+                #else
+                // On MSVC, strip `class ` and some other junk strings.
+                constexpr auto trimmed_name = []{
+                    constexpr auto raw_name = RawTypeName<T>();
+                    BufferAndLen<raw_name.size() - prefix_len<> - suffix_len<> + 1> ret{};
+                    std::copy_n(raw_name.begin() + prefix_len<>, ret.buffer.size() - 1, ret.buffer.begin());
+
+                    ret.len = CleanUpTypeName(ret.buffer.data(), ret.buffer.size());
+                    return ret;
+                }();
+
+                std::array<char, trimmed_name.len> ret{};
+                std::copy_n(trimmed_name.buffer.begin(), trimmed_name.len, ret.begin());
+                return ret;
+                #endif
+            }();
+        }
+
+        // Returns the type name (using `__PRETTY_FUNCTION__` or `__FUNCSIG__`, depending on the compiler).
+        template <typename T>
+        [[nodiscard]] constexpr std::string_view TypeName()
+        {
+            return std::string_view(type_name_details::storage<T>.data(), type_name_details::storage<T>.size() - 1);
+        }
+
         // Demangles output from `typeid(...).name()`.
+        // It's recommended to only use it for runtime names, preferring `TypeName()` for compile-time stuff.
         class Demangler
         {
             #if CFG_TA_CXXABI_DEMANGLE
@@ -1206,91 +1316,6 @@ namespace ta_test
             // Preserve the class instance between calls to potentially reuse the buffer.
             [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
         };
-
-        namespace type_name_details
-        {
-            template <typename T>
-            constexpr std::string_view RawTypeName() {return CFG_TA_THIS_FUNC_NAME;}
-
-            // This is only valid for `T = int`. Using a template to hopefully prevent redundant calculations.
-            template <typename T = int>
-            constexpr std::size_t prefix_len = RawTypeName<T>().rfind("int");
-
-            // This is only valid for `T = int`. Using a template to hopefully prevent redundant calculations.
-            template <typename T = int>
-            constexpr std::size_t suffix_len = RawTypeName<T>().size() - prefix_len<T> - 3;
-
-            template <std::size_t N>
-            struct BufferAndLen
-            {
-                std::array<char, N> buffer;
-                std::size_t len = 0;
-            };
-
-            template <typename T>
-            constexpr auto storage = []{
-                #ifndef _MSC_VER
-                // On GCC and Clang, return the name as is.
-                constexpr auto raw_name = RawTypeName<T>();
-                std::array<char, raw_name.size() - prefix_len<> - suffix_len<> + 1> ret{};
-                std::copy_n(raw_name.begin() + prefix_len<>, ret.size() - 1, ret.begin());
-                return ret;
-                #else
-                // On MSVC, strip `class ` and some other junk strings.
-                constexpr auto trimmed_name = []{
-                    constexpr auto raw_name = RawTypeName<T>();
-                    BufferAndLen<raw_name.size() - prefix_len<> - suffix_len<> + 1> ret{};
-                    std::copy_n(raw_name.begin() + prefix_len<>, ret.buffer.size() - 1, ret.buffer.begin());
-
-                    std::string_view view(ret.buffer.data(), ret.buffer.size()); // Yes, with the null at the end.
-
-                    auto RemoveTypePrefix = [&](std::string_view to_remove)
-                    {
-                        std::size_t region_start = 0;
-                        std::size_t source_pos = 0;
-                        std::size_t target_pos = 0;
-                        while (true)
-                        {
-                            source_pos = view.find(to_remove, source_pos);
-                            if (source_pos == std::string_view::npos)
-                                break;
-                            if (source_pos == 0 || !chars::IsIdentifierCharStrict(view[source_pos - 1]))
-                            {
-                                std::size_t n = source_pos - region_start;
-                                std::copy_n(view.begin() + region_start, n, ret.buffer.begin() + target_pos);
-                                target_pos += n;
-                                source_pos += to_remove.size();
-                                region_start = source_pos;
-                            }
-                        }
-                        std::size_t n = view.size() - region_start;
-                        std::copy_n(view.begin() + region_start, n, ret.buffer.begin() + target_pos);
-                        target_pos += n;
-                        view = std::string_view(view.data(), target_pos);
-                    };
-
-                    RemoveTypePrefix("struct ");
-                    RemoveTypePrefix("class ");
-                    RemoveTypePrefix("union ");
-                    RemoveTypePrefix("enum ");
-
-                    ret.len = view.size();
-                    return ret;
-                }();
-
-                std::array<char, trimmed_name.len> ret{};
-                std::copy_n(trimmed_name.buffer.begin(), trimmed_name.len, ret.begin());
-                return ret;
-                #endif
-            }();
-        }
-
-        // Returns the type name (using `__PRETTY_FUNCTION__` or `__FUNCSIG__`, depending on the compiler).
-        template <typename T>
-        [[nodiscard]] constexpr std::string_view TypeName()
-        {
-            return std::string_view(type_name_details::storage<T>.data(), type_name_details::storage<T>.size() - 1);
-        }
 
         // Parsing C++ expressions.
         namespace expr
@@ -3844,18 +3869,22 @@ namespace ta_test
             template <auto _ta_test_NameOf>
             // We always need at least some condition here, even if just `requires true`, to have priority over the inherited function.
             requires string_conv::SupportsToString<decltype(_ta_test_NameOf)>
-            std::string operator()(meta::PreferenceTagA) const
+            std::string_view operator()(meta::PreferenceTagA) const
             {
-                // Prefer `ToString()` if supported.
-                // Otherwise MSVC prints integers in hex, which is stupid.
-                std::string value = string_conv::ToString(_ta_test_NameOf);
+                // We need to do this crap because `F` returns `std::string_view`, and it should probably stay that way.
+                static const std::string ret = []{
+                    // Prefer `ToString()` if supported.
+                    // Otherwise MSVC prints integers in hex, which is stupid.
+                    std::string value = string_conv::ToString(_ta_test_NameOf);
 
-                // Prepend the type if necessary.
-                // Note, we don't need to remove constness here, it seems `decltype()` can never return const-qualified types here.
-                if constexpr (string_conv::ClarifyTypeInMixedTypeContexts<decltype(_ta_test_NameOf)>::value)
-                    return CFG_TA_FMT_NAMESPACE::format("({}){}", text::TypeName<decltype(_ta_test_NameOf)>(), value);
-                else
+                    // Prepend the type if necessary.
+                    // Note, we don't need to remove constness here, it seems `decltype()` can never return const-qualified types here.
+                    if constexpr (string_conv::ClarifyTypeInMixedTypeContexts<decltype(_ta_test_NameOf)>::value)
+                        value = CFG_TA_FMT_NAMESPACE::format("({}){}", text::TypeName<decltype(_ta_test_NameOf)>(), value);
+
                     return value;
+                }();
+                return ret;
             }
 
             // Catch `expand`, and trigger an unconditional `static_assert`.
@@ -4098,6 +4127,7 @@ namespace ta_test
 
                     for (std::size_t i = 0; i < N; i++)
                     {
+                        static_assert(std::is_same_v<decltype(NameLambda{}(i)), std::string_view>);
                         std::string_view elem = NameLambda{}(i);
                         if (!elems.insert(elem).second)
                             continue; // Refuse to print the same element twice.
