@@ -2323,7 +2323,7 @@ namespace ta_test
             [[nodiscard]] virtual std::string_view Name() const = 0;
 
             // Where the test was declared.
-            [[nodiscard]] virtual SourceLoc Location() const = 0;
+            [[nodiscard]] virtual SourceLoc SourceLocation() const = 0;
         };
 
         // Information about starting a list of tests.
@@ -2505,17 +2505,17 @@ namespace ta_test
             virtual ~BasicGenerator() = default;
 
             // The source location.
-            [[nodiscard]] virtual const data::SourceLocWithCounter &GetLocation() const = 0;
+            [[nodiscard]] virtual const data::SourceLocWithCounter &SourceLocation() const = 0;
             // The identifier passed to `TA_GENERATE(...)`.
-            [[nodiscard]] virtual std::string_view GetName() const = 0;
+            [[nodiscard]] virtual std::string_view Name() const = 0;
 
             // The return type. But without cvref-qualifiers, since `std::type_index` doesn't support those.
-            [[nodiscard]] virtual std::type_index GetType() const = 0;
-            // Returns the name of the return type. Unlike `GetType()` this properly reports cvref-qualifiers.
-            [[nodiscard]] virtual std::string_view GetTypeName() const = 0;
+            [[nodiscard]] virtual std::type_index Type() const = 0;
+            // Returns the name of the return type. Unlike `Type()` this properly reports cvref-qualifiers.
+            [[nodiscard]] virtual std::string_view TypeName() const = 0;
 
             // The generator flags.
-            [[nodiscard]] virtual GeneratorFlags GetFlags() const = 0;
+            [[nodiscard]] virtual GeneratorFlags Flags() const = 0;
 
             // Whether the last generated value is the last one for this generator.
             // Note that when the generator is operating under a module override, the system doesn't respect this variable (see below).
@@ -2652,12 +2652,12 @@ namespace ta_test
             }();
 
           public:
-            [[nodiscard]] std::type_index GetType() const override final
+            [[nodiscard]] std::type_index Type() const override final
             {
                 return typeid(ReturnType);
             }
 
-            [[nodiscard]] std::string_view GetTypeName() const override final
+            [[nodiscard]] std::string_view TypeName() const override final
             {
                 return text::TypeName<ReturnType>();
             }
@@ -2944,7 +2944,7 @@ namespace ta_test
 
         // `operator bool` is inherited. It returns false when constructed from `.Hide()` or `.ExtractArgs()`.
 
-        [[nodiscard]] const data::SourceLoc &GetLocation() const {return loc;}
+        [[nodiscard]] const data::SourceLoc &GetSourceLocation() const {return loc;}
         [[nodiscard]] const std::vector<std::string> &GetFuncArgs() const {return GetArgs().func_args;}
         [[nodiscard]] const std::vector<std::string> &GetTemplateArgs() const {return GetArgs().template_args;}
         [[nodiscard]] std::string_view GetFuncName() const {return func;}
@@ -3580,7 +3580,7 @@ namespace ta_test
             {
                 return TestName.view();
             }
-            data::SourceLoc Location() const override
+            data::SourceLoc SourceLocation() const override
             {
                 return {LocFile.view(), LocLine};
             }
@@ -3659,7 +3659,7 @@ namespace ta_test
 
         template <
             // Manually specified:
-            meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter, typename F,
+            meta::ConstString GeneratorName, meta::ConstString LocFile, int LocLine, int LocCounter, typename F,
             // Computed:
             typename UserFuncWrapperType = decltype(std::declval<F &&>()()),
             typename ReturnType = decltype(std::declval<UserFuncWrapperType &>().func(std::declval<bool &>()))
@@ -3683,17 +3683,17 @@ namespace ta_test
                 LocCounter,
             };
 
-            const data::SourceLocWithCounter &GetLocation() const override
+            const data::SourceLocWithCounter &SourceLocation() const override
             {
                 return location;
             }
 
-            std::string_view GetName() const override
+            std::string_view Name() const override
             {
-                return Name.view();
+                return GeneratorName.view();
             }
 
-            [[nodiscard]] GeneratorFlags GetFlags() const override final
+            [[nodiscard]] GeneratorFlags Flags() const override final
             {
                 // The flags have to sit in this class and not in `BasicGenerator`,
                 // to allow us to RVO the `GenerateFuncParam` all the way into here.
@@ -3767,15 +3767,15 @@ namespace ta_test
         // `func` returns the user lambda (it's not the user lambda itself).
         template <
             // Manually specified:
-            meta::ConstString Name, meta::ConstString LocFile, int LocLine, int LocCounter,
+            meta::ConstString GeneratorName, meta::ConstString LocFile, int LocLine, int LocCounter,
             // Deduced:
             typename F
         >
-        requires(text::chars::IsIdentifierStrict(Name.view()))
+        requires(text::chars::IsIdentifierStrict(GeneratorName.view()))
         [[nodiscard]] auto GenerateValue(F &&func)
-            -> const typename SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>::return_type &
+            -> const typename SpecificGenerator<GeneratorName, LocFile, LocLine, LocCounter, F>::return_type &
         {
-            using GeneratorType = SpecificGenerator<Name, LocFile, LocLine, LocCounter, F>;
+            using GeneratorType = SpecificGenerator<GeneratorName, LocFile, LocLine, LocCounter, F>;
 
             auto &thread_state = ThreadState();
             if (!thread_state.current_test)
@@ -3802,7 +3802,7 @@ namespace ta_test
                 auto new_generator = std::make_unique<GeneratorType>(std::forward<F>(func));
 
                 // Try to reuse a cached value.
-                if (!bool(new_generator->GetFlags() & GeneratorFlags::new_value_when_revisiting))
+                if (!bool(new_generator->Flags() & GeneratorFlags::new_value_when_revisiting))
                 {
                     auto iter = thread_state.current_test->visited_generator_cache.find(guard.source_loc);
                     if (iter != thread_state.current_test->visited_generator_cache.end())
@@ -3910,7 +3910,7 @@ namespace ta_test
         };
 
         // `TA_GENERATE_PARAM(...)` expands to this.
-        template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString Name, auto ListLambda, typename NameLambda>
+        template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString GeneratorName, auto ListLambda, typename NameLambda>
         class ParamGenerator
         {
             GeneratorFlags flags{};
@@ -3935,7 +3935,7 @@ namespace ta_test
                         return ListLambda.template operator()<NameLambda, meta::PreferenceTagA>()[i](NameLambda{}, meta::PreferenceTagA{});
                 };
 
-                auto index = (GenerateValue<Name, LocFile, LocLine, LocCounter>)(
+                auto index = (GenerateValue<GeneratorName, LocFile, LocLine, LocCounter>)(
                     [this]{
                         return GenerateFuncParam(flags, [i = std::size_t{}](bool &repeat) mutable
                         {
@@ -3949,7 +3949,7 @@ namespace ta_test
         };
 
         // This index type is used internally by `TA_SELECT(...)` and `TA_VARIANT(...)`.
-        template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString Name>
+        template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString GeneratorName>
         struct VariantIndex
         {
             int value = 0;
@@ -3969,11 +3969,11 @@ namespace ta_test
         };
 
         // `TA_SELECT(...) and TA_VARIANT(...)` expand to this.
-        template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString Name>
-        requires(text::chars::IsIdentifierStrict(Name.view()))
+        template <meta::ConstString LocFile, int LocLine, int LocCounter, meta::ConstString GeneratorName>
+        requires(text::chars::IsIdentifierStrict(GeneratorName.view()))
         class VariantGenerator
         {
-            using IndexType = VariantIndex<LocFile, LocLine, LocCounter, Name>;
+            using IndexType = VariantIndex<LocFile, LocLine, LocCounter, GeneratorName>;
 
             GeneratorFlags flags{};
 
@@ -4036,7 +4036,7 @@ namespace ta_test
                 if (!thread_state.current_test)
                     HardError("Can't use `TA_SELECT(...)` when no test is running.");
                 if (thread_state.current_test->generator_index < thread_state.current_test->generator_stack.size()
-                    && bool(dynamic_cast<const SpecificGenerator<Name, LocFile, LocLine, LocCounter, GeneratorFunctor> *>(
+                    && bool(dynamic_cast<const SpecificGenerator<GeneratorName, LocFile, LocLine, LocCounter, GeneratorFunctor> *>(
                         thread_state.current_test->generator_stack[thread_state.current_test->generator_index].get()
                     ))
                 )
@@ -4061,7 +4061,7 @@ namespace ta_test
                 else
                 {
                     // Second pass.
-                    return Enum(GenerateValue<Name, LocFile, LocLine, LocCounter>(GeneratorFunctor{*this}).value);
+                    return Enum(GenerateValue<GeneratorName, LocFile, LocLine, LocCounter>(GeneratorFunctor{*this}).value);
                 }
             }
 
@@ -4470,7 +4470,7 @@ namespace ta_test
                     if (elem.valueless_by_exception())
                         HardError("Invalid `ExceptionElemVar` variant.");
                     if (!State())
-                        TA_FAIL(flags, trace.GetLocation(), "Attempt to analyze a null `CaughtException`.");
+                        TA_FAIL(flags, trace.GetSourceLocation(), "Attempt to analyze a null `CaughtException`.");
                     if (State()->elems.empty())
                         return ReturnedRef(*this); // This was returned from a failed soft `TA_MUST_THROW`, silently pass all checks.
                     const auto &elems = State()->elems;
@@ -4479,7 +4479,7 @@ namespace ta_test
                         // This validates the index for us, and fails the test if out of range.
                         auto context = MakeContextGuard(index, flags);
                         if (context && !bool(std::forward<F>(func)(elems[std::size_t(index)])))
-                            TA_FAIL(flags, trace.GetLocation(), "{}", std::forward<G>(message_func)());
+                            TA_FAIL(flags, trace.GetSourceLocation(), "{}", std::forward<G>(message_func)());
                     };
                     std::visit(meta::Overload{
                         [&](ExceptionElem elem)
@@ -4500,7 +4500,7 @@ namespace ta_test
                                 {
                                     auto context = MakeContextGuard(-1, flags);
                                     if (std::none_of(elems.begin(), elems.end(), func))
-                                        TA_FAIL(flags, trace.GetLocation(), "{}", std::forward<G>(message_func)());
+                                        TA_FAIL(flags, trace.GetSourceLocation(), "{}", std::forward<G>(message_func)());
                                 }
                                 return;
                             }

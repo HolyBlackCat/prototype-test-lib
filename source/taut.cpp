@@ -1493,8 +1493,8 @@ void ta_test::detail::RegisterTest(const BasicTest *singleton)
         if (it->first == name)
         {
             // This test is already registered. Make sure it comes from the same source file and line, then stop.
-            data::SourceLoc old_loc = state.tests[it->second]->Location();
-            data::SourceLoc new_loc = singleton->Location();
+            data::SourceLoc old_loc = state.tests[it->second]->SourceLocation();
+            data::SourceLoc new_loc = singleton->SourceLocation();
             if (new_loc != old_loc)
             {
                 HardError(CFG_TA_FMT_NAMESPACE::format(
@@ -1658,9 +1658,9 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator()
             HardError("Something is wrong with the generator index."); // This should never happen.
 
         // Fail if no values.
-        if (bool(untyped_generator->GetFlags() & GeneratorFlags::generate_nothing))
+        if (bool(untyped_generator->Flags() & GeneratorFlags::generate_nothing))
         {
-            if (bool(untyped_generator->GetFlags() & GeneratorFlags::interrupt_test_if_empty))
+            if (bool(untyped_generator->Flags() & GeneratorFlags::interrupt_test_if_empty))
             {
                 // A micro-optimization. We don't need to run the destructor stuff in this case.
                 untyped_generator = nullptr;
@@ -1701,7 +1701,7 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator()
                 "Invalid non-deterministic use of generators. "
                 "Was expecting to reach the generator at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`, "
                 "but instead reached a different one at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "`.",
-                untyped_generator->GetLocation().file, untyped_generator->GetLocation().line,
+                untyped_generator->SourceLocation().file, untyped_generator->SourceLocation().line,
                 source_loc.file, source_loc.line
             ), HardErrorKind::user);
         }
@@ -1725,7 +1725,7 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator()
           case data::BasicGenerator::OverrideStatus::no_more_values:
             if (creating_new_generator)
             {
-                if (bool(untyped_generator->GetFlags() & GeneratorFlags::interrupt_test_if_empty))
+                if (bool(untyped_generator->Flags() & GeneratorFlags::interrupt_test_if_empty))
                 {
                     throw InterruptTestException{};
                 }
@@ -1735,7 +1735,7 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator()
                         CFG_TA_FMT_NAMESPACE::format(
                             "The generator `{}` at `" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "` was overridden to generate no values, "
                             "but it doesn't specify the `ta_test::interrupt_test_if_empty` flag.",
-                            untyped_generator->GetName(), source_loc.file, source_loc.line
+                            untyped_generator->Name(), source_loc.file, source_loc.line
                         ),
                         HardErrorKind::user
                     );
@@ -2097,7 +2097,7 @@ int ta_test::Runner::Run()
                 // We only emit a hard error if the test didn't fail.
                 // If it did fail, we print a non-determinism warning elsewhere.
 
-                const auto &loc = guard.state.generator_stack[guard.state.generator_index]->GetLocation();
+                const auto &loc = guard.state.generator_stack[guard.state.generator_index]->SourceLocation();
 
                 HardError(CFG_TA_FMT_NAMESPACE::format(
                     "Invalid non-deterministic use of generators. "
@@ -2713,7 +2713,7 @@ bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const dat
 
             const GeneratorOverrideSeq::Entry &override_entry = flag.remaining_program.front();
 
-            if (override_entry.generator_name == generator.GetName())
+            if (override_entry.generator_name == generator.Name())
             {
                 if (!found)
                     override_entry.was_used = true; // Only the first flag is marked as used.
@@ -2816,7 +2816,7 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const data::RunSi
                     CFG_TA_FMT_NAMESPACE::format(
                         "The generated type `{}` can't be deserialized from a string, so `=` can't be used with it. "
                         "But you can filter certain generated values by their indices using `#`, see `--help-generate` for details.",
-                        generator.GetTypeName()
+                        generator.TypeName()
                     ),
                     *this_flag->entry, this_value.value.data(), HardErrorKind::user
                 );
@@ -2937,7 +2937,7 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const data::RunSi
                             CFG_TA_FMT_NAMESPACE::format(
                                 "The generated type `{}` can't be deserialized from a string, so `-=` can't be used with it. "
                                 "But you can filter certain generated values by their indices using `-#`, see `--help-generate` for details.",
-                                generator.GetTypeName()
+                                generator.TypeName()
                             ),
                             *this_flag->entry, rule.value.data(), HardErrorKind::user
                         );
@@ -2948,7 +2948,7 @@ bool ta_test::modules::GeneratorOverrider::OnOverrideGenerator(const data::RunSi
                             CFG_TA_FMT_NAMESPACE::format(
                                 "The generated type `{}` doesn't overload equality comparison, so `-=` can't be used with it. "
                                 "But you can filter certain generated values by their indices using `-#`, see `--help-generate` for details.",
-                                generator.GetTypeName()
+                                generator.TypeName()
                             ),
                             *this_flag->entry, rule.value.data(), HardErrorKind::user
                         );
@@ -3603,7 +3603,7 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(
         repeating_info ? chars_test_prefix_continuing : chars_test_prefix,
         // Generator name.
         st_gen.name,
-        generator.GetName(),
+        generator.Name(),
         // Opening bracket.
         st_gen.index_brackets,
         chars_generator_index_prefix,
@@ -3688,7 +3688,7 @@ std::string ta_test::modules::ProgressPrinter::MakeGeneratorSummary(const data::
                     if (!ret.empty())
                         ret += ',';
 
-                    ret += gen.GetName();
+                    ret += gen.Name();
                     ret += '=';
                     ret += value;
                     continue;
@@ -3702,7 +3702,7 @@ std::string ta_test::modules::ProgressPrinter::MakeGeneratorSummary(const data::
             if (!ret.empty())
                 ret += ',';
 
-            ret += gen.GetName();
+            ret += gen.Name();
             ret += '#';
             ret += std::to_string(gen.NumGeneratedValues());
             continue;
@@ -3857,7 +3857,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const data::RunTestsResul
                 {
                     terminal.Print(cur_style, "{}{}",
                         style_summary_path,
-                        common_data.LocationToString(test->Location())
+                        common_data.LocationToString(test->SourceLocation())
                     );
                 }
 
@@ -3975,7 +3975,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const data::RunSingl
         // Intentionally always using plural "VARIANTS" here, because seeing "1/N VARIANT" is confusing, because it looks kinda like "first variant".
         terminal.Print(cur_style, "\n{}{}:\n{}IN TEST {}{}{}{}{}, {}{}{}/{}{} VARIANTS FAILED:\n\n",
             common_data.style_path,
-            common_data.LocationToString(data.test->Location()),
+            common_data.LocationToString(data.test->SourceLocation()),
             common_data.style_error,
             style_failed_group_name,
             test_group,
@@ -4089,11 +4089,11 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const data::RunSingleTestP
     for (const auto &gen : data.generator_stack)
     {
         failed_generator_stack.push_back({
-            .name = std::string(gen->GetName()),
+            .name = std::string(gen->Name()),
             .index = gen->IsCustomValue() ? gen->NumCustomValues() : gen->NumGeneratedValues(),
             .is_custom_value = gen->IsCustomValue(),
             .value = gen->ValueConvertibleToString() ? std::optional(gen->ValueToString()) : std::nullopt,
-            .location = gen->GetLocation(),
+            .location = gen->SourceLocation(),
         });
     }
     state.per_test.failed_generator_stacks.push_back(std::move(failed_generator_stack));
@@ -4130,7 +4130,7 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const data::RunSingleTestP
     // The test failure message, and a separator after that.
     terminal.Print(cur_style, "\n{}{}:\n{}{}{}{}{}{}{}{}{} {}{}\n",
         common_data.style_path,
-        common_data.LocationToString(data.test->Location()),
+        common_data.LocationToString(data.test->SourceLocation()),
         common_data.style_error,
         chars_test_failed,
         style_failed_group_name,
@@ -4678,7 +4678,7 @@ bool ta_test::modules::TracePrinter::PrintContextFrame(output::Terminal::StyleGu
         std::size_t column = 0;
 
         // Path.
-        column += canvas.DrawString(0, column, common_data.LocationToString(ptr->GetLocation()), {.style = common_data.style_path, .important = true});
+        column += canvas.DrawString(0, column, common_data.LocationToString(ptr->GetSourceLocation()), {.style = common_data.style_path, .important = true});
         column += canvas.DrawString(0, column, ":", {.style = common_data.style_path, .important = true});
 
         // Prefix.
