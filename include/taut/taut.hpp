@@ -202,6 +202,15 @@
 #    endif
 #  endif
 #endif
+// Whether the formatting library uses its own non-standard `string_view`-like type.
+// Incorrectly setting this to true shouldn't have much effect, except for perhaps slightly slower build times.
+#ifndef CFG_TA_FMT_USES_CUSTOM_STRING_VIEW
+#  if CFG_TA_USE_LIBFMT
+#    define CFG_TA_FMT_USES_CUSTOM_STRING_VIEW 1 // They always use it, even on newer standards, to preserve ABI compatibility.
+#  else
+#    define CFG_TA_FMT_USES_CUSTOM_STRING_VIEW 0
+#  endif
+#endif
 
 // Whether we should try to detect the debugger and break on failed assertions, on platforms where we know how to do so.
 // NOTE: Only touch this if including the debugger detection code in the binary is somehow problematic.
@@ -1496,6 +1505,11 @@ namespace ta_test
             string, // "..."
         };
 
+        // Whether `T` is a tuple or a similar class.
+        // Some formatters below use this.
+        template <typename T>
+        concept TupleLike = requires{std::tuple_size<T>::value;}; // Note, `std::tuple_size_v` would be SFINAE-unfriendly.
+
         // The default value of `ClarifyTypeInMixedTypeContexts` (see below).
         // Don't specialize this, this is specialized by the library internally.
         template <typename T>
@@ -1707,9 +1721,6 @@ namespace ta_test
                 }
             }
         };
-
-        template <typename T>
-        concept TupleLike = requires{std::tuple_size<T>::value;}; // Note, `std::tuple_size_v` would be SFINAE-unfriendly.
 
         // Tuple formatter.
         template <TupleLike T>
@@ -1935,25 +1946,24 @@ namespace ta_test
             range_format_kind<T>;
         #else
             []{
-                if constexpr (!std::input_range<T>)
+                if constexpr (!std::ranges::input_range<T>)
                 {
                     return RangeKind::disabled;
                 }
                 else
                 {
-                    auto value =
                     #if CFG_TA_FMT_HAS_RANGE_FORMAT == 1
-                        CFG_TA_FMT_NAMESPACE::format_kind<T>;
+                    auto value = CFG_TA_FMT_NAMESPACE::format_kind<T>;
                     #elif CFG_TA_FMT_HAS_RANGE_FORMAT == 2
-                        CFG_TA_FMT_NAMESPACE::range_format_kind<T>::value;
+                    auto value = CFG_TA_FMT_NAMESPACE::range_format_kind<T, char>::value;
                     #else
                     #error Invalid `CFG_TA_FMT_HAS_RANGE_FORMAT` value.
                     #endif
                     return
-                        value == CFG_TA_FMT_NAMESPACE::format_kind::sequence ? RangeKind::sequence :
-                        value == CFG_TA_FMT_NAMESPACE::format_kind::set      ? RangeKind::set :
-                        value == CFG_TA_FMT_NAMESPACE::format_kind::map      ? RangeKind::map :
-                        value == CFG_TA_FMT_NAMESPACE::format_kind::string || value == CFG_TA_FMT_NAMESPACE::format_kind::debug_string ? RangeKind::string :
+                        value == CFG_TA_FMT_NAMESPACE::range_format::sequence ? RangeKind::sequence :
+                        value == CFG_TA_FMT_NAMESPACE::range_format::set      ? RangeKind::set :
+                        value == CFG_TA_FMT_NAMESPACE::range_format::map      ? RangeKind::map :
+                        value == CFG_TA_FMT_NAMESPACE::range_format::string || value == CFG_TA_FMT_NAMESPACE::range_format::debug_string ? RangeKind::string :
                         RangeKind::disabled;
                 }
             }();

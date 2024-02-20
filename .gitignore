@@ -1,0 +1,10 @@
+/tests/build
+
+/.cache/**
+
+/compile_commands.json
+
+# Profiling results.
+gmon.out
+# Valgrind dumps.
+/vgcore.*

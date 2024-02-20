@@ -669,9 +669,9 @@ ta_test::output::Terminal::Terminal(FILE *stream)
     ](std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args) mutable
     {
         #if CFG_TA_FMT_HAS_FILE_VPRINT == 2
-        CFG_TA_FMT_NAMESPACE::vprint_unicode(stream, fmt, args);
-        #elif CFG_TA_FMT_HAS_FILE_VPRINT == 1
         CFG_TA_FMT_NAMESPACE::vprint(stream, fmt, args);
+        #elif CFG_TA_FMT_HAS_FILE_VPRINT == 1
+        CFG_TA_FMT_NAMESPACE::vprint_unicode(stream, fmt, args);
         #elif CFG_TA_FMT_HAS_FILE_VPRINT == 0
 
         #ifdef _WIN32

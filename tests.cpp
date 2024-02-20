@@ -4,6 +4,8 @@
 
 #include <taut/taut.hpp>
 
+// reset && LANG= make -C tests COMPILERS=clang++ SKIP=clang++_libstdc++_c++2b -j12
+
 TA_TEST(foo/test)
 {
     TA_GENERATE_PARAM(auto T, 1, 2u, 3ll)
@@ -17,8 +19,6 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Review the API for consistency?
-
 // TESTS!!
 
 // Support all three big compilers!
@@ -26,6 +26,7 @@ int main(int argc, char **argv)
 // Check that paths are clickable in Visual Studio (especially when not at line start)
 
 // Add CMakeLists.txt!
+//     pkg-config files!!
 
 // Introduction and license in headers? Maybe not the license? A short introduction in modules.hpp too.
 

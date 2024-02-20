@@ -431,7 +431,15 @@ namespace ta_test
             template <typename ...P>
             void Print(CFG_TA_FMT_NAMESPACE::format_string<P...> fmt, P &&... args) const
             {
-                PrintLow(fmt.get(), CFG_TA_FMT_NAMESPACE::make_format_args(args...)); // It seems we don't need to forward `args...`.
+                PrintLow(
+                    #if CFG_TA_FMT_USES_CUSTOM_STRING_VIEW
+                    {fmt.get().data(), fmt.get().size()},
+                    #else
+                    fmt.get(),
+                    #endif
+                    // It seems we don't need to forward `args...`.
+                    CFG_TA_FMT_NAMESPACE::make_format_args(args...)
+                );
             }
 
             // For internal use! Not `private` only because we need to write a formatter for it.
@@ -459,13 +467,29 @@ namespace ta_test
                     return std::forward<T>(target);
             }
 
+            // Converts rvalues to lvalues, because in new C++ `make_format_args` no longer accepts rvalues.
+            // It's safe to do in our case, since the format args are used immediately.
+            template <typename T>
+            static T &UnmoveFormatArg(T &&value)
+            {
+                // Need the cast to work around the simplified implicit move in C++23.
+                return static_cast<T &>(value);
+            }
+
           public:
             // Prints all arguments using `output_func`. This overload supports text styles.
             template <typename ...P>
             void Print(StyleGuard &cur_style, CFG_TA_FMT_NAMESPACE::format_string<WrapStyleTypeForFormatString<P>...> fmt, P &&... args) const
             {
                 // It seems we don't need to forward `args...`.
-                PrintLow(fmt.get(), CFG_TA_FMT_NAMESPACE::make_format_args(WrapStyleForFormatString(*this, cur_style, args)...));
+                PrintLow(
+                    #if CFG_TA_FMT_USES_CUSTOM_STRING_VIEW
+                    {fmt.get().data(), fmt.get().size()},
+                    #else
+                    fmt.get(),
+                    #endif
+                    CFG_TA_FMT_NAMESPACE::make_format_args(UnmoveFormatArg(WrapStyleForFormatString(*this, cur_style, args))...)
+                );
             }
         };
 
@@ -1806,13 +1830,13 @@ namespace ta_test
 template <>
 struct CFG_TA_FMT_NAMESPACE::formatter<ta_test::output::Terminal::PrintableAnsiDelta, char>
 {
-    constexpr auto parse(std::basic_format_parse_context<char> &parse_ctx)
+    constexpr auto parse(CFG_TA_FMT_NAMESPACE::basic_format_parse_context<char> &parse_ctx)
     {
         return parse_ctx.begin();
     }
 
     template <typename OutputIt>
-    constexpr auto format(const ta_test::output::Terminal::PrintableAnsiDelta &arg, std::basic_format_context<OutputIt, char> &format_ctx) const
+    constexpr auto format(const ta_test::output::Terminal::PrintableAnsiDelta &arg, CFG_TA_FMT_NAMESPACE::basic_format_context<OutputIt, char> &format_ctx) const
     {
         return CFG_TA_FMT_NAMESPACE::format_to(format_ctx.out(), "{}", arg.terminal.AnsiDeltaString(arg.cur_style, arg.new_style).data());
     }
