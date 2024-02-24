@@ -1,3 +1,5 @@
+// A temporary scratchpad file.
+
 #include <exception>
 #include <iostream>
 #include <deque>
@@ -5,6 +7,9 @@
 #include <taut/taut.hpp>
 
 // reset && LANG= make -C tests COMPILERS=clang++ SKIP=clang++_libstdc++_c++2b -j12
+
+// 1. Go write a pre-launch-task
+// 2. Continue writing tests.
 
 TA_TEST(foo/test)
 {
@@ -19,9 +24,12 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
+// Revert to stdout for output, and add a flag to change that.
+
 // TESTS!!
 
 // Support all three big compilers!
+//     Check that on Windows, tests find libfmt from vcpkg.
 
 // Check that paths are clickable in Visual Studio (especially when not at line start)
 
@@ -41,10 +49,9 @@ int main(int argc, char **argv)
 //     Experiment with filesystem::path and wstring and wchar_t (on all compilers and on libfmt), and u8string and u16string and u32string and char{16,32,8}_t
 //         If good, don't forget to enable "lazy copy for printing" for them
 //     Add explicit instantiation declarations/definitions for BasicCaughtExceptionInterface (this requires moving derived classes to namespace scope, which is sad)
-//     Experiment with function attributes ("artificial"?) for better debugging
-//     Analyzing TA_MUST_THROW must immediately point to the user code first, and not to the library internals
-//         Add an argument to AssertParam to customize the source location, and stop baking it into template parameters
-//     In TA_GENERATE_PARAM, move the fat lambdas to a template IF the parameter kind is unparenthesized.
+//     Flags for tests:
+//         disable by default
+//     In TA_GENERATE_PARAM, move the fat lambdas to a template IF the parameter kind is unparenthesized?
 
 // Later:
 //     Column indicators in paths, and transition to source_location entirely?

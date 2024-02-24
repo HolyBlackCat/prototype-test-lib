@@ -155,12 +155,15 @@
 // Whether to use libfmt instead of `std::format`.
 // If you manually override the formatting function using other macros below, this will be ignored.
 #ifndef CFG_TA_USE_LIBFMT
-#  ifdef __cpp_lib_format
-#    define CFG_TA_USE_LIBFMT 0
-#  elif __has_include(<fmt/format.h>)
-#    define CFG_TA_USE_LIBFMT 1
-#  else
-#    error ta_test needs a compiler supporting `#include <format>`, or installed libfmt, or a custom formatting library to be specified.
+#  define CFG_TA_USE_LIBFMT 0
+#endif
+#if CFG_TA_USE_LIBFMT
+#  if !__has_include(<fmt/format.h>)
+#    error Taut was configured to use libfmt, but it's not installed.
+#  endif
+#else
+#  ifndef __cpp_lib_format
+#    error Taut was configured to use `std::format`, but your standard library doesn't support it. Switch to libfmt with `-DCFG_TA_USE_LIBFMT=1`.
 #  endif
 #endif
 
@@ -4767,6 +4770,7 @@ namespace ta_test
         // Handles the command line arguments in argc&argv style.
         // If `ok` is null and something goes wrong, aborts the application. If `ok` isn't null, sets it to true on success or to false on failure.
         // `argv[0]` is ignored.
+        // If you set `argc` and `argv` to null, does nothing.
         void ProcessFlags(int argc, char **argv, bool *ok = nullptr) const
         {
             ProcessFlags([argc = argc-1, argv = argv+1]() mutable -> std::optional<std::string_view>
@@ -4839,6 +4843,7 @@ namespace ta_test
 
     // A simple way to run the tests.
     // Copypaste the body into your code if you need more customization.
+    // `argc` and `argv` can be null.
     inline int RunSimple(int argc, char **argv)
     {
         ta_test::Runner runner;

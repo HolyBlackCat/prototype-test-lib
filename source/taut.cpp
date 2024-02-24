@@ -1,4 +1,4 @@
-#if CFG_TA_SHARED
+#if CFG_TA_SHARED && defined(_WIN32)
 #define CFG_TA_API __declspec(dllexport)
 #endif
 
@@ -4827,12 +4827,12 @@ void ta_test::modules::DebuggerStatePrinter::OnPreRunTests(const data::RunTestsI
         if (detector.break_on_failure && *detector.break_on_failure)
             PrintNote(cur_style, "Will break on failure.");
         else if (!detector.break_on_failure && detector.IsDebuggerAttached())
-            PrintNote(cur_style, "Will break on failure (because a debugger is attached, `--catch` to override).");
+            PrintNote(cur_style, "Will break on failure (because a debugger is attached, `--no-break` to override).");
 
         if (detector.catch_exceptions && !*detector.catch_exceptions)
             PrintNote(cur_style, "Will not catch exceptions.");
         else if (!detector.catch_exceptions && detector.IsDebuggerAttached())
-            PrintNote(cur_style, "Will not catch exceptions (because a debugger is attached, `--no-break` to override).");
+            PrintNote(cur_style, "Will not catch exceptions (because a debugger is attached, `--catch` to override).");
         return true;
     });
 }
