@@ -1,10 +1,10 @@
-`Makefile` builds and runs the tests for all compilers discovered on the system. The test matrix checks different build modes, standard libraries, and library configurations.
+`tests/Makefile` builds and runs the tests for all compilers discovered on the system. The test matrix checks different build modes, standard libraries, and library configurations.
 
 Windows users should install `make` from MSYS2.
 
-Run the tests using `make -f tests/Makefile`.
+Run the tests using `make -C tests`.
 
-Read the makefile for some parameters you can customize. Some of them are:
+Read the makefile for some parameters you can customize. You can limit what is tested by overriding those variables:
 
 * `COMPILERS` - list of compilers to test. (All lists are space-separated.)
 * `MODES` - list of build modes to test.
@@ -12,9 +12,17 @@ Read the makefile for some parameters you can customize. Some of them are:
 * `STDLIBS` - list of C++ standard libraries to test (Clang only).
 * `FMTLIBS` - list of formatting libraries to test.
 
-You can pass those variables to `make` to tests only certain configurations, e.g. `make -f tests/Makefile COMPILERS=clang++ STDLIBS=libstdc++` to test only Clang with libstdc++.
+E.g. `make -C tests COMPILERS=clang++` will only test Clang instead of all available compilers.
 
-Run `make -f tests/Makefile set-ide-target ...` to generate some VSC config files. This requires setting the variables above to uniquely specify just a single configuration.
+---
+
+Run `make -f tests/Makefile set-ide-target ...` to generate `compile_commands.json` for your IDE and some VSCode config files. This requires setting the variables above to uniquely specify a single configuration, for example:
+
+* Clang: `make -C tests set-ide-target COMPILERS=clang++ STDLIBS=libstdc++ STANDARDS=20 FMTLIBS=stdfmt MODES=sanitizers`
+* GCC: `make -C tests set-ide-target COMPILERS=g++ STANDARDS=20 FMTLIBS=stdfmt MODES=sanitizers`
+* MSVC: `make -C tests set-ide-target COMPILERS=cl STANDARDS=latest FMTLIBS=stdfmt MODES=sanitizers`
+
+---
 
 What different files are used for:
 

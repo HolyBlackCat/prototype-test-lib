@@ -24,12 +24,13 @@ int main(int argc, char **argv)
     return ta_test::RunSimple(argc, argv);
 }
 
-// Revert to stdout for output, and add a flag to change that.
-
 // TESTS!!
 
+// Revert to stdout for output, and add a flag to change that.
+
 // Support all three big compilers!
-//     Check that on Windows, tests find libfmt from vcpkg.
+//     Check that on Windows, tests find libfmt from vcpkg (on MSVC)
+//     Test compile_commands.json generation on Windows?
 
 // Check that paths are clickable in Visual Studio (especially when not at line start)
 
