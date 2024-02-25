@@ -1113,8 +1113,11 @@ namespace ta_test
             // If `next_char` is not null, it will be set to point to the next byte after the current character.
             // If `data == end`, returns '\0'. (If `end != 0` and `data > end`, also returns '\0'.)
             // If `data == 0`, returns '\0'.
-            constexpr char32_t DecodeCharFromBuffer(const char *data, const char *end = nullptr, const char **next_char = nullptr)
+            constexpr char32_t DecodeCharFromBuffer(const char *data, const char *end = nullptr, const char **next_char = nullptr, bool *ok = nullptr)
             {
+                if (ok)
+                    *ok = false;
+
                 // Stop if `data` is a null pointer.
                 if (!data)
                 {
@@ -1147,6 +1150,8 @@ namespace ta_test
                 {
                     if (next_char)
                         *next_char = data+1;
+                    if (ok)
+                        *ok = true;
                     return (unsigned char)*data;
                 }
 
@@ -1180,6 +1185,8 @@ namespace ta_test
                 if (next_char)
                     *next_char = data + len;
 
+                if (ok)
+                    *ok = true;
                 return ret;
             }
 
@@ -1198,6 +1205,7 @@ namespace ta_test
         namespace escape
         {
             // Escapes a string, appends the result to `output`. Includes quotes automatically.
+            // Tries to keep unicode characters unescaped, but escapes invalid UTF-8 bytes.
             CFG_TA_API void EscapeString(std::string_view source, std::string &output, bool double_quotes);
 
             // Unescapes a string.
@@ -1710,9 +1718,10 @@ namespace ta_test
 
                         if constexpr (range_format_kind<T> == RangeKind::map)
                         {
-                            ret += (ToString)(std::get<0>(elem));
+                            using std::get;
+                            ret += (ToString)(get<0>(elem));
                             ret += ": ";
-                            ret += (ToString)(std::get<1>(elem));
+                            ret += (ToString)(get<1>(elem));
                         }
                         else
                         {
@@ -1726,17 +1735,20 @@ namespace ta_test
         };
 
         // Tuple formatter.
+        // This reject `std::array`, that goes to the range formatter. I'd prefer `(...)`, but `std::format` (and libfmt) uses `[...]` here.
         template <TupleLike T>
+        requires(range_format_kind<T> == RangeKind::disabled)
         struct DefaultToStringTraits<T>
         {
             std::string operator()(const T &value) const
             {
+                using std::get;
                 std::string ret = "(";
                 [&]<std::size_t ...I>(std::index_sequence<I...>){
                     ([&]{
                         if constexpr (I > 0)
                             ret += ", ";
-                        ret += (ToString)(std::get<I>(value));
+                        ret += (ToString)(get<I>(value));
                     }(), ...);
                 }(std::make_index_sequence<std::tuple_size_v<T>>{});
                 ret += ")";
@@ -2065,7 +2077,9 @@ namespace ta_test
                                 // Using `requires` for SFINAE-friendliness.
                                 static_assert(requires{requires std::tuple_size<Elem>::value == 2;}, "Range kind is set to `map`, but its element type is not a 2-tuple.");
 
-                                std::string error = FromStringTraits<std::tuple_element_t<0, Elem>>{}(std::get<0>(target), string);
+                                using std::get;
+
+                                std::string error = FromStringTraits<std::tuple_element_t<0, Elem>>{}(get<0>(target), string);
                                 if (!error.empty())
                                     return error;
                                 text::chars::SkipWhitespace(string);
@@ -2075,7 +2089,7 @@ namespace ta_test
                                 string++;
 
                                 text::chars::SkipWhitespace(string);
-                                return FromStringTraits<std::tuple_element_t<1, Elem>>{}(std::get<1>(target), string);
+                                return FromStringTraits<std::tuple_element_t<1, Elem>>{}(get<1>(target), string);
                             }
                             else
                             {
@@ -2151,7 +2165,9 @@ namespace ta_test
 
                         text::chars::SkipWhitespace(string);
 
-                        error = FromStringTraits<std::tuple_element_t<I, T>>{}(std::get<I>(target), string);
+                        using std::get;
+
+                        error = FromStringTraits<std::tuple_element_t<I, T>>{}(get<I>(target), string);
                         return !error.empty();
                     }() || ...);
                 }(std::make_index_sequence<std::tuple_size_v<T>>{});
@@ -2532,7 +2548,7 @@ namespace ta_test
 
             // Whether the last generated value is the last one for this generator.
             // Note that when the generator is operating under a module override, the system doesn't respect this variable (see below).
-            [[nodiscard]] bool IsLastValue() const {return !repeat || callback_threw_exception;}
+            [[nodiscard]] bool IsLastValue() const {return !repeat || callback_threw_exception || bool(Flags() & GeneratorFlags::generate_nothing);}
 
             // This is false when the generator is reached for the first time and didn't generate a value yet.
             // Calling `GetValue()` in that case will crash.

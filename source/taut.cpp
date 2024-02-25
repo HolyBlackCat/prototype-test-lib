@@ -67,11 +67,35 @@ void ta_test::text::escape::EscapeString(std::string_view source, std::string &o
 {
     output += "'\""[double_quotes];
 
-    for (char signed_ch : source)
+    // Remaining bytes in this UTF-8 characters.
+    int remaining_unicode_bytes = 0;
+
+    for (const char &signed_ch : source)
     {
         unsigned char ch = (unsigned char)signed_ch;
 
-        bool should_escape = (ch < ' ') || ch == 0x7f || (ch == (double_quotes ? '"' : '\''));
+        bool should_escape = false;
+
+        if (remaining_unicode_bytes > 0)
+        {
+            should_escape = false;
+            remaining_unicode_bytes--;
+        }
+        else if ((ch < ' ') || ch == 0x7f || ch == '\\' || (ch == (double_quotes ? '"' : '\'')))
+        {
+            should_escape = true;
+        }
+        else
+        {
+            bool ok = false;
+            const char *next_char = nullptr;
+            (void)uni::DecodeCharFromBuffer(&signed_ch, source.data() + source.size(), &next_char, &ok);
+
+            if (!ok)
+                should_escape = true; // Invalid byte.
+            else
+                remaining_unicode_bytes = int(next_char - &signed_ch - 1);
+        }
 
         if (!should_escape)
         {
@@ -1657,8 +1681,18 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator()
         if (thread_state.current_test->generator_index != thread_state.current_test->generator_stack.size())
             HardError("Something is wrong with the generator index."); // This should never happen.
 
-        // Fail if no values.
-        if (bool(untyped_generator->Flags() & GeneratorFlags::generate_nothing))
+        // Possibly accept an override.
+        for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicModule::OnRegisterGeneratorOverride>())
+        {
+            if (m->OnRegisterGeneratorOverride(*thread_state.current_test, *untyped_generator))
+            {
+                untyped_generator->overriding_module = m;
+                break;
+            }
+        }
+
+        // Fail if no values and no override.
+        if (!untyped_generator->overriding_module && bool(untyped_generator->Flags() & GeneratorFlags::generate_nothing))
         {
             if (bool(untyped_generator->Flags() & GeneratorFlags::interrupt_test_if_empty))
             {
@@ -1674,16 +1708,6 @@ void ta_test::detail::GenerateValueHelper::HandleGenerator()
                     "Must either specify them from the command line, ensure this generator isn't reached, or pass `ta_test::interrupt_test_if_empty` to interrupt the test.",
                     source_loc.file, source_loc.line
                 ));
-            }
-        }
-
-        // Possibly accept an override.
-        for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicModule::OnRegisterGeneratorOverride>())
-        {
-            if (m->OnRegisterGeneratorOverride(*thread_state.current_test, *untyped_generator))
-            {
-                untyped_generator->overriding_module = m;
-                break;
             }
         }
 
