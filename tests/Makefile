@@ -201,8 +201,11 @@ override define snippet_make_recipes =
 $(call var,_config := $(comp)_$(stdlib)_c++$(stdver)_$(fmtlib)_$(mode))
 $(call var,all_configs += $(_config))
 
+$(if $(filter undefined environment,$(origin MODEFLAGS-$(mode))),$(error Unknown build mode: $(mode)))
+
 $(call var,_cxx := $(comp) $(if $(filter-out stock,$(stdlib)),-stdlib=$(stdlib)) -std=c++$(stdver) $(MODEFLAGS-$(mode)) -DCFG_TA_USE_LIBFMT=$(if $(filter libfmt,$(fmtlib)),1,0)\
 	-pedantic-errors -Wall -Wextra -Wdeprecated -Wextra-semi -Wimplicit-fallthrough -Wconversion\
+	-Werror\
 	$(CXXFLAGS)\
 )
 
@@ -323,7 +326,7 @@ else
 	@echo '[' >../compile_commands.json
 	$(call var,_once := 1)
 	@true $(foreach s,../source/taut.cpp $(_all_exe_sources),\
-		&& echo '   $(if $(_once),$(call var,_once :=) ,$(comma)){"directory": "$(abspath .)", "file": "$(abspath $s)", "command": "$(_cxx) -I../include -DCFG_TA_SHARED"}' >>../compile_commands.json\
+		&& echo '   $(if $(_once),$(call var,_once :=) ,$(comma)){"directory": "$(abspath .)", "file": "$(abspath $s)", "command": "$(filter-out -Werror,$(_cxx)) -I../include -DCFG_TA_SHARED"}' >>../compile_commands.json\
 	)
 	@echo ']' >>../compile_commands.json
 endif

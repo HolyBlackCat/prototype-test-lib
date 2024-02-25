@@ -179,6 +179,12 @@
 #endif
 #endif
 
+// If true and if the formatting library supports range formatting, use its native implementation instead of ours (this includes tuple-like types).
+// This is disabled by default, because our implementation takes advantage of our extended type support (non-char strings, `std::filesystem::path`, etc).
+#ifndef CFG_TA_FMT_ALLOW_NATIVE_RANGE_FORMATTING
+#define CFG_TA_FMT_ALLOW_NATIVE_RANGE_FORMATTING 0
+#endif
+
 // Whether the formatting library has a `vprint(FILE *, ...)`. If it's not there, we format to a temporary buffer first.
 // 0 = none, 1 = `vprint_[non]unicode`, 2 = `vprint`.
 #ifndef CFG_TA_FMT_HAS_FILE_VPRINT
@@ -194,14 +200,14 @@
 #endif
 // Whether the formatting library can classify and format ranges.
 // 0 = none, 1 = `format_kind` variable, 2 = `range_format_kind` trait class.
-#ifndef CFG_TA_FMT_HAS_RANGE_FORMAT
+#ifndef CFG_TA_FMT_HAS_RANGE_FORMATTING
 #  if CFG_TA_USE_LIBFMT
-#    define CFG_TA_FMT_HAS_RANGE_FORMAT 2
+#    define CFG_TA_FMT_HAS_RANGE_FORMATTING 2
 #  else
 #    ifdef __cpp_lib_format_ranges
-#      define CFG_TA_FMT_HAS_RANGE_FORMAT 1
+#      define CFG_TA_FMT_HAS_RANGE_FORMATTING 1
 #    else
-#      define CFG_TA_FMT_HAS_RANGE_FORMAT 0
+#      define CFG_TA_FMT_HAS_RANGE_FORMATTING 0
 #    endif
 #  endif
 #endif
@@ -1084,14 +1090,16 @@ namespace ta_test
 
             // Encodes one string into another.
             // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
-            constexpr void Encode(std::u32string_view view, std::string &str)
+            template <typename T>
+            requires std::is_same_v<T, std::wstring_view> || std::is_same_v<T, std::u16string_view> || std::is_same_v<T, std::u32string_view>
+            constexpr void Encode(T view, std::string &str)
             {
                 str.clear();
                 str.reserve(view.size() * max_char_len);
-                for (char32_t ch : view)
+                for (auto ch : view)
                 {
                     char buf[max_char_len];
-                    std::size_t len = EncodeCharToBuffer(ch, buf);
+                    std::size_t len = EncodeCharToBuffer(char32_t(ch), buf);
                     str.append(buf, len);
                 }
             }
@@ -1206,7 +1214,8 @@ namespace ta_test
         {
             // Escapes a string, appends the result to `output`. Includes quotes automatically.
             // Tries to keep unicode characters unescaped, but escapes invalid UTF-8 bytes.
-            CFG_TA_API void EscapeString(std::string_view source, std::string &output, bool double_quotes);
+            // if `auto_insert_quotes` is false, doesn't insert quotes at the beginning and at the end.
+            CFG_TA_API void EscapeString(std::string_view source, std::string &output, bool double_quotes, bool auto_insert_quotes = true);
 
             // Unescapes a string.
             // Appends the result to `output`. Returns the error message on failure, or empty string on success.
@@ -1626,6 +1635,35 @@ namespace ta_test
         // Somehow this catches const arrays too.
         template <std::size_t N> struct DefaultToStringTraits<char[N]> : DefaultToStringTraits<std::string_view> {};
 
+        // All the character types. Formatting libraries don't seem to support this, but we do.
+        // char32_t:
+        template <> struct DefaultToStringTraits<char32_t> {CFG_TA_API std::string operator()(char32_t value) const;};
+        template <> struct DefaultToStringTraits<std::u32string_view> {CFG_TA_API std::string operator()(std::u32string_view value) const;};
+        template <> struct DefaultToStringTraits<      char32_t *> : DefaultToStringTraits<std::u32string_view> {};
+        template <> struct DefaultToStringTraits<const char32_t *> : DefaultToStringTraits<std::u32string_view> {};
+        template <std::size_t N> struct DefaultToStringTraits<char32_t[N]> : DefaultToStringTraits<std::u32string_view> {};
+        // char16_t:
+        template <> struct DefaultToStringTraits<char16_t> {CFG_TA_API std::string operator()(char16_t value) const;};
+        template <> struct DefaultToStringTraits<std::u16string_view> {CFG_TA_API std::string operator()(std::u16string_view value) const;};
+        template <> struct DefaultToStringTraits<      char16_t *> : DefaultToStringTraits<std::u16string_view> {};
+        template <> struct DefaultToStringTraits<const char16_t *> : DefaultToStringTraits<std::u16string_view> {};
+        template <std::size_t N> struct DefaultToStringTraits<char16_t[N]> : DefaultToStringTraits<std::u16string_view> {};
+        // wchar_t:
+        template <> struct DefaultToStringTraits<wchar_t> {CFG_TA_API std::string operator()(wchar_t value) const;};
+        template <> struct DefaultToStringTraits<std::wstring_view> {CFG_TA_API std::string operator()(std::wstring_view value) const;};
+        template <> struct DefaultToStringTraits<      wchar_t *> : DefaultToStringTraits<std::wstring_view> {};
+        template <> struct DefaultToStringTraits<const wchar_t *> : DefaultToStringTraits<std::wstring_view> {};
+        template <std::size_t N> struct DefaultToStringTraits<wchar_t[N]> : DefaultToStringTraits<std::wstring_view> {};
+        // char8_t:
+        template <> struct DefaultToStringTraits<char8_t> {CFG_TA_API std::string operator()(char8_t value) const;};
+        template <> struct DefaultToStringTraits<std::u8string_view> {CFG_TA_API std::string operator()(std::u8string_view value) const;};
+        template <> struct DefaultToStringTraits<      char8_t *> : DefaultToStringTraits<std::u8string_view> {};
+        template <> struct DefaultToStringTraits<const char8_t *> : DefaultToStringTraits<std::u8string_view> {};
+        template <std::size_t N> struct DefaultToStringTraits<char8_t[N]> : DefaultToStringTraits<std::u8string_view> {};
+
+        // std::filesystem::path
+
+
         // `ToStringTraits` serializes this as is, without escaping or quotes.
         struct ExactString
         {
@@ -1649,14 +1687,39 @@ namespace ta_test
         template <>
         struct DefaultToStringTraits<std::type_info> : DefaultToStringTraits<std::type_index> {};
 
-        // Ranges.
-        #if CFG_TA_FMT_HAS_RANGE_FORMAT == 0
-        // This replaces `std::format_kind` (or `fmt::range_format_kind`) if the formatting library can't format ranges.
+        // Ranges:
+
+        // This wraps `std::format_kind` (or `fmt::range_format_kind`), or implements it from scratch if the formatting library doesn't understand ranges.
         // You can specialize this.
         // This classifier never returns `RangeKind::string`, just like the standard one.
         // NOTE: The standard (and libfmt) versions of this variable return junk for `std::string[_view]`, so ours does too, and we never use it on those types.
         template <typename T>
-        constexpr RangeKind range_format_kind = []{
+        constexpr RangeKind range_format_kind =
+        #if CFG_TA_FMT_HAS_RANGE_FORMATTING
+        []{
+            if constexpr (!std::ranges::input_range<T>)
+            {
+                return RangeKind::disabled;
+            }
+            else
+            {
+                #if CFG_TA_FMT_HAS_RANGE_FORMATTING == 1
+                auto value = CFG_TA_FMT_NAMESPACE::format_kind<T>;
+                #elif CFG_TA_FMT_HAS_RANGE_FORMATTING == 2
+                auto value = CFG_TA_FMT_NAMESPACE::range_format_kind<T, char>::value;
+                #else
+                #error Invalid `CFG_TA_FMT_HAS_RANGE_FORMATTING` value.
+                #endif
+                return
+                    value == CFG_TA_FMT_NAMESPACE::range_format::sequence ? RangeKind::sequence :
+                    value == CFG_TA_FMT_NAMESPACE::range_format::set      ? RangeKind::set :
+                    value == CFG_TA_FMT_NAMESPACE::range_format::map      ? RangeKind::map :
+                    value == CFG_TA_FMT_NAMESPACE::range_format::string || value == CFG_TA_FMT_NAMESPACE::range_format::debug_string ? RangeKind::string :
+                    RangeKind::disabled;
+            }
+        }();
+        #else
+        []{
             if constexpr (!std::ranges::input_range<T>)
             {
                 // A bit weird to check `input_range` when converting TO a string, but this is what `std::format_kind` uses,
@@ -1683,7 +1746,9 @@ namespace ta_test
                 return RangeKind::sequence;
             }
         }();
+        #endif
 
+        #if !CFG_TA_FMT_ALLOW_NATIVE_RANGE_FORMATTING || !CFG_TA_FMT_HAS_RANGE_FORMATTING
         // Range formatter.
         template <typename T>
         requires(range_format_kind<T> != RangeKind::disabled)
@@ -1953,36 +2018,9 @@ namespace ta_test
         // Ranges.
 
         // Classifies the range for converting from a string. You almost never want to specialize this.
-        // Normally you want to specialize `std::format_kind` or `fmt::range_format_kind` or our `ta_test::string_conv::range_format_kind`,
-        //   depending on what formatting library you use.
+        // Normally you want to specialize `std::format_kind` or `fmt::range_format_kind` or our `ta_test::string_conv::range_format_kind`.
         template <typename T>
-        constexpr RangeKind from_string_range_format_kind =
-        #if CFG_TA_FMT_HAS_RANGE_FORMAT == 0
-            range_format_kind<T>;
-        #else
-            []{
-                if constexpr (!std::ranges::input_range<T>)
-                {
-                    return RangeKind::disabled;
-                }
-                else
-                {
-                    #if CFG_TA_FMT_HAS_RANGE_FORMAT == 1
-                    auto value = CFG_TA_FMT_NAMESPACE::format_kind<T>;
-                    #elif CFG_TA_FMT_HAS_RANGE_FORMAT == 2
-                    auto value = CFG_TA_FMT_NAMESPACE::range_format_kind<T, char>::value;
-                    #else
-                    #error Invalid `CFG_TA_FMT_HAS_RANGE_FORMAT` value.
-                    #endif
-                    return
-                        value == CFG_TA_FMT_NAMESPACE::range_format::sequence ? RangeKind::sequence :
-                        value == CFG_TA_FMT_NAMESPACE::range_format::set      ? RangeKind::set :
-                        value == CFG_TA_FMT_NAMESPACE::range_format::map      ? RangeKind::map :
-                        value == CFG_TA_FMT_NAMESPACE::range_format::string || value == CFG_TA_FMT_NAMESPACE::range_format::debug_string ? RangeKind::string :
-                        RangeKind::disabled;
-                }
-            }();
-        #endif
+        constexpr RangeKind from_string_range_format_kind = range_format_kind<T>;
 
         // Our classifier returns junk for `std::string[_view]` by default, so we need those overrides.
         template <>
@@ -4787,7 +4825,7 @@ namespace ta_test
         // If `ok` is null and something goes wrong, aborts the application. If `ok` isn't null, sets it to true on success or to false on failure.
         // `argv[0]` is ignored.
         // If you set `argc` and `argv` to null, does nothing.
-        void ProcessFlags(int argc, char **argv, bool *ok = nullptr) const
+        void ProcessFlags(int argc, const char *const *argv, bool *ok = nullptr) const
         {
             ProcessFlags([argc = argc-1, argv = argv+1]() mutable -> std::optional<std::string_view>
             {
@@ -4860,7 +4898,7 @@ namespace ta_test
     // A simple way to run the tests.
     // Copypaste the body into your code if you need more customization.
     // `argc` and `argv` can be null.
-    inline int RunSimple(int argc, char **argv)
+    inline int RunSimple(int argc, const char *const *argv)
     {
         ta_test::Runner runner;
         runner.SetDefaultModules();

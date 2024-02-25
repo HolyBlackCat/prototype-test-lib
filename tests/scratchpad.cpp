@@ -6,17 +6,13 @@
 
 #include <taut/taut.hpp>
 
-// reset && LANG= make -C tests COMPILERS=clang++ SKIP=clang++_libstdc++_c++2b -j12
+// PERFORMANCE!
 
-// 1. Go write a pre-launch-task
-// 2. Continue writing tests.
+// from-string for weird character types?
 
 TA_TEST(foo/test)
 {
-    TA_GENERATE_PARAM(auto T, 1, 2u, 3ll)
-    {
-        std::cout << T << '\n';
-    };
+    std::cout << TA_GENERATE(x, std::array<float, 0>{}) << '\n';
 }
 
 int main(int argc, char **argv)
@@ -26,7 +22,13 @@ int main(int argc, char **argv)
 
 // TESTS!!
 
+// char{8,16,32}_t, respective strings, std::filesystem::path
+
 // Revert to stdout for output, and add a flag to change that.
+
+// Investigate forceinline + artificial for things that must not be debugged.
+
+// SourceLoc must be constructible from source_location
 
 // Support all three big compilers!
 //     Check that on Windows, tests find libfmt from vcpkg (on MSVC)
@@ -53,9 +55,10 @@ int main(int argc, char **argv)
 //     Flags for tests:
 //         disable by default
 //     In TA_GENERATE_PARAM, move the fat lambdas to a template IF the parameter kind is unparenthesized?
-
-// Later:
-//     Column indicators in paths, and transition to source_location entirely?
+//     UTF-8 encoder/decoder:
+//         google how to better handle invalid bytes? but maybe not
+//         each invalid byte -> single [?] character
+//         then merge it upstream into imp-re
 
 // Maybe not?
 //     Allow more characters in bracket-less form: `:`, `.`, `->`?
@@ -81,8 +84,11 @@ int main(int argc, char **argv)
 //         they can also open the console themselves.
 
 // Unclear how:
-//     To actually read the `new_value_when_revisiting` flag, the lambda needs to be constructed, which sucks dick. But there's probably no workaround?
+//     In generators, to actually read the `new_value_when_revisiting` flag, the lambda needs to be constructed, which sucks dick. But there's probably no workaround?
 //     `noop_if_empty` flag for generators. This will work for `TA_GENERATE_PARAM` and `TA_SELECT`, but what to do with others to have feature parity?
+//     When deserializing u32string (and u32char_t), support out-of-(UTF-8-)range \U escape sequences?
+//         Currently we do everything through UTF-8, this would have to be done differently.
+//     When we have a custom ToString, how to serialize ranges of that type? Do we outright refuse built-in range formatters?
 //     In `TA_GENERATE_PARAM`, an extra list can only runs on demand from the command line.
 //     Draw a fat bracket while explaining each test failure?
 //     `$[...]` could be useful to provide context for non-printable function calls (including void).
@@ -107,6 +113,7 @@ int main(int argc, char **argv)
 //         * Strong assertions throw rather than using `return`.
 //         * hard/soft enum is passed to assertions at runtime.
 //         * Good automatic breakpoints! Do other frameworks do that?
+//         * Supporting all character types.
 //     * Clickthrough everywhere (i.e. file paths everywhere, that should be clickable in an IDE)
 //     * Tests in headers = bad practice, but we support it without code duplication, but still check if the test names clash (different source locations)
 //         * Compare with what gtest and catch2 do.
@@ -121,17 +128,24 @@ int main(int argc, char **argv)
     char[N], const char[N]
     std::string_view
     std::string
+        what about escaping strings?
     char
+    int, short, long, float, double, long double
+
+    std::vector<int> std::set<int>, std::map<int, int>
+    tuple (including empty), pair, std::array
+        user-defined tuple-like classes, with ADL get()
+    nullptr
+
+    ta_test::ExactString
+
+    ??? std::filesystem::path - don't crash with unicode symbols on non-unicode locales? Need to experiment.
+
     ??? wchar_t, wstring, wstring_view? See what libfmt does, but probably later.
     ?????? char16_t, char32_t
-    int, short, long, float, double, long double
-    std::vector<int> std::set<int>, std::map<int, int>
-    tuple (including empty), pair
-    nullptr
-    std::filesystem::path - don't crash with unicode symbols on non-unicode locales? Need to experiment.
 
 --- FromString
-    Same types as in ToString
+    Same types as in ToString (especially std::array)
     Reject duplicate keys in sets and maps
     Reject spaces before and after:
         scalars
@@ -202,7 +216,7 @@ Test both shared and static library builds.
 Big-ass test:
     with different macro values
         CFG_TA_FMT_HAS_FILE_VPRINT=0
-        CFG_TA_FMT_HAS_RANGE_FORMAT=0
+        CFG_TA_FMT_HAS_RANGE_FORMATTING=0
 
 TA_TEST
     Name validation
@@ -231,7 +245,7 @@ TA_CHECK:
     usable without (...) in fold expressions
     Gracefully fail the test if the lazy message throws?
     Error if outlives the test. Error if destroyed out of order?
-    ta_test::ExactString - control characters should be printed as unicode replacements
+    ExactString -> control characters should be printed as unicode replacements
     Compilation error on comma
 
     Check all overloads of the second (...)

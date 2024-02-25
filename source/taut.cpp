@@ -63,9 +63,10 @@ bool ta_test::IsFailing()
     return thread_state.current_test && thread_state.current_test->failed;
 }
 
-void ta_test::text::escape::EscapeString(std::string_view source, std::string &output, bool double_quotes)
+void ta_test::text::escape::EscapeString(std::string_view source, std::string &output, bool double_quotes, bool auto_insert_quotes)
 {
-    output += "'\""[double_quotes];
+    if (auto_insert_quotes)
+        output += "'\""[double_quotes];
 
     // Remaining bytes in this UTF-8 characters.
     int remaining_unicode_bytes = 0;
@@ -128,7 +129,8 @@ void ta_test::text::escape::EscapeString(std::string_view source, std::string &o
         }
     }
 
-    output += "'\""[double_quotes];
+    if (auto_insert_quotes)
+        output += "'\""[double_quotes];
 }
 
 std::string ta_test::text::escape::UnescapeString(const char *&source, std::string &output, char quote_char, bool only_single_char)
@@ -424,6 +426,92 @@ std::string ta_test::string_conv::DefaultFallbackToStringTraits<std::string_view
     ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
     text::escape::EscapeString(value, ret, true);
     return ret;
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<char32_t>::operator()(char32_t value) const
+{
+    if (value <= text::uni::max_char_value)
+    {
+        char buffer[text::uni::max_char_len];
+        std::size_t len = text::uni::EncodeCharToBuffer(value, buffer);
+        std::string ret = "U";
+        text::escape::EscapeString(std::string_view(buffer, buffer + len), ret, false, true);
+        return ret;
+    }
+    else
+    {
+        // The character code is too big, write it as an escape sequence.
+        char buf[16]; // U'\U{12345678}' + \0
+        std::snprintf(buf, sizeof buf, "U'\\U{%08x}'", (unsigned int)value);
+        return buf;
+    }
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<std::u32string_view>::operator()(std::u32string_view value) const
+{
+    // Must do this with a manual loop to support out-of-range `\U` escapes.
+    std::string ret;
+    ret.reserve(value.size() * text::uni::max_char_len + 2); // +2 for quotes, +1 for the `U` prefix.
+    ret += "U\"";
+    for (char32_t ch : value)
+    {
+        char buf[13]; // \U{12345678} + \0
+        if (ch <= text::uni::max_char_value)
+        {
+            std::size_t len = text::uni::EncodeCharToBuffer(ch, buf);
+            text::escape::EscapeString(std::string_view(buf, len), ret, true, false);
+        }
+        else
+        {
+            // The character code is too big, write it as an escape sequence.
+            std::snprintf(buf, sizeof buf, "\\U{%08x}", (unsigned int)ch);
+            ret += buf;
+        }
+    }
+    ret += '"';
+    return ret;
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<char16_t>::operator()(char16_t value) const
+{
+    char buffer[text::uni::max_char_len];
+    std::size_t len = text::uni::EncodeCharToBuffer(value, buffer);
+    std::string ret = "u";
+    text::escape::EscapeString(std::string_view(buffer, buffer + len), ret, false, true);
+    return ret;
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<std::u16string_view>::operator()(std::u16string_view value) const
+{
+    std::string ret;
+    text::uni::Encode(value, ret);
+    return "u" + (ToString)(ret);
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<wchar_t>::operator()(wchar_t value) const
+{
+    char buffer[text::uni::max_char_len];
+    std::size_t len = text::uni::EncodeCharToBuffer(char32_t(value), buffer);
+    std::string ret = "L";
+    text::escape::EscapeString(std::string_view(buffer, buffer + len), ret, false, true);
+    return ret;
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<std::wstring_view>::operator()(std::wstring_view value) const
+{
+    std::string ret;
+    text::uni::Encode(value, ret);
+    return "L" + (ToString)(ret);
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<char8_t>::operator()(char8_t value) const
+{
+    return "u8" + (ToString)(char(value));
+}
+
+std::string ta_test::string_conv::DefaultToStringTraits<std::u8string_view>::operator()(std::u8string_view value) const
+{
+    return "u8" + (ToString)(std::string_view(reinterpret_cast<const char *>(value.data()), value.size()));
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<std::type_index>::operator()(std::type_index value) const

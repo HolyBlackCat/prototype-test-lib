@@ -13,9 +13,13 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 // Whether `std::system` uses CMD.
 #ifndef IS_WINDOWS_SHELL
@@ -278,11 +282,33 @@ struct CodeRunner
     return runner;
 }
 
-const std::string common_program_prefix = R"(
-#include <taut/taut.hpp>
-int main(int argc, char **argv) {return ta_test::RunSimple(argc, argv);}
-)";
+// Whether `T` has a native `{:?}` debug format in this formatting library.
+template <typename T>
+concept HasNativeDebufFormat = requires(CFG_TA_FMT_NAMESPACE::formatter<T> f){f.set_debug_format();};
 
+namespace TestTypes
+{
+    struct UserDefinedTupleLike
+    {
+        int x = 0;
+        std::string y;
+    };
+
+    template <std::size_t I, typename T>
+    requires std::is_same_v<std::remove_cvref_t<T>, UserDefinedTupleLike>
+    auto &&get(T &&value)
+    {
+        if constexpr (I == 0)
+            return std::forward<T>(value).x;
+        else if constexpr (I == 1)
+            return std::forward<T>(value).y;
+        else
+            static_assert(ta_test::meta::AlwaysFalse<ta_test::meta::ValueTag<I>, T>::value, "Bad tuple index!");
+    }
+}
+template <> struct std::tuple_size<TestTypes::UserDefinedTupleLike> : std::integral_constant<std::size_t, 2> {};
+template <> struct std::tuple_element<0, TestTypes::UserDefinedTupleLike> {using type = int;};
+template <> struct std::tuple_element<1, TestTypes::UserDefinedTupleLike> {using type = std::string;};
 
 // Test our own testing functions.
 TA_TEST(rig_selftest)
@@ -301,15 +327,77 @@ TA_TEST(rig_selftest)
 
 TA_TEST(string_conv/to_string)
 {
+    // If true, the formatting library lacks the debug string formatter, so we're using our own fallback with a slightly different behavior.
+    constexpr bool own_string_formatter = !HasNativeDebufFormat<std::string_view>;
+
     // Strings and chars.
-    TA_CHECK( ta_test::string_conv::ToString((const char *)"ab\ncd") == R"("ab\ncd")" );
-    TA_CHECK( ta_test::string_conv::ToString((char *)"ab\ncd") == R"("ab\ncd")" );
-    TA_CHECK( ta_test::string_conv::ToString("ab\ncd") == R"("ab\ncd")" );
-    TA_CHECK( ta_test::string_conv::ToString((char (&)[6])"ab\ncd") == R"("ab\ncd")" );
-    TA_CHECK( ta_test::string_conv::ToString((std::string_view)"ab\ncd") == R"("ab\ncd")" );
-    TA_CHECK( ta_test::string_conv::ToString((std::string)"ab\ncd") == R"("ab\ncd")" );
+    TA_CHECK( ta_test::string_conv::ToString("") == R"("")" );
+    TA_CHECK( ta_test::string_conv::ToString((const char *)"ab\ncd ef") == R"("ab\ncd ef")" );
+    TA_CHECK( ta_test::string_conv::ToString((char *)"ab\ncd ef") == R"("ab\ncd ef")" );
+    TA_CHECK( ta_test::string_conv::ToString("ab\ncd ef") == R"("ab\ncd ef")" );
+    TA_CHECK( ta_test::string_conv::ToString((char (&)[6])"ab\ncd ef") == R"("ab\ncd ef")" );
+    TA_CHECK( ta_test::string_conv::ToString((std::string_view)"ab\ncd ef") == R"("ab\ncd ef")" );
+    TA_CHECK( ta_test::string_conv::ToString((std::string)"ab\ncd ef") == R"("ab\ncd ef")" );
     TA_CHECK( ta_test::string_conv::ToString('a') == R"('a')" );
     TA_CHECK( ta_test::string_conv::ToString('\n') == R"('\n')" );
+
+    { // String escapes.
+        // Control characters.
+        for (char i = 0; i < 32; i++)
+        {
+            std::string escape;
+            std::string alt_escape;
+
+            if (i == '\a')
+                escape = "\\a";
+            else if (i == '\b')
+                escape = "\\b";
+            else if (i == '\f')
+                escape = "\\f";
+            else if (i == '\n')
+                escape = "\\n";
+            else if (i == '\r')
+                escape = "\\r";
+            else if (i == '\t')
+                escape = "\\t";
+            else if (i == '\v')
+                escape = "\\v";
+            else if (i == '\0' && own_string_formatter)
+                escape = "\\0";
+            else
+            {
+                if (own_string_formatter)
+                    escape = CFG_TA_FMT_NAMESPACE::format("\\x{{{:02x}}}", i);
+                else
+                    escape = CFG_TA_FMT_NAMESPACE::format("\\u{{{:x}}}", i);
+            }
+
+            TA_CHECK( $[ta_test::string_conv::ToString(std::string{'X',i,'Y'})] == $["\"X" + escape + "Y\""] );
+        }
+
+        // Escaped quotes.
+        TA_CHECK( $[ta_test::string_conv::ToString("X\"Y")] == R"("X\"Y")" );
+        TA_CHECK( $[ta_test::string_conv::ToString("X'Y")] == R"("X'Y")" );
+        TA_CHECK( $[ta_test::string_conv::ToString("X\\Y")] == R"("X\\Y")" );
+        // Escaped quotes in single characters.
+        TA_CHECK( $[ta_test::string_conv::ToString('"')] == R"('"')" );
+        TA_CHECK( $[ta_test::string_conv::ToString('\'')] == R"('\'')" );
+        TA_CHECK( $[ta_test::string_conv::ToString('\\')] == R"('\\')" );
+
+        // Stuff that doesn't need escaping:
+        TA_CHECK( $[ta_test::string_conv::ToString("X?Y")] == R"("X?Y")" );
+
+        // Decoding unicode characters?!
+        TA_CHECK( $[ta_test::string_conv::ToString("X\u061fY")] == $[own_string_formatter ? "\"X\u061fY\"" : R"("X\u{61f}Y")"] );
+
+        // What about invalid unicode?
+        TA_CHECK( $[ta_test::string_conv::ToString("X\xff\u061f\xef""Y")] == $[own_string_formatter ? "\"X\\x{ff}\u061f\\x{ef}Y\"" : R"("X\x{ff}\u{61f}\x{ef}Y")"] );
+
+        // Incomlete UTF-8 characters?
+        // This is a prefix of e.g. `\xe2\x97\x8a` U+25CA LOZENGE.
+        TA_CHECK( $[ta_test::string_conv::ToString("X\xe2\x97")] == R"("X\x{e2}\x{97}")" );
+    }
+
 
     // Integers.
     auto CheckInt = [&]<typename T>
@@ -332,10 +420,105 @@ TA_TEST(string_conv/to_string)
     {
         TA_CHECK( $[ta_test::string_conv::ToString(T(12.3L))] == R"(12.3)" );
         TA_CHECK( $[ta_test::string_conv::ToString(T(1.23e-09L))] == R"(1.23e-09)" );
+
+        TA_CHECK( $[ta_test::string_conv::ToString(std::numeric_limits<T>::infinity())] == "inf" );
+        TA_CHECK( $[ta_test::string_conv::ToString(-std::numeric_limits<T>::infinity())] == "-inf" );
+        TA_CHECK( $[ta_test::string_conv::ToString(std::numeric_limits<T>::quiet_NaN())] == "nan" );
+        TA_CHECK( $[ta_test::string_conv::ToString(-std::numeric_limits<T>::quiet_NaN())] == "-nan" );
     };
     CheckFloat.operator()<float>();
     CheckFloat.operator()<double>();
     CheckFloat.operator()<long double>();
+
+    // Ranges.
+    TA_CHECK( $[ta_test::string_conv::ToString(std::vector<int>{1,2,3})] == "[1, 2, 3]" );
+    TA_CHECK( $[ta_test::string_conv::ToString(std::vector<int>{})] == "[]" );
+
+    TA_CHECK( $[ta_test::string_conv::ToString(std::set<int>{1,2,3})] == "{1, 2, 3}" );
+    TA_CHECK( $[ta_test::string_conv::ToString(std::set<int>{})] == "{}" );
+
+    TA_CHECK( $[ta_test::string_conv::ToString(std::map<int, std::string>{{1,"a"},{2,"b"},{3,"c"}})] == R"({1: "a", 2: "b", 3: "c"})" );
+    TA_CHECK( $[ta_test::string_conv::ToString(std::map<int, std::string>{})] == "{}" );
+
+    // `std::array` counts as a range.
+    TA_CHECK( $[ta_test::string_conv::ToString(std::array<int, 3>{1,2,3})] == "[1, 2, 3]" );
+    TA_CHECK( $[ta_test::string_conv::ToString(std::array<int, 0>{})] == "[]" );
+
+    // Check that range element types use our formatter, if this is enabled.
+    TA_CHECK( $[ta_test::string_conv::ToString(std::vector{nullptr, nullptr})] ==
+        $[CFG_TA_FMT_ALLOW_NATIVE_RANGE_FORMATTING && CFG_TA_FMT_HAS_RANGE_FORMATTING ? "[0x0, 0x0]" : "[nullptr, nullptr]"]
+    );
+
+    // Tuple-like:
+    TA_CHECK( $[ta_test::string_conv::ToString(std::tuple{1,"a",3.4})] == "(1, \"a\", 3.4)" );
+    TA_CHECK( $[ta_test::string_conv::ToString(std::tuple{})] == "()" );
+    TA_CHECK( $[ta_test::string_conv::ToString(std::tuple{10,20})] == "(10, 20)" ); // Duplicate element tuples.
+    // ... pairs:
+    TA_CHECK( $[ta_test::string_conv::ToString(std::pair{1,"a"})] == "(1, \"a\")" );
+    // ... user-defined types with `get` in an ADL namespace.
+    TA_CHECK( $[ta_test::string_conv::ToString(TestTypes::UserDefinedTupleLike{10,"blah"})] == "(10, \"blah\")" );
+
+    // Nullptr.
+    // Formatting libraries print it as `0x0`, but we override that for sanity.
+    TA_CHECK( $[ta_test::string_conv::ToString(nullptr)] == "nullptr" );
+
+    // Exact string.
+    TA_CHECK( $[ta_test::string_conv::ToString(ta_test::string_conv::ExactString{"foo\nbar blah"})] == "foo\nbar blah" );
+
+    { // Weird character types.
+        // char8_t:
+        TA_CHECK( $[ta_test::string_conv::ToString(u8'A')] == "u8'A'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8'\n')] == "u8'\\n'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8'\xff')] == "u8'\\x{ff}'" );
+        // char16_t:
+        TA_CHECK( $[ta_test::string_conv::ToString(u'A')] == "u'A'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u'\n')] == "u'\\n'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u'\xff')] == "u'\u00ff'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u'\u061f')] == "u'\u061f'" );
+        // char32_t:
+        TA_CHECK( $[ta_test::string_conv::ToString(U'A')] == "U'A'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U'\n')] == "U'\\n'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U'\xff')] == "U'\u00ff'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U'\u061f')] == "U'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\U0001FBCA')] == "L'\U0001FBCA'" ); // U+1FBCA WHITE UP-POINTING CHEVRON
+        TA_CHECK( $[ta_test::string_conv::ToString(char32_t(0x123f567e))] == "L'\\U123f567e'" ); // Out-of-range character.
+        // wchar_t:
+        TA_CHECK( $[ta_test::string_conv::ToString(L'A')] == "L'A'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\n')] == "L'\\n'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\xff')] == "L'\u00ff'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        // Fat wchar8_t: (everywhere except Windows)
+        if (sizeof(wchar_t) >= 4)
+        {
+            TA_CHECK( $[ta_test::string_conv::ToString(L'\U0001FBCA')] == "L'\U0001FBCA'" ); // U+1FBCA WHITE UP-POINTING CHEVRON
+            TA_CHECK( $[ta_test::string_conv::ToString(char32_t(0x123f567e))] == "L'\\U123f567e'" ); // Out-of-range character.
+        }
+
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+    }
+
+
 }
 
 
