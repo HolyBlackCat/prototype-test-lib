@@ -17,7 +17,6 @@
 #include <exception>
 #include <functional>
 #include <initializer_list>
-#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -51,11 +50,14 @@
 #  if CFG_TA_SHARED
 #    ifdef _WIN32
 #      define CFG_TA_API __declspec(dllimport)
+#      define CFG_TA_API_CLASS
 #    else
 #      define CFG_TA_API __attribute__((__visibility__("default")))
+#      define CFG_TA_API_CLASS __attribute__((__visibility__("default")))
 #    endif
 #  else
 #    define CFG_TA_API
+#    define CFG_TA_API_CLASS
 #  endif
 #endif
 
@@ -498,8 +500,8 @@
 
 #define DETAIL_TA_CHECK(macro_name_, str_, ...) \
     /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
-    ~::ta_test::detail::AssertWrapper<macro_name_, str_, #__VA_ARGS__, __FILE__, __LINE__>(\
-        [&]([[maybe_unused]]::ta_test::detail::BasicAssertWrapper &_ta_assert){_ta_assert.EvalCond(__VA_ARGS__);},\
+    ~::ta_test::detail::AssertWrapper(macro_name_, {__FILE__, __LINE__}, str_, #__VA_ARGS__,\
+        [&]([[maybe_unused]]::ta_test::detail::AssertWrapper &_ta_assert){_ta_assert.EvalCond(__VA_ARGS__);},\
         []{CFG_TA_BREAKPOINT();}\
     )\
     .DETAIL_TA_ADD_EXTRAS
@@ -1345,165 +1347,6 @@ namespace ta_test
             // Preserve the class instance between calls to potentially reuse the buffer.
             [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
         };
-
-        // Parsing C++ expressions.
-        namespace expr
-        {
-            // The state of the parser state machine.
-            enum class CharKind
-            {
-                normal,
-                string, // A string literal (not raw), not including things outside quotes.
-                character, // A character literal, not including things outside quotes.
-                string_escape_slash, // Escaping slashes in a string literal.
-                character_escape_slash, // Escaping slashes in a character literal.
-                raw_string, // A raw string literal, starting from `(` and until the closing `"` inclusive.
-                raw_string_initial_sep // A raw string literal, from the opening `"` to the `(` exclusive.
-            };
-
-            // `emit_char` is `(const char &ch, CharKind kind) -> void`.
-            // It's called for every character, classifying it. The character address is guaranteed to be in `expr`.
-            // `function_call` is `(bool exiting, std::string_view name, std::string_view args, std::size_t depth) -> void`.
-            // It's called for every pair of parentheses. `args` is the contents of parentheses, possibly with leading and trailing whitespace.
-            // `name` is the identifier preceding the `(`, without whitespace. It can be empty, or otherwise invalid.
-            // `depth` is the parentheses nesting depth, starting at 0.
-            // It's called both when entering parentheses (`exiting` == false, `args` == "") and when exiting them (`exiting` == true).
-            // If `function_call_uses_brackets` is true, `function_call` expects square brackets instead of parentheses.
-            template <typename EmitCharFunc, typename FunctionCallFunc>
-            constexpr void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, bool function_call_uses_brackets, FunctionCallFunc &&function_call)
-            {
-                CharKind state = CharKind::normal;
-
-                // The previous character.
-                char prev_ch = '\0';
-                // The current identifier. Only makes sense in `state == normal`.
-                std::string_view identifier;
-                // Points at the start of the initial separator of a raw string.
-                const char *raw_string_sep_start = nullptr;
-                // The separator at the end of the raw string.
-                std::string_view raw_string_sep;
-
-                struct Entry
-                {
-                    // The identifier preceding the `(`, such as the function name. if any.
-                    std::string_view ident;
-                    // Points to the beginning of the arguments, right after `(`.
-                    const char *args = nullptr;
-                };
-
-                // A stack of `()` parentheses.
-                // This should be a vector, by my Clang 16 can't handle them in constexpr calls yet...
-                Entry parens_stack[256];
-                std::size_t parens_stack_pos = 0;
-
-                for (const char &ch : expr)
-                {
-                    const CharKind prev_state = state;
-
-                    switch (state)
-                    {
-                      case CharKind::normal:
-                        if (ch == '"' && prev_ch == 'R')
-                        {
-                            state = CharKind::raw_string_initial_sep;
-                            raw_string_sep_start = &ch + 1;
-                        }
-                        else if (ch == '"')
-                        {
-                            state = CharKind::string;
-                        }
-                        else if (ch == '\'')
-                        {
-                            // This condition handles `'` digit separators.
-                            if (identifier.empty() || &identifier.back() + 1 != &ch || !chars::IsDigit(identifier.front()))
-                                state = CharKind::character;
-                        }
-                        else if (chars::IsIdentifierChar(ch))
-                        {
-                            // We reset `identifier` lazily here, as opposed to immediately,
-                            // to allow function calls with whitespace (and/or `)`, even) between the identifier and `(`.
-                            if (!chars::IsIdentifierChar(prev_ch))
-                                identifier = {};
-
-                            if (identifier.empty())
-                                identifier = {&ch, 1};
-                            else
-                                identifier = {identifier.data(), identifier.size() + 1};
-                        }
-                        else
-                        {
-                            if constexpr (!std::is_null_pointer_v<FunctionCallFunc>)
-                            {
-                                if (ch == "(["[function_call_uses_brackets])
-                                {
-                                    if (parens_stack_pos >= std::size(parens_stack))
-                                        HardError("Too many nested parentheses.");
-
-                                    function_call(false, identifier, {}, parens_stack_pos);
-
-                                    parens_stack[parens_stack_pos++] = {
-                                        .ident = identifier,
-                                        .args = &ch + 1,
-                                    };
-                                    identifier = {};
-                                }
-                                else if (ch == ")]"[function_call_uses_brackets] && parens_stack_pos > 0)
-                                {
-                                    parens_stack_pos--;
-                                    function_call(true, parens_stack[parens_stack_pos].ident, std::string_view(parens_stack[parens_stack_pos].args, &ch), parens_stack_pos);
-                                }
-                            }
-                        }
-                        break;
-                      case CharKind::string:
-                        if (ch == '"')
-                            state = CharKind::normal;
-                        else if (ch == '\\')
-                            state = CharKind::string_escape_slash;
-                        break;
-                      case CharKind::character:
-                        if (ch == '\'')
-                            state = CharKind::normal;
-                        else if (ch == '\\')
-                            state = CharKind::character_escape_slash;
-                        break;
-                      case CharKind::string_escape_slash:
-                        state = CharKind::string;
-                        break;
-                      case CharKind::character_escape_slash:
-                        state = CharKind::character;
-                        break;
-                      case CharKind::raw_string_initial_sep:
-                        if (ch == '(')
-                        {
-                            state = CharKind::raw_string;
-                            raw_string_sep = {raw_string_sep_start, &ch};
-                        }
-                        break;
-                      case CharKind::raw_string:
-                        if (ch == '"')
-                        {
-                            std::string_view content(raw_string_sep_start, &ch);
-                            if (content.size() >/*sic*/ raw_string_sep.size() && content[content.size() - raw_string_sep.size() - 1] == ')' && content.ends_with(raw_string_sep))
-                                state = CharKind::normal;
-                        }
-                        break;
-                    }
-
-                    if (prev_state != CharKind::normal && state == CharKind::normal)
-                        identifier = {};
-
-                    CharKind fixed_state = state;
-                    if (prev_state == CharKind::string || prev_state == CharKind::character || prev_state == CharKind::raw_string)
-                        fixed_state = prev_state;
-
-                    if constexpr (!std::is_null_pointer_v<EmitCharFunc>)
-                        emit_char(ch, fixed_state);
-
-                    prev_ch = ch;
-                }
-            }
-        }
 
         // Returns true if the test name `name` matches regex `regex`.
         // Currently this matches the whole name or any prefix ending at `/` (including or excluding `/`).
@@ -2380,10 +2223,10 @@ namespace ta_test
         };
 
         // A compile-time description of a single `TA_TEST(...)`.
-        struct BasicTestInfo
+        struct BasicTest
         {
           protected:
-            ~BasicTestInfo() = default;
+            ~BasicTest() = default;
 
           public:
             // The name passed to the test macro.
@@ -2407,7 +2250,7 @@ namespace ta_test
         // Information about a list of tests that's currently running.
         struct RunTestsProgress : RunTestsInfo
         {
-            std::vector<const BasicTestInfo *> failed_tests;
+            std::vector<const BasicTest *> failed_tests;
 
             // This counts total checks, no matter if failed or not: TA_CHECK, TA_MUST_THROW, FAIL.
             std::size_t num_checks_total = 0;
@@ -2422,19 +2265,9 @@ namespace ta_test
         // Information about a finished list of tests.
         struct RunTestsResults : RunTestsProgress {};
 
-        // Information about the expression argument of `TA_CHECK(...)`, both compile-time and runtime.
-        struct BasicAssertionExpr
+        // Static information about the expression argument of `TA_CHECK(...)`.
+        struct AssertionExprStaticInfo
         {
-          protected:
-            ~BasicAssertionExpr() = default;
-
-          public:
-            // The exact code passed to the assertion macro, as a string. Before macro expansion.
-            [[nodiscard]] virtual std::string_view Expr() const = 0;
-
-            // How many `$[...]` arguments are in this assertion.
-            [[nodiscard]] std::size_t NumArgs() const {return ArgsInfo().size();}
-
             // Misc information about an argument.
             struct ArgInfo
             {
@@ -2455,6 +2288,21 @@ namespace ta_test
                 bool need_bracket = false;
             };
 
+            // The exact code passed to the assertion macro, as a string. Before macro expansion.
+            std::string_view expr;
+
+            // Information about each argument.
+            std::vector<ArgInfo> args_info;
+            // Indices of the arguments (0..N-1), sorted in the preferred draw order. The size of this matches `ArgsInfo().size()`.
+            std::vector<std::size_t> args_in_draw_order;
+
+          protected:
+            AssertionExprStaticInfo() = default;
+        };
+        // Dynamic runtime information about the expression argument of `TA_CHECK(...)`.
+        class AssertionExprDynamicInfo
+        {
+          public:
             // The current runtime state of the argument.
             enum class ArgState
             {
@@ -2463,26 +2311,39 @@ namespace ta_test
                 done, // Has value.
             };
 
-            // Information about each argument. The size of this is `NumArgs()`.
-            [[nodiscard]] virtual std::span<const ArgInfo> ArgsInfo() const = 0;
-            // Indices of the arguments (0..N-1), sorted in the preferred draw order. The size of this is `NumArgs()`.
-            [[nodiscard]] virtual std::span<const std::size_t> ArgsInDrawOrder() const = 0;
+            const AssertionExprStaticInfo *static_info = nullptr;
+
             // The current state of an argument.
             // Causes a hard error if the index is out of range.
-            [[nodiscard]] virtual ArgState CurrentArgState(std::size_t index) const = 0;
+            [[nodiscard]] CFG_TA_API ArgState CurrentArgState(std::size_t index) const;
             // Returns the string representation of an argument.
             // Causes a hard error if the index is out of range, if the argument state isn't equal to `done`.
             // For some types this is lazy, and computes the string the first time it's called.
-            [[nodiscard]] virtual const std::string &CurrentArgValue(std::size_t index) const = 0;
+            [[nodiscard]] CFG_TA_API const std::string &CurrentArgValue(std::size_t index) const;
+
+          protected:
+            // Checks that the argument index is correct. Fails with a hard error if not.
+            // Also validates `arg_buffers_pos` and `arg_metadata_offset`.
+            CFG_TA_API void ValidateArgIndex(std::size_t index) const;
+
+            // An index into `ThreadState().assertion_argument_buffers`.
+            std::size_t arg_buffers_pos = 0;
+            // An offset into `ThreadState().assertion_argument_metadata`.
+            std::size_t arg_metadata_offset = 0;
         };
         // Information about a single `TA_CHECK(...)` call, both compile-time and runtime.
-        struct BasicAssertionInfo : context::BasicFrame
+        // This is separated from `AssertionExprDynamicInfo` to theoretically allow multi-argument assertions,
+        //   custom assertions with extra decorations around the call, etc.
+        struct BasicAssertion : public context::BasicFrame
         {
             // You can set this to true to trigger a breakpoint.
             mutable bool should_break = false;
 
             // The enclosing assertion, if any.
-            const BasicAssertionInfo *enclosing_assertion = nullptr;
+            const BasicAssertion *enclosing_assertion = nullptr;
+
+            // The assertion macro name, e.g. `TA_CHECK`.
+            std::string_view macro_name;
 
             // Where the assertion is located in the source.
             // On failure this can be overridden to point somewhere else.
@@ -2498,7 +2359,7 @@ namespace ta_test
             // An expression that should be printed with syntax highlighting.
             struct DecoExpr {std::string_view string;};
             // An expression with syntax highlighting and argument values. More than one per assertion weren't tested.
-            struct DecoExprWithArgs {const BasicAssertionExpr *expr = nullptr;};
+            struct DecoExprWithArgs {const AssertionExprDynamicInfo *expr = nullptr;};
             // `std::monostate` indicates that there is no more elements.
             using DecoVar = std::variant<std::monostate, DecoFixedString, DecoExpr, DecoExprWithArgs>;
             // Returns one of the elements to be printed.
@@ -2843,7 +2704,7 @@ namespace ta_test
         struct RunSingleTestInfo
         {
             const RunTestsProgress *all_tests = nullptr;
-            const BasicTestInfo *test = nullptr;
+            const BasicTest *test = nullptr;
 
             // True when entering the test for the first time, as opposed to repeating it because of a generator.
             // This is set to `generator_stack.empty()` when entering the test.
@@ -2919,11 +2780,61 @@ namespace ta_test
     // Per-thread state
     namespace detail
     {
+        // Stores a copy of a `$[...]` argument, or its string representation.
+        struct ArgBuffer
+        {
+            alignas(CFG_TA_ARG_STORAGE_ALIGNMENT) char buffer[CFG_TA_ARG_STORAGE_SIZE];
+
+            ArgBuffer() = default;
+            ArgBuffer(const ArgBuffer &) = delete;
+            ArgBuffer &operator=(const ArgBuffer &) = delete;
+        };
+
+        template <typename T>
+        concept FitsIntoArgStorage = sizeof(T) <= CFG_TA_ARG_STORAGE_SIZE && alignof(T) <= CFG_TA_ARG_STORAGE_ALIGNMENT;
+
+        // A metadata for a single `ArgBuffer`.
+        struct ArgMetadata
+        {
+            data::AssertionExprDynamicInfo::ArgState state = data::AssertionExprDynamicInfo::ArgState::not_started;
+
+            // Destroys the object. This can be null if the object needs no cleanup.
+            void (*cleanup_func)(ArgBuffer &buffer) = nullptr;
+
+            // Converts the object to a string. Replaces it with that string, and returns it as is the next time.
+            const std::string &(*to_string_func)(ArgMetadata &self, ArgBuffer &buffer) = nullptr;
+
+            void Destroy(ArgBuffer &buffer) noexcept
+            {
+                if (cleanup_func)
+                {
+                    cleanup_func(buffer);
+                    cleanup_func = nullptr;
+                }
+            }
+
+            template <typename T>
+            requires FitsIntoArgStorage<std::remove_cvref_t<T>>
+            std::remove_cvref_t<T> &StoreValue(ArgBuffer &buffer, T &&value)
+            {
+                Destroy(buffer);
+
+                using type = std::remove_cvref_t<T>;
+
+                auto ret = ::new((void *)buffer.buffer) type(std::forward<T>(value));
+
+                if constexpr (!std::is_trivially_destructible_v<type>)
+                    cleanup_func = [](ArgBuffer &buffer) {std::launder(reinterpret_cast<type *>(buffer.buffer))->~type();};
+
+                return *ret;
+            }
+        };
+
         // The global per-thread state.
         struct GlobalThreadState
         {
             data::RunSingleTestResults *current_test = nullptr;
-            data::BasicAssertionInfo *current_assertion = nullptr;
+            data::BasicAssertion *current_assertion = nullptr;
 
             // This is used to print (or just examine) the current context.
             // All currently running assertions go there, and possibly other things.
@@ -2936,6 +2847,19 @@ namespace ta_test
             // The current scoped log, which is what `context::CurrentScopedLog()` returns.
             // The unscoped log sits in `BasicModule::RunSingleTestResults`.
             std::vector<context::LogEntry *> scoped_log;
+
+            // Assertion argument storage:
+            // We're putting it here to reuse the heap allocations.
+
+            // Byte arrays for the arguments. Outer vector is for nested assertions, inner vectors are for per-assertion arguments.
+            // We can't use a flat vector, because it can't be extended without moving the existing elements,
+            //   which would mess up non-trivially-relocatable elements (which we can't even check for in current C++).
+            std::vector<std::vector<ArgBuffer>> assertion_argument_buffers;
+            // The metadata is relocatable, so this is a flat vector.
+            std::vector<ArgMetadata> assertion_argument_metadata;
+            // Next index for `assertion_argument_buffers`.
+            // We can't use the vector size for that, because we want to preserve the outer vector size to reuse the elements' buffers.
+            std::size_t assertion_argument_buffers_pos = 0;
 
             // Gracefully fails the current test, if not already failed.
             // Call this first, before printing any messages.
@@ -3083,71 +3007,22 @@ namespace ta_test
     {
         // --- ASSERTIONS ---
 
-        // Stores a copy of a `$[...]` argument, or its string representation.
-        struct ArgBuffer
-        {
-            alignas(CFG_TA_ARG_STORAGE_ALIGNMENT) char buffer[CFG_TA_ARG_STORAGE_SIZE];
-
-            ArgBuffer() = default;
-            ArgBuffer(const ArgBuffer &) = delete;
-            ArgBuffer &operator=(const ArgBuffer &) = delete;
-        };
-
-        template <typename T>
-        concept FitsIntoArgStorage = sizeof(T) <= CFG_TA_ARG_STORAGE_SIZE && alignof(T) <= CFG_TA_ARG_STORAGE_ALIGNMENT;
-
-        struct ArgMetadata
-        {
-            data::BasicAssertionExpr::ArgState state = data::BasicAssertionExpr::ArgState::not_started;
-
-            // Destroys the object. This can be null if the object needs no cleanup.
-            void (*cleanup_func)(ArgBuffer &buffer) = nullptr;
-
-            // Converts the object to a string. Replaces it with that string, and returns it as is the next time.
-            const std::string &(*to_string_func)(ArgMetadata &self, ArgBuffer &buffer) = nullptr;
-
-            void Destroy(ArgBuffer &buffer) noexcept
-            {
-                if (cleanup_func)
-                {
-                    cleanup_func(buffer);
-                    cleanup_func = nullptr;
-                }
-            }
-
-            template <typename T>
-            requires FitsIntoArgStorage<std::remove_cvref_t<T>>
-            std::remove_cvref_t<T> &StoreValue(ArgBuffer &buffer, T &&value)
-            {
-                Destroy(buffer);
-
-                using type = std::remove_cvref_t<T>;
-
-                auto ret = ::new((void *)buffer.buffer) type(std::forward<T>(value));
-
-                if constexpr (!std::is_trivially_destructible_v<type>)
-                    cleanup_func = [](ArgBuffer &buffer) {std::launder(reinterpret_cast<type *>(buffer.buffer))->~type();};
-
-                return *ret;
-            }
-        };
-
-        // `TA_ARG` ultimately expands to this.
+        // `$[...]` ultimately expands to this.
         // Stores a pointer to a `StoredArg` in an `AssertWrapper` where it will write the argument as a string.
         struct ArgWrapper
         {
-            data::BasicAssertionInfo *assertion = nullptr;
+            data::BasicAssertion *assertion = nullptr;
             ArgBuffer *target_buffer = nullptr;
             ArgMetadata *target_metadata = nullptr;
 
             // Raises a hard error if the assertion owning this argument isn't currently running in this thread.
             CFG_TA_API void EnsureAssertionIsRunning();
 
-            ArgWrapper(data::BasicAssertionInfo &assertion, ArgBuffer &target_buffer, ArgMetadata &target_metadata)
+            ArgWrapper(data::BasicAssertion &assertion, ArgBuffer &target_buffer, ArgMetadata &target_metadata)
                 : assertion(&assertion), target_buffer(&target_buffer), target_metadata(&target_metadata)
             {
                 EnsureAssertionIsRunning();
-                target_metadata.state = data::BasicAssertionExpr::ArgState::in_progress;
+                target_metadata.state = data::AssertionExprDynamicInfo::ArgState::in_progress;
             }
             ArgWrapper(const ArgWrapper &) = default;
             ArgWrapper &operator=(const ArgWrapper &) = default;
@@ -3188,14 +3063,27 @@ namespace ta_test
                     target_metadata->to_string_func = identity_to_string;
                 }
 
-                target_metadata->state = data::BasicAssertionExpr::ArgState::done;
+                target_metadata->state = data::AssertionExprDynamicInfo::ArgState::done;
                 return std::forward<T>(arg);
             }
         };
 
+        struct AssertionExprStaticInfoImpl final : data::AssertionExprStaticInfo
+        {
+            struct CounterIndexPair
+            {
+                int counter = 0;
+                std::size_t index = 0;
+            };
+
+            std::vector<CounterIndexPair> counter_to_arg_index;
+
+            CFG_TA_API AssertionExprStaticInfoImpl(std::string_view raw_expr, std::string_view expanded_expr);
+        };
+
         // An intermediate base class that `AssertWrapper<T>` inherits from.
         // You can also inherit custom assertion classes from this, if they don't need the expression decomposition provided by `AssertWrapper<T>`.
-        class BasicAssertWrapper : public data::BasicAssertionInfo
+        class CFG_TA_API_CLASS AssertWrapper final : public data::BasicAssertion, public data::AssertionExprDynamicInfo
         {
             bool condition_value = false;
 
@@ -3203,7 +3091,7 @@ namespace ta_test
             bool condition_value_known = false;
 
             // This is called to get the optional user message, flags, etc (null if none of that).
-            void (*extras_func)(BasicAssertWrapper &self, const void *data) = nullptr;
+            void (*extras_func)(AssertWrapper &self, const void *data) = nullptr;
             const void *extras_data = nullptr;
             // The user message (if any) is written here on failure.
             std::optional<std::string> user_message;
@@ -3212,48 +3100,25 @@ namespace ta_test
             AssertFlags flags{};
 
             // Pushes and pops this into the assertion stack.
+            // `Evaluator::operator~()` uses this.
             struct AssertionStackGuard
             {
-                BasicAssertWrapper &self;
+                AssertWrapper &self;
 
-                AssertionStackGuard(BasicAssertWrapper &self)
-                    : self(self)
-                {
-                    GlobalThreadState &thread_state = ThreadState();
-                    if (!thread_state.current_test)
-                        HardError("This thread doesn't have a test currently running, yet it tries to use an assertion.");
-
-                    auto &cur = thread_state.current_assertion;
-                    self.enclosing_assertion = cur;
-                    cur = &self;
-                }
+                CFG_TA_API AssertionStackGuard(AssertWrapper &self);
 
                 AssertionStackGuard(const AssertionStackGuard &) = delete;
                 AssertionStackGuard &operator=(const AssertionStackGuard &) = delete;
 
-                ~AssertionStackGuard()
-                {
-                    // We don't check `finished` here. It can be false when a nested assertion fails.
-
-                    GlobalThreadState &thread_state = ThreadState();
-                    if (thread_state.current_assertion != &self)
-                        HardError("Something is wrong. Are we in a coroutine that was transfered to a different thread in the middle on an assertion?");
-
-                    thread_state.current_assertion = const_cast<data::BasicAssertionInfo *>(self.enclosing_assertion);
-                }
+                CFG_TA_API ~AssertionStackGuard();
             };
 
             // This is invoked when the assertion finishes evaluating.
             struct Evaluator
             {
-                BasicAssertWrapper &self;
+                AssertWrapper &self;
                 CFG_TA_API bool operator~();
             };
-
-          protected:
-            // This is called to evaluate the user condition.
-            void (*condition_func)(BasicAssertWrapper &self, const void *data) = nullptr;
-            const void *condition_data = nullptr;
 
             // Call to trigger a breakpoint at the macro call site.
             void (*break_func)() = nullptr;
@@ -3261,14 +3126,33 @@ namespace ta_test
             // This can be overridden on failure, but not necessarily. Otherwise (and by defualt) points to the actual location.
             data::SourceLoc source_loc;
 
+          protected:
+            // This is called to evaluate the user condition.
+            void (*condition_func)(AssertWrapper &self, const void *data) = nullptr;
+            const void *condition_data = nullptr;
+
           public:
             // Note the weird variable name, it helps with our macro syntax that adds optional messages.
             Evaluator DETAIL_TA_ADD_EXTRAS{*this};
 
-            BasicAssertWrapper() {}
+            CFG_TA_API AssertWrapper(std::string_view name, data::SourceLoc loc, void (*breakpoint_func)());
 
-            BasicAssertWrapper(const BasicAssertWrapper &) = delete;
-            BasicAssertWrapper &operator=(const BasicAssertWrapper &) = delete;
+            template <typename F>
+            AssertWrapper(std::string_view name, data::SourceLoc loc, std::string_view raw_expr, std::string_view expanded_expr, const F &func, void (*breakpoint_func)())
+                : AssertWrapper(name, loc, breakpoint_func)
+            {
+                condition_func = [](AssertWrapper &self, const void *data)
+                {
+                    return (*static_cast<const F *>(data))(self);
+                };
+                condition_data = &func;
+
+                static const AssertionExprStaticInfoImpl static_info_storage(raw_expr, expanded_expr);
+                static_info = &static_info_storage;
+            }
+
+            AssertWrapper(const AssertWrapper &) = delete;
+            AssertWrapper &operator=(const AssertWrapper &) = delete;
 
             template <typename T>
             void EvalCond(T &&value)
@@ -3280,7 +3164,7 @@ namespace ta_test
             template <typename F>
             Evaluator &AddExtras(const F &func)
             {
-                extras_func = [](BasicAssertWrapper &self, const void *data)
+                extras_func = [](AssertWrapper &self, const void *data)
                 {
                     (*static_cast<const F *>(data))(meta::Overload{
                         [&]<typename ...P>(AssertFlags flags)
@@ -3316,250 +3200,14 @@ namespace ta_test
             CFG_TA_API const data::SourceLoc &SourceLocation() const override;
             CFG_TA_API std::optional<std::string_view> UserMessage() const override;
 
-            virtual ArgWrapper _ta_arg_(int counter) = 0;
+            CFG_TA_API DecoVar GetElement(int index) const override;
+            [[nodiscard]] CFG_TA_API ArgWrapper _ta_arg_(int counter);
         };
 
-        template <meta::ConstString MacroName, meta::ConstString RawString, meta::ConstString ExpandedString, meta::ConstString FileName, int LineNumber>
-        requires
-            // Check (at compile-time) that `$[...]` weren't expanded too early by another macro.
-            (RawString.view().find("_ta_arg_(") == std::string_view::npos)
-        struct AssertWrapper : BasicAssertWrapper, data::BasicAssertionExpr
-        {
-            template <typename F>
-            AssertWrapper(const F &func, void (*breakpoint_func)())
-            {
-                condition_func = [](BasicAssertWrapper &self, const void *data)
-                {
-                    return (*static_cast<const F *>(data))(self);
-                };
-                condition_data = &func;
-
-                break_func = breakpoint_func;
-
-                // This constructor is not in the parents because of this line. We don't know the source location in the parent.
-                source_loc = {.file = FileName.view(), .line = LineNumber};
-            }
-
-            // The number of arguments.
-            static constexpr std::size_t num_args = []{
-                std::size_t ret = 0;
-                text::expr::ParseExpr(RawString.view(), nullptr, true, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
-                {
-                    (void)args;
-                    (void)depth;
-                    if (!exiting && text::chars::IsArgMacroName(name))
-                        ret++;
-                });
-                return ret;
-            }();
-
-            // The values of the arguments.
-            // Mutable because those sometimes use lazy to-string conversion.
-            mutable std::array<ArgBuffer, num_args> stored_arg_buffers;
-            mutable std::array<ArgMetadata, num_args> stored_arg_metadata;
-
-            struct CounterIndexPair
-            {
-                int counter = 0;
-                std::size_t index = 0;
-            };
-
-            // Information about the arguments.
-            struct ArgData
-            {
-                // Information about each individual argument.
-                std::array<ArgInfo, num_args> info{};
-
-                // Maps `__COUNTER__` values to argument indices. Sorted by counter, but the values might not be consecutive.
-                std::array<CounterIndexPair, num_args> counter_to_arg_index{};
-
-                // Arguments in the order they should be printed. Which is: highest depth first, then smaller counter values first.
-                std::array<std::size_t, num_args> args_in_draw_order{};
-            };
-
-            static constexpr ArgData arg_data = []{
-                ArgData ret;
-
-                if constexpr (num_args > 0)
-                {
-                    // Below we parse the expression twice. The first parse triggers the callback at the beginning of `$[...]`,
-                    // and the second triggers it at the end of `$[...]`. This creates more work for us, but can't be fixed without
-                    // wrapping the whole argument of `$[...]` in a macro call (which is incompatible with using `[...]`, which we want because they look better).
-
-                    // Parse expanded string.
-                    std::size_t pos = 0;
-                    text::expr::ParseExpr(ExpandedString.view(), nullptr, false, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
-                    {
-                        (void)depth;
-
-                        if (!exiting || name != "_ta_arg_")
-                            return;
-
-                        if (pos >= num_args)
-                            HardError("More `$[...]`s than expected.");
-
-                        ArgInfo &new_info = ret.info[pos];
-
-                        // Note: Can't fill `new_info.depth` here, because the parentheses only container the counter, and not the actual `$[...]` argument.
-                        // We fill the depth during the next pass.
-
-                        for (const char &ch : args)
-                        {
-                            if (text::chars::IsDigit(ch))
-                                new_info.counter = new_info.counter * 10 + (ch - '0');
-                            else if (ch == ',')
-                                break;
-                            else
-                                HardError("Lexer error: Unexpected character after the counter macro.");
-                        }
-
-                        CounterIndexPair &new_pair = ret.counter_to_arg_index[pos];
-                        new_pair.index = pos;
-                        new_pair.counter = new_info.counter;
-
-                        pos++;
-                    });
-                    if (pos != num_args)
-                        HardError("Less `$[...]`s than expected.");
-
-                    // This stack maps bracket depth to the element index, so that the second pass processes things in the same order as the first pass.
-                    // This only matters for nested brackets.
-                    std::size_t bracket_stack[num_args]{};
-
-                    // Parse raw string.
-                    pos = 0;
-                    std::size_t stack_depth = 0;
-                    text::expr::ParseExpr(RawString.view(), nullptr, true, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
-                    {
-                        // This `depth` is useless to us, because it also counts the user parentheses.
-                        (void)depth;
-
-                        if (!text::chars::IsArgMacroName(name))
-                            return;
-
-                        if (!exiting)
-                        {
-                            if (pos >= num_args)
-                                HardError("More `$[...]`s than expected.");
-
-                            bracket_stack[stack_depth++] = pos++;
-                            return;
-                        }
-
-                        ArgInfo &this_info = ret.info[bracket_stack[--stack_depth]];
-
-                        this_info.depth = stack_depth;
-
-                        this_info.expr_offset = std::size_t(args.data() - RawString.view().data());
-                        this_info.expr_size = args.size();
-
-                        this_info.ident_offset = std::size_t(name.data() - RawString.view().data());
-                        this_info.ident_size = name.size();
-
-                        // Trim side whitespace from `args`.
-                        std::string_view trimmed_args = args;
-                        while (!trimmed_args.empty() && text::chars::IsWhitespace(trimmed_args.front()))
-                            trimmed_args.remove_prefix(1);
-                        while (!trimmed_args.empty() && text::chars::IsWhitespace(trimmed_args.back()))
-                            trimmed_args.remove_suffix(1);
-
-                        // Decide if we should draw a bracket for this argument.
-                        for (char ch : trimmed_args)
-                        {
-                            // Whatever the condition is, it should trigger for all arguments with nested arguments.
-                            if (!text::chars::IsIdentifierChar(ch))
-                            {
-                                this_info.need_bracket = true;
-                                break;
-                            }
-                        }
-                    });
-                    if (pos != num_args)
-                        HardError("Less `$[...]`s than expected.");
-
-                    // Sort `counter_to_arg_index` by counter, to allow binary search.
-                    std::sort(ret.counter_to_arg_index.begin(), ret.counter_to_arg_index.end(),
-                        [](const CounterIndexPair &a, const CounterIndexPair &b){return a.counter < b.counter;}
-                    );
-
-                    // Fill and sort `args_in_draw_order`.
-                    for (std::size_t i = 0; i < num_args; i++)
-                        ret.args_in_draw_order[i] = i;
-                    std::sort(ret.args_in_draw_order.begin(), ret.args_in_draw_order.end(), [&](std::size_t a, std::size_t b)
-                    {
-                        if (auto d = ret.info[a].depth <=> ret.info[b].depth; d != 0)
-                            return d > 0;
-                        // if (auto d = ret.info[a].counter <=> ret.info[b].counter; d != 0)
-                        //     return d < 0;
-                        return false;
-                    });
-                }
-
-                return ret;
-            }();
-
-            ~AssertWrapper() noexcept
-            {
-                // Destroy the stored arguments.
-                for (std::size_t i = num_args; i-- > 0;)
-                    stored_arg_metadata[i].Destroy(stored_arg_buffers[i]);
-            }
-
-            std::string_view Expr() const override {return RawString.view();}
-            std::span<const ArgInfo> ArgsInfo() const override {return arg_data.info;}
-            std::span<const std::size_t> ArgsInDrawOrder() const override {return arg_data.args_in_draw_order;}
-
-            ArgState CurrentArgState(std::size_t index) const override
-            {
-                if (index >= num_args)
-                    HardError("Assertion argument index is out of range.");
-                return stored_arg_metadata[index].state;
-            }
-
-            const std::string &CurrentArgValue(std::size_t index) const override
-            {
-                // Check if this argument was actually computed. This also validates the index for us.
-                if (CurrentArgState(index) != ArgState::done)
-                    HardError("This argument wasn't computed yet.");
-                return stored_arg_metadata[index].to_string_func(stored_arg_metadata[index], stored_arg_buffers[index]);
-            }
-
-            DecoVar GetElement(int index) const override
-            {
-                if constexpr (RawString.view().empty())
-                {
-                    // `TA_FAIL` uses this.
-                    return std::monostate{};
-                }
-                else
-                {
-                    static constexpr meta::ConstString name_with_paren = MacroName + "(";
-                    if (index == 0)
-                        return DecoFixedString{.string = name_with_paren.view()};
-                    else if (index == 1)
-                        return DecoExprWithArgs{.expr = this};
-                    else if (index == 2)
-                        return DecoFixedString{.string = ")"};
-                    else
-                        return std::monostate{};
-                }
-            }
-
-            [[nodiscard]] ArgWrapper _ta_arg_(int counter) override
-            {
-                auto it = std::partition_point(arg_data.counter_to_arg_index.begin(), arg_data.counter_to_arg_index.end(),
-                    [&](const CounterIndexPair &pair){return pair.counter < counter;}
-                );
-                if (it == arg_data.counter_to_arg_index.end() || it->counter != counter)
-                    HardError("`TA_CHECK` isn't aware of this `$[...]`.");
-
-                return {*this, stored_arg_buffers[it->index], stored_arg_metadata[it->index]};
-            }
-        };
 
         // --- TESTS ---
 
-        struct BasicTest : data::BasicTestInfo
+        struct BasicTestImpl : data::BasicTest
         {
             virtual void Run() const = 0;
 
@@ -3601,7 +3249,7 @@ namespace ta_test
 
             // Those must be in sync: [
             // All tests.
-            std::vector<const BasicTest *> tests;
+            std::vector<const BasicTestImpl *> tests;
             // Maps test names to indices in `tests`.
             std::map<std::string_view, std::size_t, TestNameLess> name_to_test_index;
             // ]
@@ -3616,18 +3264,18 @@ namespace ta_test
         };
         [[nodiscard]] CFG_TA_API GlobalState &State();
 
-        // Stores singletons derived from `BasicTest`.
-        template <std::derived_from<BasicTest> T>
+        // Stores singletons derived from `BasicTestImpl`.
+        template <std::derived_from<BasicTestImpl> T>
         inline const T test_singleton{};
 
         // Registers a test. Pass a pointer to an instance of `test_singleton<??>`.
-        CFG_TA_API void RegisterTest(const BasicTest *singleton);
+        CFG_TA_API void RegisterTest(const BasicTestImpl *singleton);
 
-        // An implementation of `BasicTest` for a specific test.
+        // An implementation of `BasicTestImpl` for a specific test.
         // `P` is a pointer to the test function, see `DETAIL_TA_TEST()` for details.
         // `B` is a lambda that triggers a breakpoint in the test location itself when called.
         template <auto P, auto B, meta::ConstString TestName, meta::ConstString LocFile, int LocLine>
-        struct SpecificTest : BasicTest
+        struct SpecificTest final : BasicTestImpl
         {
             static constexpr bool test_name_is_valid = []{
                 if (TestName.view().empty())
@@ -3687,7 +3335,7 @@ namespace ta_test
             CFG_TA_API ~BasicScopedLogGuard();
         };
 
-        class ScopedLogGuard : BasicScopedLogGuard
+        class ScopedLogGuard final : BasicScopedLogGuard
         {
             context::LogEntry entry;
 
@@ -3698,7 +3346,7 @@ namespace ta_test
         };
 
         template <typename F>
-        class ScopedLogGuardLazy : BasicScopedLogGuard
+        class ScopedLogGuardLazy final : BasicScopedLogGuard
         {
             F func;
             context::LogEntry entry;

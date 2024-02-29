@@ -480,8 +480,8 @@ TA_TEST(string_conv/to_string)
         TA_CHECK( $[ta_test::string_conv::ToString(U'\n')] == "U'\\n'" );
         TA_CHECK( $[ta_test::string_conv::ToString(U'\xff')] == "U'\u00ff'" );
         TA_CHECK( $[ta_test::string_conv::ToString(U'\u061f')] == "U'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\U0001FBCA')] == "L'\U0001FBCA'" ); // U+1FBCA WHITE UP-POINTING CHEVRON
-        TA_CHECK( $[ta_test::string_conv::ToString(char32_t(0x123f567e))] == "L'\\U123f567e'" ); // Out-of-range character.
+        TA_CHECK( $[ta_test::string_conv::ToString(U'\U0001FBCA')] == "U'\U0001FBCA'" ); // U+1FBCA WHITE UP-POINTING CHEVRON
+        TA_CHECK( $[ta_test::string_conv::ToString(char32_t(0x123f567e))] == "U'\\U{123f567e}'" ); // Out-of-range character.
         // wchar_t:
         TA_CHECK( $[ta_test::string_conv::ToString(L'A')] == "L'A'" );
         TA_CHECK( $[ta_test::string_conv::ToString(L'\n')] == "L'\\n'" );
@@ -491,7 +491,9 @@ TA_TEST(string_conv/to_string)
         if (sizeof(wchar_t) >= 4)
         {
             TA_CHECK( $[ta_test::string_conv::ToString(L'\U0001FBCA')] == "L'\U0001FBCA'" ); // U+1FBCA WHITE UP-POINTING CHEVRON
-            TA_CHECK( $[ta_test::string_conv::ToString(char32_t(0x123f567e))] == "L'\\U123f567e'" ); // Out-of-range character.
+            TA_CHECK( $[ta_test::string_conv::ToString(wchar_t(0x123f567e))] == "L'\\U{123f567e}'" ); // Out-of-range character.
+            #error 1. this doesn't escape the character, but it should.
+            #error 2. repeat all those tests for STRINGS in addition to characters.
         }
 
         TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );

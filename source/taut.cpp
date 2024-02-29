@@ -5,6 +5,8 @@
 #include <taut/taut.hpp>
 #include <taut/modules.hpp>
 
+#include <iterator>
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX 1
@@ -659,6 +661,52 @@ void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<
 
     // Unknown exception type.
     func({});
+}
+
+ta_test::data::AssertionExprDynamicInfo::ArgState ta_test::data::AssertionExprDynamicInfo::CurrentArgState(std::size_t index) const
+{
+    ValidateArgIndex(index);
+    auto &thread_state = detail::ThreadState();
+    return thread_state.assertion_argument_metadata[arg_metadata_offset + index].state;
+}
+
+const std::string &ta_test::data::AssertionExprDynamicInfo::CurrentArgValue(std::size_t index) const
+{
+    ValidateArgIndex(index);
+
+    auto &thread_state = detail::ThreadState();
+
+    auto &metadata = thread_state.assertion_argument_metadata[arg_metadata_offset + index];
+    auto &buffer = thread_state.assertion_argument_buffers[arg_buffers_pos][index];
+
+    return metadata.to_string_func(metadata, buffer);
+}
+
+void ta_test::data::AssertionExprDynamicInfo::ValidateArgIndex(std::size_t index) const
+{
+    auto &thread_state = detail::ThreadState();
+
+    // Metadata index:
+
+    // Make sure the argument storage is as large as we expect it to be.
+    if (arg_metadata_offset + static_info->args_info.size() >/*sic*/ thread_state.assertion_argument_metadata.size())
+        HardError("Something is wrong with the global assertion argument storage, the metadata offset is out of range.");
+
+    // Make sure `index` is in range.
+    if (index >= static_info->args_info.size())
+        HardError("Assretion argument index is out of range.");
+
+    // Buffer index:
+
+    // Check the outer buffer list size.
+    if (arg_buffers_pos >= thread_state.assertion_argument_buffers.size())
+        HardError("Something is wrong with the global assertion argument storage, the buffers offset is out of range.");
+
+    // Check the inner buffer list size.
+    // Note `<`. I'd like `!=` instead, but since the elements are non-movable, it's way easier to keep the size equal to the capacity,
+    //   so the vector will have some unused elements just to keep the memory allocated.
+    if (thread_state.assertion_argument_buffers[arg_buffers_pos].size() < static_info->args_info.size())
+        HardError("Something is wrong with the global assertion argument storage, the inner buffer list has the wrong size.");
 }
 
 ta_test::data::BasicGenerator::OverrideStatus ta_test::data::BasicGenerator::RunGeneratorOverride()
@@ -1445,7 +1493,7 @@ void ta_test::BasicPrintingModule::PrintNote(output::Terminal::StyleGuard &cur_s
 
 void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
 {
-    const data::BasicAssertionInfo *cur = ThreadState().current_assertion;
+    const data::BasicAssertion *cur = ThreadState().current_assertion;
 
     while (cur)
     {
@@ -1457,7 +1505,213 @@ void ta_test::detail::ArgWrapper::EnsureAssertionIsRunning()
     HardError("`$[...]` was evaluated when an assertion owning it already finished executing, or in a wrong thread.", HardErrorKind::user);
 }
 
-bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
+ta_test::detail::AssertionExprStaticInfoImpl::AssertionExprStaticInfoImpl(std::string_view raw_expr, std::string_view expanded_expr)
+{
+    expr = raw_expr;
+
+    // Check that `$[...]` weren't expanded too early by another macro.
+    if (raw_expr.find("_ta_arg_(") != std::string_view::npos)
+    {
+        HardError(
+            "Invalid assertion macro usage. When passing `$[...]`, "
+            "the assertion macro must not be wrapped in another macro. Wrap `DETAIL_TA_CHECK(...)` directly instead.",
+            HardErrorKind::user
+        );
+    }
+
+    std::size_t num_args = 0;
+    text::expr::ParseExpr(raw_expr, nullptr, true, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
+    {
+        (void)args;
+        (void)depth;
+        if (!exiting && text::chars::IsArgMacroName(name))
+            num_args++;
+
+    });
+
+    args_info.resize(num_args);
+    counter_to_arg_index.resize(num_args);
+
+    // Below we parse the expression twice. The first parse triggers the callback at the beginning of `$[...]`,
+    // and the second triggers it at the end of `$[...]`. This creates more work for us, but can't be fixed without
+    // wrapping the whole argument of `$[...]` in a macro call (which is incompatible with using `[...]`, which we want because they look better).
+
+    // Parse expanded string.
+    std::size_t pos = 0;
+    text::expr::ParseExpr(expanded_expr, nullptr, false, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
+    {
+        (void)depth;
+
+        if (!exiting || name != "_ta_arg_")
+            return;
+
+        if (pos >= num_args)
+            HardError("More `$[...]`s than expected.");
+
+        ArgInfo &new_info = args_info[pos];
+
+        // Note: Can't fill `new_info.depth` here, because the parentheses only container the counter, and not the actual `$[...]` argument.
+        // We fill the depth during the next pass.
+
+        for (const char &ch : args)
+        {
+            if (text::chars::IsDigit(ch))
+                new_info.counter = new_info.counter * 10 + (ch - '0');
+            else if (ch == ',')
+                break;
+            else
+                HardError("Lexer error: Unexpected character after the counter macro.");
+        }
+
+        CounterIndexPair &new_pair = counter_to_arg_index[pos];
+        new_pair.index = pos;
+        new_pair.counter = new_info.counter;
+
+        pos++;
+    });
+    if (pos != num_args)
+        HardError("Less `$[...]`s than expected.");
+
+    // This stack maps bracket depth to the element index, so that the second pass processes things in the same order as the first pass.
+    // This only matters for nested brackets.
+    std::vector<std::size_t> bracket_stack;
+    bracket_stack.reserve(num_args);
+
+    // Parse raw string.
+    pos = 0;
+    std::size_t stack_depth = 0;
+    text::expr::ParseExpr(raw_expr, nullptr, true, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
+    {
+        // This `depth` is useless to us, because it also counts the user parentheses.
+        (void)depth;
+
+        if (!text::chars::IsArgMacroName(name))
+            return;
+
+        if (!exiting)
+        {
+            if (pos >= num_args)
+                HardError("More `$[...]`s than expected.");
+
+            bracket_stack.push_back(pos++);
+            return;
+        }
+
+        ArgInfo &this_info = args_info[bracket_stack.back()];
+        bracket_stack.pop_back();
+
+        this_info.depth = stack_depth;
+
+        this_info.expr_offset = std::size_t(args.data() - raw_expr.data());
+        this_info.expr_size = args.size();
+
+        this_info.ident_offset = std::size_t(name.data() - raw_expr.data());
+        this_info.ident_size = name.size();
+
+        // Trim side whitespace from `args`.
+        std::string_view trimmed_args = args;
+        while (!trimmed_args.empty() && text::chars::IsWhitespace(trimmed_args.front()))
+            trimmed_args.remove_prefix(1);
+        while (!trimmed_args.empty() && text::chars::IsWhitespace(trimmed_args.back()))
+            trimmed_args.remove_suffix(1);
+
+        // Decide if we should draw a bracket for this argument.
+        for (char ch : trimmed_args)
+        {
+            // Whatever the condition is, it should trigger for all arguments with nested arguments.
+            if (!text::chars::IsIdentifierChar(ch))
+            {
+                this_info.need_bracket = true;
+                break;
+            }
+        }
+    });
+    if (pos != num_args)
+        HardError("Less `$[...]`s than expected.");
+
+    // Sort `counter_to_arg_index` by counter, to allow binary search.
+    std::sort(counter_to_arg_index.begin(), counter_to_arg_index.end(),
+        [](const CounterIndexPair &a, const CounterIndexPair &b){return a.counter < b.counter;}
+    );
+
+    // Fill and sort `args_in_draw_order`.
+    args_in_draw_order.resize(num_args);
+    for (std::size_t i = 0; i < num_args; i++)
+        args_in_draw_order[i] = i;
+    std::sort(args_in_draw_order.begin(), args_in_draw_order.end(), [&](std::size_t a, std::size_t b)
+    {
+        if (auto d = args_info[a].depth <=> args_info[b].depth; d != 0)
+            return d > 0;
+        if (auto d = args_info[a].counter <=> args_info[b].counter; d != 0)
+            return d < 0;
+        return false;
+    });
+}
+
+ta_test::detail::AssertWrapper::AssertionStackGuard::AssertionStackGuard(AssertWrapper &self)
+    : self(self)
+{
+    GlobalThreadState &thread_state = ThreadState();
+    if (!thread_state.current_test)
+        HardError("This thread doesn't have a test currently running, yet it tries to use an assertion.");
+
+    auto &cur = thread_state.current_assertion;
+    self.enclosing_assertion = cur;
+    cur = &self;
+
+    { // Set up the argument storage.
+        self.arg_buffers_pos = thread_state.assertion_argument_buffers_pos++;
+        if (thread_state.assertion_argument_buffers.size() < thread_state.assertion_argument_buffers_pos)
+            thread_state.assertion_argument_buffers.resize(thread_state.assertion_argument_buffers_pos);
+
+        auto &arg_buffers = thread_state.assertion_argument_buffers[self.arg_buffers_pos];
+        if (!arg_buffers.empty())
+            HardError("Expected the argument buffers to be empty, but there's junk there.");
+
+        // A jank manual resize, since `ArgBuffer` is non-movable.
+        if (arg_buffers.size() < self.static_info->args_info.size())
+            arg_buffers = std::vector<ArgBuffer>(std::max(arg_buffers.size() * 2, self.static_info->args_info.size()));
+
+        self.arg_metadata_offset = thread_state.assertion_argument_metadata.size();
+        thread_state.assertion_argument_metadata.resize(std::max(thread_state.assertion_argument_metadata.size() * 2, self.arg_metadata_offset + self.static_info->args_info.size()));
+    }
+}
+
+ta_test::detail::AssertWrapper::AssertionStackGuard::~AssertionStackGuard()
+{
+    // We don't check `finished` here. It can be false when a nested assertion fails.
+
+    GlobalThreadState &thread_state = ThreadState();
+    if (thread_state.current_assertion != &self)
+        HardError("Something is wrong. Are we in a coroutine that was transfered to a different thread in the middle on an assertion?");
+
+    thread_state.current_assertion = const_cast<data::BasicAssertion *>(self.enclosing_assertion);
+
+    { // Dismantle argument storage.
+        // Decrement depth counter.
+        thread_state.assertion_argument_buffers_pos--;
+        if (self.arg_buffers_pos != thread_state.assertion_argument_buffers_pos)
+            HardError("Assertion depth counter mismatch.");
+
+        // Destroy arguments.
+        for (std::size_t i = self.static_info->args_info.size(); i-- > 0;)
+        {
+            ArgBuffer &buffer = thread_state.assertion_argument_buffers[self.arg_buffers_pos][i];
+            ArgMetadata &metadata = thread_state.assertion_argument_metadata[self.arg_metadata_offset + i];
+            metadata.Destroy(buffer); // This is noexcept.
+        }
+
+        // Intentionally preserve this memory for future reuse.
+        thread_state.assertion_argument_buffers[self.arg_buffers_pos].clear();
+
+        if (self.arg_metadata_offset + self.static_info->args_info.size() != thread_state.assertion_argument_metadata.size())
+            HardError("Invalid argument metadata array size.");
+
+        thread_state.assertion_argument_metadata.resize(self.arg_metadata_offset);
+    }
+}
+
+bool ta_test::detail::AssertWrapper::Evaluator::operator~()
 {
     AssertionStackGuard stack_guard(self);
     context::FrameGuard context_guard({std::shared_ptr<void>{}, &self});
@@ -1541,17 +1795,62 @@ bool ta_test::detail::BasicAssertWrapper::Evaluator::operator~()
     return self.condition_value_known && self.condition_value;
 }
 
-const ta_test::data::SourceLoc &ta_test::detail::BasicAssertWrapper::SourceLocation() const
+ta_test::detail::AssertWrapper::AssertWrapper(std::string_view name, data::SourceLoc loc, void (*breakpoint_func)())
+{
+    macro_name = name;
+    break_func = breakpoint_func;
+    source_loc = loc;
+}
+
+const ta_test::data::SourceLoc &ta_test::detail::AssertWrapper::SourceLocation() const
 {
     return source_loc;
 }
 
-std::optional<std::string_view> ta_test::detail::BasicAssertWrapper::UserMessage() const
+std::optional<std::string_view> ta_test::detail::AssertWrapper::UserMessage() const
 {
     if (user_message)
         return *user_message;
     else
         return {};
+}
+
+ta_test::data::BasicAssertion::DecoVar ta_test::detail::AssertWrapper::GetElement(int index) const
+{
+    if (static_info->expr.empty())
+    {
+        // `TA_FAIL` uses this.
+        return std::monostate{};
+    }
+    else
+    {
+        if (index == 0)
+            return DecoFixedString{.string = macro_name};
+        else if (index == 1)
+            return DecoFixedString{.string = "("};
+        else if (index == 2)
+            return DecoExprWithArgs{.expr = this};
+        else if (index == 3)
+            return DecoFixedString{.string = ")"};
+        else
+            return std::monostate{};
+    }
+}
+
+[[nodiscard]] ta_test::detail::ArgWrapper ta_test::detail::AssertWrapper::_ta_arg_(int counter)
+{
+    const auto &counter_to_arg_index = static_cast<const AssertionExprStaticInfoImpl *>(static_info)->counter_to_arg_index;
+    auto it = std::partition_point(counter_to_arg_index.begin(), counter_to_arg_index.end(),
+        [&](const AssertionExprStaticInfoImpl::CounterIndexPair &pair){return pair.counter < counter;}
+    );
+    if (it == counter_to_arg_index.end() || it->counter != counter)
+        HardError("`TA_CHECK` isn't aware of this `$[...]`.");
+
+    ValidateArgIndex(it->index);
+
+    auto &thread_state = ThreadState();
+
+    return {*this, thread_state.assertion_argument_buffers[arg_buffers_pos][it->index],thread_state.assertion_argument_metadata[arg_metadata_offset + it->index]};
 }
 
 void ta_test::detail::GlobalState::SortTestListInExecutionOrder(std::span<std::size_t> indices) const
@@ -1593,7 +1892,7 @@ ta_test::detail::GlobalState &ta_test::detail::State()
     return ret;
 }
 
-void ta_test::detail::RegisterTest(const BasicTest *singleton)
+void ta_test::detail::RegisterTest(const BasicTestImpl *singleton)
 {
     GlobalState &state = State();
 
@@ -2148,7 +2447,7 @@ int ta_test::Runner::Run()
     // For every non-skipped test...
     for (std::size_t test_index : ordered_tests)
     {
-        const detail::BasicTest *test = state.tests[test_index];
+        const detail::BasicTestImpl *test = state.tests[test_index];
 
         // This stores the generator stack between iterations.
         std::vector<std::unique_ptr<const data::BasicGenerator>> next_generator_stack;
@@ -2178,6 +2477,16 @@ int ta_test::Runner::Run()
             bool should_catch = true;
             module_lists.Call<&BasicModule::OnPreTryCatch>(should_catch);
 
+            // This lambda runs before and after running each test, to make sure the global state is set correctly.
+            auto PreAndPostCheck = [&]
+            {
+                if (thread_state.assertion_argument_buffers_pos != 0)
+                    HardError("The assertion depth counter should be zero when not running a test.");
+                if (!thread_state.assertion_argument_metadata.empty())
+                    HardError("The assertion argument metadata vector should be empty when not running a test.");
+            };
+            PreAndPostCheck();
+
             auto lambda = [&]
             {
                 test->Run();
@@ -2201,6 +2510,8 @@ int ta_test::Runner::Run()
             {
                 lambda();
             }
+
+            PreAndPostCheck();
 
             // Check for non-deterministic use of generators.
             // This is one of the two determinism checks, the second one is in generator's `Generate()` to make sure we're not visiting generators out of order.
@@ -2487,7 +2798,7 @@ std::vector<ta_test::flags::BasicFlag *> ta_test::modules::TestSelector::GetFlag
     return {&flag_include, &flag_exclude};
 }
 
-void ta_test::modules::TestSelector::OnFilterTest(const data::BasicTestInfo &test, bool &enable) noexcept
+void ta_test::modules::TestSelector::OnFilterTest(const data::BasicTest &test, bool &enable) noexcept
 {
     if (patterns.empty())
         return;
@@ -3918,7 +4229,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const data::RunTestsResul
         std::size_t prefix_width = text::uni::CountFirstBytes(chars_test_prefix);
 
         // Determine how much space to leave for the test name tree.
-        for (const data::BasicTestInfo *test : data.failed_tests)
+        for (const data::BasicTest *test : data.failed_tests)
         {
             std::string_view test_name = test->Name();
 
@@ -3935,7 +4246,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const data::RunTestsResul
         }
 
         std::vector<std::string_view> stack;
-        for (const data::BasicTestInfo *test : data.failed_tests)
+        for (const data::BasicTest *test : data.failed_tests)
         {
             ProduceTree(stack, test->Name(), [&](std::size_t segment_index, std::string_view segment, bool is_last_segment)
             {
@@ -4378,7 +4689,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const data::RunTestsResult
 
 // --- modules::AssertionPrinter ---
 
-void ta_test::modules::AssertionPrinter::OnAssertionFailed(const data::BasicAssertionInfo &data) noexcept
+void ta_test::modules::AssertionPrinter::OnAssertionFailed(const data::BasicAssertion &data) noexcept
 {
     auto cur_style = terminal.MakeStyleGuard();
     output::PrintLog(cur_style);
@@ -4388,7 +4699,7 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const data::BasicAsse
 
 bool ta_test::modules::AssertionPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept
 {
-    if (auto assertion_frame = dynamic_cast<const data::BasicAssertionInfo *>(&frame))
+    if (auto assertion_frame = dynamic_cast<const data::BasicAssertion *>(&frame))
     {
         PrintAssertionFrameLow(cur_style, *assertion_frame, false);
         return true;
@@ -4397,7 +4708,7 @@ bool ta_test::modules::AssertionPrinter::PrintContextFrame(output::Terminal::Sty
     return false;
 }
 
-void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const data::BasicAssertionInfo &data, bool is_most_nested) const
+void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const data::BasicAssertion &data, bool is_most_nested) const
 {
     output::TextCanvas canvas(&common_data);
     std::size_t line_counter = 0;
@@ -4430,7 +4741,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
     line_counter++;
 
     // This is set later if we actually have an expression to print.
-    const data::BasicAssertionExpr *expr = nullptr;
+    const data::AssertionExprDynamicInfo *expr = nullptr;
     std::size_t expr_line = line_counter;
     std::size_t expr_column = 0; // This is also set later.
 
@@ -4449,20 +4760,20 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
 
             std::visit(meta::Overload{
                 [&](std::monostate) {},
-                [&](const data::BasicAssertionInfo::DecoFixedString &deco)
+                [&](const data::BasicAssertion::DecoFixedString &deco)
                 {
                     column += canvas.DrawString(line_counter, column, deco.string, assertion_macro_cell_info);
                 },
-                [&](const data::BasicAssertionInfo::DecoExpr &deco)
+                [&](const data::BasicAssertion::DecoExpr &deco)
                 {
                     column += output::expr::DrawToCanvas(canvas, line_counter, column, deco.string);
                 },
-                [&](const data::BasicAssertionInfo::DecoExprWithArgs &deco)
+                [&](const data::BasicAssertion::DecoExprWithArgs &deco)
                 {
                     column += common_data.spaces_in_macro_call_parentheses;
                     expr = deco.expr;
                     expr_column = column;
-                    column += output::expr::DrawToCanvas(canvas, line_counter, column, deco.expr->Expr());
+                    column += output::expr::DrawToCanvas(canvas, line_counter, column, deco.expr->static_info->expr);
                     column += common_data.spaces_in_macro_call_parentheses;
                 },
             }, var);
@@ -4488,15 +4799,15 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
         // Incremented when we print an argument.
         std::size_t color_index = 0;
 
-        for (std::size_t i = 0; i < expr->NumArgs(); i++)
+        for (std::size_t i = 0; i < expr->static_info->args_info.size(); i++)
         {
-            const std::size_t arg_index = expr->ArgsInDrawOrder()[i];
-            data::BasicAssertionExpr::ArgState this_state = expr->CurrentArgState(arg_index);
-            const data::BasicAssertionExpr::ArgInfo &this_info = expr->ArgsInfo()[arg_index];
+            const std::size_t arg_index = expr->static_info->args_in_draw_order[i];
+            data::AssertionExprDynamicInfo::ArgState this_state = expr->CurrentArgState(arg_index);
+            const data::AssertionExprStaticInfo::ArgInfo &this_info = expr->static_info->args_info[arg_index];
 
             bool dim_parentheses = true;
 
-            if (this_state == data::BasicAssertionExpr::ArgState::in_progress)
+            if (this_state == data::AssertionExprDynamicInfo::ArgState::in_progress)
             {
                 if (num_overline_parts == 0)
                 {
@@ -4518,7 +4829,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
                 num_overline_parts++;
             }
 
-            if (this_state == data::BasicAssertionExpr::ArgState::done)
+            if (this_state == data::AssertionExprDynamicInfo::ArgState::done)
             {
                 text::uni::Decode(expr->CurrentArgValue(arg_index), this_value);
 
@@ -4673,7 +4984,7 @@ bool ta_test::modules::LogPrinter::PrintLogEntries(output::Terminal::StyleGuard 
 
 // --- modules::ExceptionPrinter ---
 
-void ta_test::modules::ExceptionPrinter::OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept
+void ta_test::modules::ExceptionPrinter::OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertion *assertion, const std::exception_ptr &e) noexcept
 {
     (void)test;
     (void)assertion;
@@ -4896,13 +5207,13 @@ bool ta_test::modules::DebuggerDetector::IsDebuggerAttached() const
     return platform::IsDebuggerAttached();
 }
 
-void ta_test::modules::DebuggerDetector::OnAssertionFailed(const data::BasicAssertionInfo &data) noexcept
+void ta_test::modules::DebuggerDetector::OnAssertionFailed(const data::BasicAssertion &data) noexcept
 {
     if (break_on_failure ? *break_on_failure : IsDebuggerAttached())
         data.should_break = true;
 }
 
-void ta_test::modules::DebuggerDetector::OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept
+void ta_test::modules::DebuggerDetector::OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertion *assertion, const std::exception_ptr &e) noexcept
 {
     (void)test;
     (void)e;

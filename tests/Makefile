@@ -214,13 +214,13 @@ $(call var,_obj_file_static := $(BUILD_DIR)/$(_config)/taut-static.o)
 $(_obj_file_static): ../source/taut.cpp $(wildcard ../include/taut/*)
 	$$(info [$(_config)] Compiling: $$(notdir $$@))
 	@mkdir -p $$(dir $$@)
-	@$(_cxx) -c $$< -o $$@ -I../include
+	@$(_cxx) -c $$< -o $$@ -I../include -fvisibility=hidden
 
 $(call var,_obj_file_shared := $(BUILD_DIR)/$(_config)/taut.o)
 $(_obj_file_shared): ../source/taut.cpp $(wildcard ../include/taut/*)
 	$$(info [$(_config)] Compiling: $$(notdir $$@))
 	@mkdir -p $$(dir $$@)
-	@$(_cxx) -c $$< -o $$@ -I../include -fPIC -DCFG_TA_SHARED
+	@$(_cxx) -c $$< -o $$@ -I../include -fvisibility=hidden -fPIC -DCFG_TA_SHARED
 
 # Static library.
 $(call var,_static_lib := $(BUILD_DIR)/$(_config)/libtaut-static.a)
@@ -265,9 +265,9 @@ build_$(_config): $(_all_exes)
 .PHONY: test_$(_config)
 test_$(_config): $(if $(AUTO_REBUILD_TESTS),$(_all_exes))
 	$(call, ### Run the sanity check.)
-	$$(call,$$(shell LD_LIBRARY_PATH=$(BUILD_DIR)/$(_config) $(EXE_RUNNER) ./$(BUILD_DIR)/$(_config)/_sanity_check$(EXT_EXE) >/dev/null 2>/dev/null))$$(if $$(filter-out 0,$$(.SHELLSTATUS)),$$(error Sanity check failed for `$(_config)` (happy path)))
-	$$(call,$$(shell LD_LIBRARY_PATH=$(BUILD_DIR)/$(_config) $(EXE_RUNNER) ./$(BUILD_DIR)/$(_config)/_sanity_check$(EXT_EXE) >/dev/null 2>/dev/null --fail-assertion))$$(if $$(filter 0,$$(.SHELLSTATUS)),$$(error Sanity check failed for `$(_config)` (assertion failure)))
-	$$(call,$$(shell LD_LIBRARY_PATH=$(BUILD_DIR)/$(_config) $(EXE_RUNNER) ./$(BUILD_DIR)/$(_config)/_sanity_check$(EXT_EXE) >/dev/null 2>/dev/null --throw-exception))$$(if $$(filter 0,$$(.SHELLSTATUS)),$$(error Sanity check failed for `$(_config)` (thrown exception)))
+	$$(call,$$(shell LD_LIBRARY_PATH=$(BUILD_DIR)/$(_config) $(EXE_RUNNER) ./$(BUILD_DIR)/$(_config)/_sanity_check$(EXT_EXE) $(if $(tracing),,>/dev/null 2>/dev/null)))$$(if $$(filter-out 0,$$(.SHELLSTATUS)),$$(error Sanity check failed for `$(_config)` (happy path)))
+	$$(call,$$(shell LD_LIBRARY_PATH=$(BUILD_DIR)/$(_config) $(EXE_RUNNER) ./$(BUILD_DIR)/$(_config)/_sanity_check$(EXT_EXE) $(if $(tracing),,>/dev/null 2>/dev/null) --fail-assertion))$$(if $$(filter 0,$$(.SHELLSTATUS)),$$(error Sanity check failed for `$(_config)` (assertion failure)))
+	$$(call,$$(shell LD_LIBRARY_PATH=$(BUILD_DIR)/$(_config) $(EXE_RUNNER) ./$(BUILD_DIR)/$(_config)/_sanity_check$(EXT_EXE) $(if $(tracing),,>/dev/null 2>/dev/null) --throw-exception))$$(if $$(filter 0,$$(.SHELLSTATUS)),$$(error Sanity check failed for `$(_config)` (thrown exception)))
 	$$(info [$(_config)] Sanity check passed)
 	$(call, ### Run main tests.)
 	@$(_tests_env) $(EXE_RUNNER) $(BUILD_DIR)/$(_config)/tests$(EXT_EXE) >$(_tests_log) 2>$(_tests_log) || (cat $(_tests_log) && false)

@@ -6,9 +6,12 @@
 
 #include <taut/taut.hpp>
 
-// PERFORMANCE!
+// Repeat all the character tests for strings too!
+
+// Move regex out of line (including header!), because of the slow compilation times.
 
 // from-string for weird character types?
+
 
 TA_TEST(foo/test)
 {
@@ -55,6 +58,10 @@ int main(int argc, char **argv)
 //     Flags for tests:
 //         disable by default
 //     In TA_GENERATE_PARAM, move the fat lambdas to a template IF the parameter kind is unparenthesized?
+
+// Later:
+//     Make another pass over the source and strictly move everything possible to the .cpp?
+//     Re-sort the defintions again.
 //     UTF-8 encoder/decoder:
 //         google how to better handle invalid bytes? but maybe not
 //         each invalid byte -> single [?] character

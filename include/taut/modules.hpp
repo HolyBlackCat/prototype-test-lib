@@ -186,7 +186,7 @@ namespace ta_test
 
         // Whether the test should run.
         // This is called once for every test, with `enable` initially set to true. If it ends up false, the test is skipped.
-        virtual void OnFilterTest(const data::BasicTestInfo &test, bool &enable) noexcept {(void)test; (void)enable;}
+        virtual void OnFilterTest(const data::BasicTest &test, bool &enable) noexcept {(void)test; (void)enable;}
 
         // This is called first, before any tests run.
         virtual void OnPreRunTests(const data::RunTestsInfo &data) noexcept {(void)data;}
@@ -224,12 +224,12 @@ namespace ta_test
         virtual void OnPreFailTest(const data::RunSingleTestProgress &data) noexcept {(void)data;}
 
         // Called when an assertion fails.
-        virtual void OnAssertionFailed(const data::BasicAssertionInfo &data) noexcept {(void)data;}
+        virtual void OnAssertionFailed(const data::BasicAssertion &data) noexcept {(void)data;}
 
         // Called when an exception falls out of an assertion or out of the entire test (in the latter case `assertion` will be null).
         // `assertion` is provided solely to allow you to do `assertion->should_break = true`. If you just want to print the failure context,
         // use `namespace context` instead, it will give you the same assertion and more.
-        virtual void OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept {(void)test; (void)assertion; (void)e;}
+        virtual void OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertion *assertion, const std::exception_ptr &e) noexcept {(void)test; (void)assertion; (void)e;}
 
         // This is called when `TA_MUST_THROW` doesn't throw an exception.
         virtual void OnMissingException(const data::MustThrowInfo &data) noexcept {(void)data;}
@@ -294,6 +294,163 @@ namespace ta_test
             return Detail_ImplementedFunctionsMask() & (MaskType(1) << int(func));
         }
     };
+
+    namespace text
+    {
+        // Parsing C++ expressions.
+        namespace expr
+        {
+            // The state of the parser state machine.
+            enum class CharKind
+            {
+                normal,
+                string, // A string literal (not raw), not including things outside quotes.
+                character, // A character literal, not including things outside quotes.
+                string_escape_slash, // Escaping slashes in a string literal.
+                character_escape_slash, // Escaping slashes in a character literal.
+                raw_string, // A raw string literal, starting from `(` and until the closing `"` inclusive.
+                raw_string_initial_sep // A raw string literal, from the opening `"` to the `(` exclusive.
+            };
+
+            // `emit_char` is `(const char &ch, CharKind kind) -> void`.
+            // It's called for every character, classifying it. The character address is guaranteed to be in `expr`.
+            // `function_call` is `(bool exiting, std::string_view name, std::string_view args, std::size_t depth) -> void`.
+            // It's called for every pair of parentheses. `args` is the contents of parentheses, possibly with leading and trailing whitespace.
+            // `name` is the identifier preceding the `(`, without whitespace. It can be empty, or otherwise invalid.
+            // `depth` is the parentheses nesting depth, starting at 0.
+            // It's called both when entering parentheses (`exiting` == false, `args` == "") and when exiting them (`exiting` == true).
+            // If `function_call_uses_brackets` is true, `function_call` expects square brackets instead of parentheses.
+            template <typename EmitCharFunc, typename FunctionCallFunc>
+            void ParseExpr(std::string_view expr, EmitCharFunc &&emit_char, bool function_call_uses_brackets, FunctionCallFunc &&function_call)
+            {
+                CharKind state = CharKind::normal;
+
+                // The previous character.
+                char prev_ch = '\0';
+                // The current identifier. Only makes sense in `state == normal`.
+                std::string_view identifier;
+                // Points at the start of the initial separator of a raw string.
+                const char *raw_string_sep_start = nullptr;
+                // The separator at the end of the raw string.
+                std::string_view raw_string_sep;
+
+                struct Entry
+                {
+                    // The identifier preceding the `(`, such as the function name. if any.
+                    std::string_view ident;
+                    // Points to the beginning of the arguments, right after `(`.
+                    const char *args = nullptr;
+                };
+
+                // A stack of `()` parentheses.
+                std::vector<Entry> parens_stack;
+
+                for (const char &ch : expr)
+                {
+                    const CharKind prev_state = state;
+
+                    switch (state)
+                    {
+                      case CharKind::normal:
+                        if (ch == '"' && prev_ch == 'R')
+                        {
+                            state = CharKind::raw_string_initial_sep;
+                            raw_string_sep_start = &ch + 1;
+                        }
+                        else if (ch == '"')
+                        {
+                            state = CharKind::string;
+                        }
+                        else if (ch == '\'')
+                        {
+                            // This condition handles `'` digit separators.
+                            if (identifier.empty() || &identifier.back() + 1 != &ch || !chars::IsDigit(identifier.front()))
+                                state = CharKind::character;
+                        }
+                        else if (chars::IsIdentifierChar(ch))
+                        {
+                            // We reset `identifier` lazily here, as opposed to immediately,
+                            // to allow function calls with whitespace (and/or `)`, even) between the identifier and `(`.
+                            if (!chars::IsIdentifierChar(prev_ch))
+                                identifier = {};
+
+                            if (identifier.empty())
+                                identifier = {&ch, 1};
+                            else
+                                identifier = {identifier.data(), identifier.size() + 1};
+                        }
+                        else
+                        {
+                            if constexpr (!std::is_null_pointer_v<FunctionCallFunc>)
+                            {
+                                if (ch == "(["[function_call_uses_brackets])
+                                {
+                                    function_call(false, identifier, {}, parens_stack.size());
+
+                                    parens_stack.push_back({
+                                        .ident = identifier,
+                                        .args = &ch + 1,
+                                    });
+                                    identifier = {};
+                                }
+                                else if (ch == ")]"[function_call_uses_brackets] && !parens_stack.empty())
+                                {
+                                    function_call(true, parens_stack.back().ident, std::string_view(parens_stack.back().args, &ch), parens_stack.size() - 1);
+                                    parens_stack.pop_back();
+                                }
+                            }
+                        }
+                        break;
+                      case CharKind::string:
+                        if (ch == '"')
+                            state = CharKind::normal;
+                        else if (ch == '\\')
+                            state = CharKind::string_escape_slash;
+                        break;
+                      case CharKind::character:
+                        if (ch == '\'')
+                            state = CharKind::normal;
+                        else if (ch == '\\')
+                            state = CharKind::character_escape_slash;
+                        break;
+                      case CharKind::string_escape_slash:
+                        state = CharKind::string;
+                        break;
+                      case CharKind::character_escape_slash:
+                        state = CharKind::character;
+                        break;
+                      case CharKind::raw_string_initial_sep:
+                        if (ch == '(')
+                        {
+                            state = CharKind::raw_string;
+                            raw_string_sep = {raw_string_sep_start, &ch};
+                        }
+                        break;
+                      case CharKind::raw_string:
+                        if (ch == '"')
+                        {
+                            std::string_view content(raw_string_sep_start, &ch);
+                            if (content.size() >/*sic*/ raw_string_sep.size() && content[content.size() - raw_string_sep.size() - 1] == ')' && content.ends_with(raw_string_sep))
+                                state = CharKind::normal;
+                        }
+                        break;
+                    }
+
+                    if (prev_state != CharKind::normal && state == CharKind::normal)
+                        identifier = {};
+
+                    CharKind fixed_state = state;
+                    if (prev_state == CharKind::string || prev_state == CharKind::character || prev_state == CharKind::raw_string)
+                        fixed_state = prev_state;
+
+                    if constexpr (!std::is_null_pointer_v<EmitCharFunc>)
+                        emit_char(ch, fixed_state);
+
+                    prev_ch = ch;
+                }
+            }
+        }
+    }
 
     // Terminal output.
     namespace output
@@ -1100,7 +1257,7 @@ namespace ta_test
 
             CFG_TA_API TestSelector();
             std::vector<flags::BasicFlag *> GetFlags() noexcept override;
-            void OnFilterTest(const data::BasicTestInfo &test, bool &enable) noexcept override;
+            void OnFilterTest(const data::BasicTest &test, bool &enable) noexcept override;
             void OnPreRunTests(const data::RunTestsInfo &data) noexcept override;
 
             CFG_TA_API static flags::StringFlag::Callback GetFlagCallback(bool exclude);
@@ -1699,10 +1856,10 @@ namespace ta_test
             // Same, but when there's something wrong internally with determining the location. This shouldn't happen.
             std::u32string chars_in_this_subexpr_weird = U"in here?";
 
-            void OnAssertionFailed(const data::BasicAssertionInfo &data) noexcept override;
+            void OnAssertionFailed(const data::BasicAssertion &data) noexcept override;
             bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept override;
 
-            CFG_TA_API void PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const data::BasicAssertionInfo &data, bool is_most_nested) const;
+            CFG_TA_API void PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const data::BasicAssertion &data, bool is_most_nested) const;
         };
 
         // Responds to `text::PrintLog()` to print the current log.
@@ -1764,7 +1921,7 @@ namespace ta_test
         {
             std::string chars_error = "Uncaught exception:";
 
-            void OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept override;
+            void OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertion *assertion, const std::exception_ptr &e) noexcept override;
         };
 
         // Prints things related to `TA_MUST_THROW()`.
@@ -1812,8 +1969,8 @@ namespace ta_test
             std::vector<flags::BasicFlag *> GetFlags() noexcept override;
 
             CFG_TA_API bool IsDebuggerAttached() const;
-            void OnAssertionFailed(const data::BasicAssertionInfo &data) noexcept override;
-            void OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertionInfo *assertion, const std::exception_ptr &e) noexcept override;
+            void OnAssertionFailed(const data::BasicAssertion &data) noexcept override;
+            void OnUncaughtException(const data::RunSingleTestInfo &test, const data::BasicAssertion *assertion, const std::exception_ptr &e) noexcept override;
             void OnMissingException(const data::MustThrowInfo &data) noexcept override;
             void OnPreTryCatch(bool &should_catch) noexcept override;
             void OnPostRunSingleTest(const data::RunSingleTestResults &data) noexcept override;
