@@ -1000,6 +1000,23 @@ namespace ta_test
             }
         }
 
+        // String escaping.
+        namespace escape
+        {
+            // Escapes a string, appends the result to `output`. Includes quotes automatically.
+            // Tries to keep unicode characters unescaped, but escapes invalid UTF-8 bytes.
+            // if `auto_insert_quotes` is false, doesn't insert quotes at the beginning and at the end.
+            CFG_TA_API void EscapeString(std::string_view source, std::string &output, bool double_quotes, bool auto_insert_quotes = true);
+
+            // Unescapes a string.
+            // Appends the result to `output`. Returns the error message on failure, or empty string on success.
+            // Tries to support all standard escapes, except for `\N{...}` named characters, because that would be stupid.
+            // We also don't support the useless `\?`.
+            // If `quote_char` isn't zero, we expect it before and after the string.
+            // If `only_single_char` is true, will write at most one character (exactly one on success).
+            CFG_TA_API std::string UnescapeString(const char *&source, std::string &output, char quote_char, bool only_single_char);
+        }
+
         // A mini unicode library.
         namespace uni
         {
@@ -1090,18 +1107,43 @@ namespace ta_test
                 return len;
             }
 
+            enum class EncodeEscapeMode
+            {
+                none,
+                double_quotes, // Escape as if for double quotes, but don't add the quotes themselves.
+                single_quotes, // Escape as if for single quotes, but don't add the quotes themselves.
+            };
+
             // Encodes one string into another.
             // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
-            template <typename T>
+            // If `Escape` is true, also performs escaping. This must be done here to correctly escape large characters that are not representable in UTF-8.
+            template <EncodeEscapeMode Escape = EncodeEscapeMode::none, typename T>
             requires std::is_same_v<T, std::wstring_view> || std::is_same_v<T, std::u16string_view> || std::is_same_v<T, std::u32string_view>
             constexpr void Encode(T view, std::string &str)
             {
-                str.clear();
-                str.reserve(view.size() * max_char_len);
+                str.reserve(str.size() + view.size() * max_char_len);
                 for (auto ch : view)
                 {
+                    // When escaping, if the character code is too big, write it as an escape sequence.
+                    if (Escape != EncodeEscapeMode::none && char32_t(ch) > text::uni::max_char_value)
+                    {
+                        char buf[16]; // U'\U{12345678}' + \0
+                        std::snprintf(buf, sizeof buf, "\\U{%08x}", (unsigned int)ch);
+                        str += buf;
+                        continue;
+                    }
+
                     char buf[max_char_len];
                     std::size_t len = EncodeCharToBuffer(char32_t(ch), buf);
+
+                    // Escape if enabled.
+                    if (Escape != EncodeEscapeMode::none)
+                    {
+                        text::escape::EscapeString(std::string_view(buf, buf + len), str, Escape == EncodeEscapeMode::double_quotes, false);
+                        continue;
+                    }
+
+                    // Append without escaping.
                     str.append(buf, len);
                 }
             }
@@ -1201,31 +1243,12 @@ namespace ta_test
             }
 
             // Decodes one string into another.
-            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
             inline void Decode(std::string_view view, std::u32string &str)
             {
-                str.clear();
-                str.reserve(view.size());
+                str.reserve(str.size() + view.size());
                 for (const char *cur = view.data(); cur - view.data() < std::ptrdiff_t(view.size());)
                     str += uni::DecodeCharFromBuffer(cur, view.data() + view.size(), &cur);
             }
-        }
-
-        // String escaping.
-        namespace escape
-        {
-            // Escapes a string, appends the result to `output`. Includes quotes automatically.
-            // Tries to keep unicode characters unescaped, but escapes invalid UTF-8 bytes.
-            // if `auto_insert_quotes` is false, doesn't insert quotes at the beginning and at the end.
-            CFG_TA_API void EscapeString(std::string_view source, std::string &output, bool double_quotes, bool auto_insert_quotes = true);
-
-            // Unescapes a string.
-            // Appends the result to `output`. Returns the error message on failure, or empty string on success.
-            // Tries to support all standard escapes, except for `\N{...}` named characters, because that would be stupid.
-            // We also don't support the useless `\?`.
-            // If `quote_char` isn't zero, we expect it before and after the string.
-            // If `only_single_char` is true, will write at most one character (exactly one on success).
-            CFG_TA_API std::string UnescapeString(const char *&source, std::string &output, char quote_char, bool only_single_char);
         }
 
         namespace type_name_details
@@ -1482,24 +1505,28 @@ namespace ta_test
         // char32_t:
         template <> struct DefaultToStringTraits<char32_t> {CFG_TA_API std::string operator()(char32_t value) const;};
         template <> struct DefaultToStringTraits<std::u32string_view> {CFG_TA_API std::string operator()(std::u32string_view value) const;};
+        template <> struct DefaultToStringTraits<std::u32string> : DefaultToStringTraits<std::u32string_view> {};
         template <> struct DefaultToStringTraits<      char32_t *> : DefaultToStringTraits<std::u32string_view> {};
         template <> struct DefaultToStringTraits<const char32_t *> : DefaultToStringTraits<std::u32string_view> {};
         template <std::size_t N> struct DefaultToStringTraits<char32_t[N]> : DefaultToStringTraits<std::u32string_view> {};
         // char16_t:
         template <> struct DefaultToStringTraits<char16_t> {CFG_TA_API std::string operator()(char16_t value) const;};
         template <> struct DefaultToStringTraits<std::u16string_view> {CFG_TA_API std::string operator()(std::u16string_view value) const;};
+        template <> struct DefaultToStringTraits<std::u16string> : DefaultToStringTraits<std::u16string_view> {};
         template <> struct DefaultToStringTraits<      char16_t *> : DefaultToStringTraits<std::u16string_view> {};
         template <> struct DefaultToStringTraits<const char16_t *> : DefaultToStringTraits<std::u16string_view> {};
         template <std::size_t N> struct DefaultToStringTraits<char16_t[N]> : DefaultToStringTraits<std::u16string_view> {};
         // wchar_t:
         template <> struct DefaultToStringTraits<wchar_t> {CFG_TA_API std::string operator()(wchar_t value) const;};
         template <> struct DefaultToStringTraits<std::wstring_view> {CFG_TA_API std::string operator()(std::wstring_view value) const;};
+        template <> struct DefaultToStringTraits<std::wstring> : DefaultToStringTraits<std::wstring_view> {};
         template <> struct DefaultToStringTraits<      wchar_t *> : DefaultToStringTraits<std::wstring_view> {};
         template <> struct DefaultToStringTraits<const wchar_t *> : DefaultToStringTraits<std::wstring_view> {};
         template <std::size_t N> struct DefaultToStringTraits<wchar_t[N]> : DefaultToStringTraits<std::wstring_view> {};
         // char8_t:
         template <> struct DefaultToStringTraits<char8_t> {CFG_TA_API std::string operator()(char8_t value) const;};
         template <> struct DefaultToStringTraits<std::u8string_view> {CFG_TA_API std::string operator()(std::u8string_view value) const;};
+        template <> struct DefaultToStringTraits<std::u8string> : DefaultToStringTraits<std::u8string_view> {};
         template <> struct DefaultToStringTraits<      char8_t *> : DefaultToStringTraits<std::u8string_view> {};
         template <> struct DefaultToStringTraits<const char8_t *> : DefaultToStringTraits<std::u8string_view> {};
         template <std::size_t N> struct DefaultToStringTraits<char8_t[N]> : DefaultToStringTraits<std::u8string_view> {};

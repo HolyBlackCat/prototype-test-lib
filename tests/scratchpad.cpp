@@ -6,8 +6,6 @@
 
 #include <taut/taut.hpp>
 
-// Repeat all the character tests for strings too!
-
 // Move regex out of line (including header!), because of the slow compilation times.
 
 // from-string for weird character types?

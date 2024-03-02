@@ -432,78 +432,56 @@ std::string ta_test::string_conv::DefaultFallbackToStringTraits<std::string_view
 
 std::string ta_test::string_conv::DefaultToStringTraits<char32_t>::operator()(char32_t value) const
 {
-    if (value <= text::uni::max_char_value)
-    {
-        char buffer[text::uni::max_char_len];
-        std::size_t len = text::uni::EncodeCharToBuffer(value, buffer);
-        std::string ret = "U";
-        text::escape::EscapeString(std::string_view(buffer, buffer + len), ret, false, true);
-        return ret;
-    }
-    else
-    {
-        // The character code is too big, write it as an escape sequence.
-        char buf[16]; // U'\U{12345678}' + \0
-        std::snprintf(buf, sizeof buf, "U'\\U{%08x}'", (unsigned int)value);
-        return buf;
-    }
+    std::string ret = "U'";
+    text::uni::Encode<text::uni::EncodeEscapeMode::single_quotes>(std::u32string_view{&value, 1}, ret);
+    ret += '\'';
+    return ret;
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<std::u32string_view>::operator()(std::u32string_view value) const
 {
-    // Must do this with a manual loop to support out-of-range `\U` escapes.
     std::string ret;
-    ret.reserve(value.size() * text::uni::max_char_len + 2); // +2 for quotes, +1 for the `U` prefix.
+    ret.reserve(value.size() * text::uni::max_char_len + 3); // +2 for quotes, +1 for the `U` prefix.
     ret += "U\"";
-    for (char32_t ch : value)
-    {
-        char buf[13]; // \U{12345678} + \0
-        if (ch <= text::uni::max_char_value)
-        {
-            std::size_t len = text::uni::EncodeCharToBuffer(ch, buf);
-            text::escape::EscapeString(std::string_view(buf, len), ret, true, false);
-        }
-        else
-        {
-            // The character code is too big, write it as an escape sequence.
-            std::snprintf(buf, sizeof buf, "\\U{%08x}", (unsigned int)ch);
-            ret += buf;
-        }
-    }
+    text::uni::Encode<text::uni::EncodeEscapeMode::double_quotes>(value, ret);
     ret += '"';
     return ret;
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<char16_t>::operator()(char16_t value) const
 {
-    char buffer[text::uni::max_char_len];
-    std::size_t len = text::uni::EncodeCharToBuffer(value, buffer);
-    std::string ret = "u";
-    text::escape::EscapeString(std::string_view(buffer, buffer + len), ret, false, true);
+    std::string ret = "u'";
+    text::uni::Encode<text::uni::EncodeEscapeMode::single_quotes>(std::u16string_view{&value, 1}, ret);
+    ret += '\'';
     return ret;
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<std::u16string_view>::operator()(std::u16string_view value) const
 {
     std::string ret;
-    text::uni::Encode(value, ret);
-    return "u" + (ToString)(ret);
+    ret.reserve(value.size() * text::uni::max_char_len + 3); // +2 for quotes, +1 for the `u` prefix.
+    ret += "u\"";
+    text::uni::Encode<text::uni::EncodeEscapeMode::double_quotes>(value, ret);
+    ret += '"';
+    return ret;
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<wchar_t>::operator()(wchar_t value) const
 {
-    char buffer[text::uni::max_char_len];
-    std::size_t len = text::uni::EncodeCharToBuffer(char32_t(value), buffer);
-    std::string ret = "L";
-    text::escape::EscapeString(std::string_view(buffer, buffer + len), ret, false, true);
+    std::string ret = "L'";
+    text::uni::Encode<text::uni::EncodeEscapeMode::single_quotes>(std::wstring_view{&value, 1}, ret);
+    ret += '\'';
     return ret;
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<std::wstring_view>::operator()(std::wstring_view value) const
 {
     std::string ret;
-    text::uni::Encode(value, ret);
-    return "L" + (ToString)(ret);
+    ret.reserve(value.size() * text::uni::max_char_len + 3); // +2 for quotes, +1 for the `u` prefix.
+    ret += "L\"";
+    text::uni::Encode<text::uni::EncodeEscapeMode::double_quotes>(value, ret);
+    ret += '"';
+    return ret;
 }
 
 std::string ta_test::string_conv::DefaultToStringTraits<char8_t>::operator()(char8_t value) const
@@ -952,6 +930,7 @@ void ta_test::output::TextCanvas::Print(const Terminal &terminal, Terminal::Styl
             if (segment_start == end_pos)
                 return;
 
+            buffer.clear();
             text::uni::Encode(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
             terminal.Print("{}", std::string_view(buffer));
             segment_start = end_pos;
@@ -4785,6 +4764,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
     // The expression.
     if (expr && decompose_expression)
     {
+        // Keeping this outside of the loop to reuse memory.
         std::u32string this_value;
 
         // The bracket above the expression.
@@ -4831,6 +4811,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
 
             if (this_state == data::AssertionExprDynamicInfo::ArgState::done)
             {
+                this_value.clear();
                 text::uni::Decode(expr->CurrentArgValue(arg_index), this_value);
 
                 std::size_t center_x = expr_column + this_info.expr_offset + (this_info.expr_size + 1) / 2 - 1;

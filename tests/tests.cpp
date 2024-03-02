@@ -398,6 +398,115 @@ TA_TEST(string_conv/to_string)
         TA_CHECK( $[ta_test::string_conv::ToString("X\xe2\x97")] == R"("X\x{e2}\x{97}")" );
     }
 
+    { // All character types.
+        // char:
+        TA_CHECK( $[ta_test::string_conv::ToString("blah")] == R"("blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(+"blah")] == R"("blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((char (&)[5])"blah")] == R"("blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((char *)"blah")] == R"("blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::string_view)"blah")] == R"("blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::string)"blah")] == R"("blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString('A')] == R"('A')" );
+        TA_CHECK( $[ta_test::string_conv::ToString("A")] == R"("A")" );
+        TA_CHECK( $[ta_test::string_conv::ToString('\n')] == R"('\n')" );
+        TA_CHECK( $[ta_test::string_conv::ToString("\n")] == R"("\n")" );
+        TA_CHECK( $[ta_test::string_conv::ToString('\xff')] == R"('\x{ff}')" );
+        TA_CHECK( $[ta_test::string_conv::ToString("\xff")] == R"("\x{ff}")" );
+        TA_CHECK( $[ta_test::string_conv::ToString("\u061f")] == "\"\u061f\"" );
+        TA_CHECK( $[ta_test::string_conv::ToString('"')] == R"('"')" );
+        TA_CHECK( $[ta_test::string_conv::ToString('\'')] == R"('\'')" );
+        TA_CHECK( $[ta_test::string_conv::ToString("'")] == R"("'")" );
+        TA_CHECK( $[ta_test::string_conv::ToString("\"")] == R"("\"")" );
+
+        // char8_t:
+        TA_CHECK( $[ta_test::string_conv::ToString(u8"blah")] == R"(u8"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(+u8"blah")] == R"(u8"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((char8_t (&)[5])u8"blah")] == R"(u8"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((char8_t *)u8"blah")] == R"(u8"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::u8string_view)u8"blah")] == R"(u8"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::u8string)u8"blah")] == R"(u8"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8'A')] == R"(u8'A')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8"A")] == R"(u8"A")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8'\n')] == R"(u8'\n')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8"\n")] == R"(u8"\n")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8'\xff')] == R"(u8'\x{ff}')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8"\xff")] == R"(u8"\x{ff}")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8"\u061f")] == "u8\"\u061f\"" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8'"')] == R"(u8'"')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8'\'')] == R"(u8'\'')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8"'")] == R"(u8"'")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u8"\"")] == R"(u8"\"")" );
+        // char16_t:
+        TA_CHECK( $[ta_test::string_conv::ToString(u"blah")] == R"(u"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(+u"blah")] == R"(u"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((char16_t (&)[5])u"blah")] == R"(u"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((char16_t *)u"blah")] == R"(u"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::u16string_view)u"blah")] == R"(u"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::u16string)u"blah")] == R"(u"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u'A')] == R"(u'A')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u"A")] == R"(u"A")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u'\n')] == R"(u'\n')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u"\n")] == R"(u"\n")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u'\xff')] == "u'\u00ff'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u"\xff")] == "u\"\u00ff\"" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u'\u061f')] == "u'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u"\u061f")] == "u\"\u061f\"" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u'"')] == R"(u'"')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u'\'')] == R"(u'\'')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u"'")] == R"(u"'")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(u"\"")] == R"(u"\"")" );
+        // char32_t:
+        TA_CHECK( $[ta_test::string_conv::ToString(U"blah")] == R"(U"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(+U"blah")] == R"(U"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((char32_t (&)[5])U"blah")] == R"(U"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((char32_t *)U"blah")] == R"(U"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::u32string_view)U"blah")] == R"(U"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::u32string)U"blah")] == R"(U"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U'A')] == R"(U'A')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U"A")] == R"(U"A")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U'\n')] == R"(U'\n')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U"\n")] == R"(U"\n")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U'\xff')] == "U'\u00ff'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U"\xff")] == "U\"\u00ff\"" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U'\u061f')] == "U'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U"\u061f")] == "U\"\u061f\"" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U'\U0001FBCA')] == "U'\U0001FBCA'" ); // U+1FBCA WHITE UP-POINTING CHEVRON
+        TA_CHECK( $[ta_test::string_conv::ToString(U"\U0001FBCA")] == "U\"\U0001FBCA\"" ); // U+1FBCA WHITE UP-POINTING CHEVRON
+        TA_CHECK( $[ta_test::string_conv::ToString(char32_t(0x123f567e))] == R"(U'\U{123f567e}')" ); // Out-of-range character.
+        TA_CHECK( $[ta_test::string_conv::ToString(std::u32string{char32_t(0x123f567e)})] == R"(U"\U{123f567e}")" ); // Out-of-range character.
+        TA_CHECK( $[ta_test::string_conv::ToString(U'"')] == R"(U'"')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U'\'')] == R"(U'\'')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U"'")] == R"(U"'")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(U"\"")] == R"(U"\"")" );
+        // wchar_t:
+        TA_CHECK( $[ta_test::string_conv::ToString(L"blah")] == R"(L"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(+L"blah")] == R"(L"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((wchar_t (&)[5])L"blah")] == R"(L"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((wchar_t *)L"blah")] == R"(L"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::wstring_view)L"blah")] == R"(L"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString((std::wstring)L"blah")] == R"(L"blah")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'A')] == R"(L'A')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L"A")] == R"(L"A")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\n')] == R"(L'\n')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L"\n")] == R"(L"\n")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\xff')] == "L'\u00ff'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L"\xff")] == "L\"\u00ff\"" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L"\u061f")] == "L\"\u061f\"" );
+        if (sizeof(wchar_t) >= 4)
+        {
+            // Fat wchar8_t: (everywhere except Windows)
+            TA_CHECK( $[ta_test::string_conv::ToString(L'\U0001FBCA')] == "L'\U0001FBCA'" ); // U+1FBCA WHITE UP-POINTING CHEVRON
+            TA_CHECK( $[ta_test::string_conv::ToString(L"\U0001FBCA")] == "L\"\U0001FBCA\"" ); // U+1FBCA WHITE UP-POINTING CHEVRON
+            TA_CHECK( $[ta_test::string_conv::ToString(wchar_t(0x123f567e))] == R"(L'\U{123f567e}')" ); // Out-of-range character.
+            TA_CHECK( $[ta_test::string_conv::ToString(std::wstring{wchar_t(0x123f567e)})] == R"(L"\U{123f567e}")" ); // Out-of-range character.
+        }
+        TA_CHECK( $[ta_test::string_conv::ToString(L'"')] == R"(L'"')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L'\'')] == R"(L'\'')" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L"'")] == R"(L"'")" );
+        TA_CHECK( $[ta_test::string_conv::ToString(L"\"")] == R"(L"\"")" );
+    }
+
 
     // Integers.
     auto CheckInt = [&]<typename T>
@@ -464,63 +573,6 @@ TA_TEST(string_conv/to_string)
 
     // Exact string.
     TA_CHECK( $[ta_test::string_conv::ToString(ta_test::string_conv::ExactString{"foo\nbar blah"})] == "foo\nbar blah" );
-
-    { // Weird character types.
-        // char8_t:
-        TA_CHECK( $[ta_test::string_conv::ToString(u8'A')] == "u8'A'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(u8'\n')] == "u8'\\n'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(u8'\xff')] == "u8'\\x{ff}'" );
-        // char16_t:
-        TA_CHECK( $[ta_test::string_conv::ToString(u'A')] == "u'A'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(u'\n')] == "u'\\n'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(u'\xff')] == "u'\u00ff'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(u'\u061f')] == "u'\u061f'" );
-        // char32_t:
-        TA_CHECK( $[ta_test::string_conv::ToString(U'A')] == "U'A'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(U'\n')] == "U'\\n'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(U'\xff')] == "U'\u00ff'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(U'\u061f')] == "U'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(U'\U0001FBCA')] == "U'\U0001FBCA'" ); // U+1FBCA WHITE UP-POINTING CHEVRON
-        TA_CHECK( $[ta_test::string_conv::ToString(char32_t(0x123f567e))] == "U'\\U{123f567e}'" ); // Out-of-range character.
-        // wchar_t:
-        TA_CHECK( $[ta_test::string_conv::ToString(L'A')] == "L'A'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\n')] == "L'\\n'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\xff')] == "L'\u00ff'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        // Fat wchar8_t: (everywhere except Windows)
-        if (sizeof(wchar_t) >= 4)
-        {
-            TA_CHECK( $[ta_test::string_conv::ToString(L'\U0001FBCA')] == "L'\U0001FBCA'" ); // U+1FBCA WHITE UP-POINTING CHEVRON
-            TA_CHECK( $[ta_test::string_conv::ToString(wchar_t(0x123f567e))] == "L'\\U{123f567e}'" ); // Out-of-range character.
-            #error 1. this doesn't escape the character, but it should.
-            #error 2. repeat all those tests for STRINGS in addition to characters.
-        }
-
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-        TA_CHECK( $[ta_test::string_conv::ToString(L'\u061f')] == "L'\u061f'" );
-    }
-
-
 }
 
 
