@@ -507,6 +507,13 @@ TA_TEST(string_conv/to_string)
         TA_CHECK( $[ta_test::string_conv::ToString(L"\"")] == R"(L"\"")" );
     }
 
+    { // std::filesystem::path
+        #ifdef _WIN32
+        TA_CHECK( $[ta_test::string_conv::ToString(std::filesystem::path(L"foo/\u061f/bar"))] == "L\"foo/\u061f/bar\"" );
+        #else
+        TA_CHECK( $[ta_test::string_conv::ToString(std::filesystem::path("foo/\u061f/bar"))] == "\"foo/\u061f/bar\"" );
+        #endif
+    }
 
     // Integers.
     auto CheckInt = [&]<typename T>

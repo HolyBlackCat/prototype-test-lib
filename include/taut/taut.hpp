@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem> // To make a `path` formatter.
 #include <functional>
 #include <initializer_list>
 #include <map>
@@ -1534,7 +1535,10 @@ namespace ta_test
         template <> struct DefaultToStringTraits<const char8_t *> : DefaultToStringTraits<std::u8string_view> {};
         template <std::size_t N> struct DefaultToStringTraits<char8_t[N]> : DefaultToStringTraits<std::u8string_view> {};
 
-        // std::filesystem::path
+        // std::filesystem::path:
+        // It seems `std::format` doesn't support it, but `libfmt` does. It's easier to just provide a formatter unconditionally.
+        // If we decide to use libfmt's formatter, must test its behavior on unicode characters, as e.g. MSVC STL would throw in `.string()` in default locale.
+        template <> struct DefaultToStringTraits<std::filesystem::path> {CFG_TA_API std::string operator()(const std::filesystem::path &path) const;};
 
 
         // `ToStringTraits` serializes this as is, without escaping or quotes.

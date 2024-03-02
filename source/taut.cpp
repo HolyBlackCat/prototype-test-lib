@@ -494,6 +494,11 @@ std::string ta_test::string_conv::DefaultToStringTraits<std::u8string_view>::ope
     return "u8" + (ToString)(std::string_view(reinterpret_cast<const char *>(value.data()), value.size()));
 }
 
+std::string ta_test::string_conv::DefaultToStringTraits<std::filesystem::path>::operator()(const std::filesystem::path &value) const
+{
+    return (ToString)(value.native());
+}
+
 std::string ta_test::string_conv::DefaultToStringTraits<std::type_index>::operator()(std::type_index value) const
 {
     return text::Demangler{}(value.name());
