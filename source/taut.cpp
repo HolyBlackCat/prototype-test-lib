@@ -3541,8 +3541,6 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
                 return "";
             };
 
-            static constexpr std::string_view separators = ",&(";
-
             if (*string == '=')
             {
                 BeginPositiveRule();
@@ -3554,7 +3552,7 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
                 string++;
 
                 const char *value_begin = string;
-                text::chars::TryFindUnprotectedSeparator(string, separators);
+                text::chars::TryFindUnprotectedSeparator(string, text::chars::generator_override_separators);
                 new_value.value = TrimValue({value_begin, string});
                 if (new_value.value.empty())
                     return "Expected a value.";
@@ -3576,7 +3574,7 @@ std::string ta_test::modules::GeneratorOverrider::ParseGeneratorOverrideSeq(Gene
                 string += 2;
 
                 const char *value_begin = string;
-                text::chars::TryFindUnprotectedSeparator(string, separators);
+                text::chars::TryFindUnprotectedSeparator(string, text::chars::generator_override_separators);
 
                 auto &value = new_rule.var.emplace<GeneratorOverrideSeq::Entry::RuleRemoveValue>().value;
                 value = TrimValue({value_begin, string});
@@ -4077,12 +4075,19 @@ std::string ta_test::modules::ProgressPrinter::MakeGeneratorSummary(const data::
             if (value.size() <= max_generator_summary_value_length)
             {
                 // Check roundtrip string conversion.
+                value += ','; // Add a separator to make sure `TryFindUnprotectedSeparator` stops right before it.
                 bool roundtrip_ok = false;
                 {
                     const char *string = value.c_str();
-                    std::string error = gen.ValueEqualsToString(string, roundtrip_ok);
-                    if (!error.empty() || string != value.data() + value.size())
-                        roundtrip_ok = false;
+                    text::chars::TryFindUnprotectedSeparator(string, text::chars::generator_override_separators);
+                    if (string == &value.back())
+                    {
+                        value.pop_back(); // Remove the dummy separator.
+                        string = value.c_str();
+                        std::string error = gen.ValueEqualsToString(string, roundtrip_ok);
+                        if (!error.empty() || string != value.data() + value.size())
+                            roundtrip_ok = false;
+                    }
                 }
 
                 if (roundtrip_ok)

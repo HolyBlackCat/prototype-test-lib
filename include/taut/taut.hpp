@@ -998,6 +998,9 @@ namespace ta_test
                 while (ch > first_ch && IsWhitespace(ch[-1]))
                     ch--;
             }
+
+            // A list of separators for `TryFindUnprotectedSeparator` for generator values in `--generate`.
+            inline constexpr std::string_view generator_override_separators = ",&(";
         }
 
         // String escaping.

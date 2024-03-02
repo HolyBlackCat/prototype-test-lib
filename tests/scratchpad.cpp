@@ -369,7 +369,8 @@ TA_CHECK:
     Overall try two scenarios: failing last repetition and failing some other ones. Make sure everything prints sanely.
 
     On test failure, print the generator summary after the test name, to simplify reproduction.
-        If the roundtrip passes AND the string is short (<= 20 chars, since that's max for [u]uint64_t), THEN printed as `=...`.
+        If the roundtrip passes AND the string is short (<= 20 chars, since that's max for [u]int64_t), THEN printed as `=...`.
+            Note that the roundtrip also checks that TryFindUnprotectedSeparator finds the correct end of string.
         Otherwise if the value doesn't come from `=...` flag, THEN print the index `#...`.
             Check that if we have both to_string and from_string conversions, BUT not ==, then the index gets printed.
         Otherwise the whole summary is replaced with `...`.
