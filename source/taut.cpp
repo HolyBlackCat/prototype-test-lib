@@ -65,84 +65,242 @@ bool ta_test::IsFailing()
     return thread_state.current_test && thread_state.current_test->failed;
 }
 
-void ta_test::text::escape::EscapeString(std::string_view source, std::string &output, bool double_quotes, bool auto_insert_quotes)
+template <ta_test::text::encoding::CharType InChar, ta_test::text::encoding::CharType OutChar>
+const char *ta_test::text::encoding::low::EncodeOne(InChar ch, bool encode, std::basic_string<OutChar> &output)
 {
-    if (auto_insert_quotes)
-        output += "'\""[double_quotes];
+    using InCharUnsigned = std::make_unsigned_t<InChar>;
+    using OutCharUnsigned = std::make_unsigned_t<OutChar>;
+    char32_t value = (char32_t)(InCharUnsigned)ch;
 
-    // Remaining bytes in this UTF-8 characters.
-    int remaining_unicode_bytes = 0;
-
-    for (const char &signed_ch : source)
+    if (encode)
     {
-        unsigned char ch = (unsigned char)signed_ch;
-
-        bool should_escape = false;
-
-        if (remaining_unicode_bytes > 0)
+        if (auto error = ValidateCodepoint(value))
         {
-            should_escape = false;
-            remaining_unicode_bytes--;
+            (EncodeOne)(fallback_char, true, output);
+            return error;
         }
-        else if ((ch < ' ') || ch == 0x7f || ch == '\\' || (ch == (double_quotes ? '"' : '\'')))
-        {
-            should_escape = true;
-        }
-        else
-        {
-            bool ok = false;
-            const char *next_char = nullptr;
-            (void)uni::DecodeCharFromBuffer(&signed_ch, source.data() + source.size(), &next_char, &ok);
 
-            if (!ok)
-                should_escape = true; // Invalid byte.
+        if constexpr (sizeof(OutChar) >= 4)
+        {
+            // UTF-32
+
+            output += (OutChar)value;
+        }
+        else if constexpr (sizeof(OutChar) >= 2)
+        {
+            // UTF-16
+
+            if (value > 0xffff)
+            {
+                // A surrogate pair.
+                value -= 0x10000;
+                output += 0xd800 + ((value >> 10) & 0x3ff);
+                output += 0xdc00 + (value & 0x3ff);
+            }
             else
-                remaining_unicode_bytes = int(next_char - &signed_ch - 1);
+            {
+                // A single character.
+                output += char16_t(value);
+            }
         }
-
-        if (!should_escape)
+        else // sizeof(OutChar) == 1
         {
-            output += signed_ch;
-            continue;
-        }
+            // UTF-8
 
-        switch (ch)
-        {
-            case '\0': output += '\\'; output += '0'; break;
-            case '\'': output += '\\'; output += '\''; break;
-            case '\"': output += '\\'; output += '"'; break;
-            case '\\': output += '\\'; output += '\\'; break;
-            case '\a': output += '\\'; output += 'a'; break;
-            case '\b': output += '\\'; output += 'b'; break;
-            case '\f': output += '\\'; output += 'f'; break;
-            case '\n': output += '\\'; output += 'n'; break;
-            case '\r': output += '\\'; output += 'r'; break;
-            case '\t': output += '\\'; output += 't'; break;
-            case '\v': output += '\\'; output += 'v'; break;
-
-          default:
-            // The syntax with braces is from C++23. Without braces the escapes could consume extra characters on the right.
-            // Octal escapes don't do that, but they're just inherently ugly.
-            char buffer[7]; // 7 bytes for: \ x { N N } \0
-            std::snprintf(buffer, sizeof buffer, "\\x{%02x}", ch);
-            for (char *ptr = buffer; *ptr;)
-                output += *ptr++;
-            break;
+            if (ch <= 0x7f)
+            {
+                output += OutChar(ch);
+            }
+            else if (ch <= 0x7ff)
+            {
+                output += OutChar(0b11000000 | (ch >> 6));
+                output += OutChar(0b10000000 | (ch & 0b00111111));
+            }
+            else if (ch <= 0xffff)
+            {
+                output += OutChar(0b11100000 |  (ch >> 12));
+                output += OutChar(0b10000000 | ((ch >>  6) & 0b00111111));
+                output += OutChar(0b10000000 | ( ch        & 0b00111111));
+            }
+            else
+            {
+                output += OutChar(0b11110000 |  (ch >> 18));
+                output += OutChar(0b10000000 | ((ch >> 12) & 0b00111111));
+                output += OutChar(0b10000000 | ((ch >> 6 ) & 0b00111111));
+                output += OutChar(0b10000000 | ( ch        & 0b00111111));
+            }
         }
     }
+    else
+    {
+        if ((char32_t)(OutCharUnsigned)value != value)
+        {
+            (EncodeOne)(fallback_char, true, output);
+            return "This value is not representable in the target character type.";
+        }
 
-    if (auto_insert_quotes)
-        output += "'\""[double_quotes];
+        output += (OutChar)(OutCharUnsigned)value;
+    }
+
+    return nullptr;
 }
 
-std::string ta_test::text::escape::UnescapeString(const char *&source, std::string &output, char quote_char, bool only_single_char)
+#define DETAIL_TA_X(T, U) template const char *ta_test::text::encoding::low::EncodeOne(T ch, bool encode, std::basic_string<U> &output);
+DETAIL_TA_FOR_EACH_CHAR_TYPE_2(DETAIL_TA_X)
+#undef DETAIL_TA_X
+
+void ta_test::text::encoding::low::EncodeAndEscapeOne(char32_t ch, bool encode, char quote_char, std::string &output)
 {
+    if (!(
+        // If `encode == false`, it means we're printing an invalid symbol and should always escape it.
+        !encode ||
+        // Control characters.
+        (ch < ' ') || ch == 0x7f ||
+        // Backslashes.
+        ch == '\\' ||
+        // Quotes, depending on `quote_char`.
+        ((ch == '"') && (quote_char != '\'')) || ((ch == '\'') && (quote_char != '"')) ||
+        // Too large or a surrogate.
+        CodepointIsInvalid(ch)
+    ))
+    {
+        // A normal character, try to write it.
+        // This can fail e.g. if `encode == false` and the character doesn't fit.
+        if (!EncodeOne(ch, encode, output))
+            return;
+    }
+
+    switch (ch)
+    {
+        // We don't output `\0` because that can merge with following digits.
+        case '\'': output += '\\'; output += '\''; return;
+        case '\"': output += '\\'; output += '"'; return;
+        case '\\': output += '\\'; output += '\\'; return;
+        case '\a': output += '\\'; output += 'a'; return;
+        case '\b': output += '\\'; output += 'b'; return;
+        case '\f': output += '\\'; output += 'f'; return;
+        case '\n': output += '\\'; output += 'n'; return;
+        case '\r': output += '\\'; output += 'r'; return;
+        case '\t': output += '\\'; output += 't'; return;
+        case '\v': output += '\\'; output += 'v'; return;
+
+      default:
+        // The syntax with braces is from C++23. Without braces the escapes could consume extra characters on the right.
+        // Octal escapes don't do that, but they're just inherently ugly.
+        char buffer[13]; // \u{12345678} \0
+        std::snprintf(buffer, sizeof buffer, "\\%c{%x}", encode ? 'u' : 'x', (unsigned int)ch);
+        output += buffer;
+    }
+}
+
+template <ta_test::text::encoding::CharType T>
+const char *ta_test::text::encoding::low::DecodeOne(const T *&source, const T *end, char32_t &output_char)
+{
+    if (source == end)
+        return "Unexpected end of string.";
+
+    if (sizeof(T) >= 4)
+    {
+        output_char = (char32_t)*source++;
+    }
+    else if (sizeof(T) >= 2)
+    {
+        if (*source >= 0xdc00 && *source <= 0xdfff)
+        {
+            output_char = (char16_t)*source++;
+            return "A lone low surrogate not preceded by a high surrogate.";
+        }
+
+        if (*source >= 0xd800 && *source <= 0xdbff)
+        {
+            if (source + 1 != end && source[1] >= 0xdc00 && source[1] <= 0xdfff)
+            {
+                output_char = char16_t((((char16_t)source[1] & 0x3ff) | ((char16_t)source[0] & 0x3ff) << 10) + char16_t(0x10000));
+                source += 2;
+                return nullptr;
+            }
+            else
+            {
+                output_char = (char16_t)*source++;
+                return "A lone high surrogate not followed by a low surrogate.";
+            }
+        }
+
+        output_char = (char16_t)*source++;
+    }
+    else // sizeof(T) == 1
+    {
+        int bytes = 0;
+        if      ((*source & 0b10000000) == 0b00000000) bytes = 1; // Note the different bit pattern in this one.
+        else if ((*source & 0b11100000) == 0b11000000) bytes = 2;
+        else if ((*source & 0b11110000) == 0b11100000) bytes = 3;
+        else if ((*source & 0b11111000) == 0b11110000) bytes = 4;
+
+        if (bytes == 0)
+        {
+            output_char = (unsigned char)*source++;
+            return "This is not a valid first byte of a character for UTF-8.";
+        }
+
+        if (bytes == 1)
+        {
+            output_char = (unsigned char)*source++;
+            return nullptr;
+        }
+
+        // Extract bits from the first byte.
+        output_char = (unsigned char)*source & (0xff >> bytes); // `bytes + 1` would have the same effect as `bytes`, but it's longer to type.
+
+        // For each remaining byte...
+        for (int i = 1; i < bytes; i++)
+        {
+            // Stop if it's a first byte of some character, or if hitting the end of string.
+            if (source + i == end || (source[i] & 0b11000000) != 0b10000000)
+            {
+                output_char = (unsigned char)*source++;
+                return "Incomplete multibyte UTF-8 character.";
+            }
+
+            // Extract bits and append them to the code.
+            output_char = output_char << 6 | ((unsigned char)source[i] & 0b00111111);
+        }
+
+        source += bytes;
+        return nullptr;
+    }
+
+    // Not overwriting the output character if this fails, it could still be useful.
+    return ValidateCodepoint(output_char);
+}
+
+#define DETAIL_TA_X(T) template const char *ta_test::text::encoding::low::DecodeOne(const T *&source, const T *end, char32_t &output_char);
+DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+#undef DETAIL_TA_X
+
+const char *ta_test::text::encoding::low::DecodeAndUnescapeOne(const char *&source, const char *end, char32_t &output_char, bool &output_encode)
+{
+    if (source == end)
+        return "Unexpected end of string.";
+
+    if (*source != '\\')
+    {
+        // Not escaped.
+        const char *error = DecodeOne(source, end, output_char);
+        output_encode = !error; // User should ignore the output parameters on failure, but we're still doing the meaningful thing here.
+        return error;
+    }
+    source++;
+
+    if (source == end)
+        return "Incomplete escape sequence at the end of string.";
+
     // Consumes digits for an escape sequence.
     // If `hex == true` those are hex digits, otherwise octal.
-    // `max_digits` is how many digits we can consume, or `-1` to consume as many as possible, or `-2` to wait for a `}`.
-    // `max_value` is the max value we're allowing, inclusive.
+    // `max_digits` is how many digits we can consume, or `-1` to consume as many as possible,
+    //   or `-2` to wait for a `}` (either way must consume at least one).
+    // If `allow_less_digits == true` will allow less digits than expected, but at least one (only makes sense for a positive `max_digits`).
     // Writes the resulting number to `result`. Returns the error on failure, or an empty string on success.
-    auto ConsumeDigits = [&] CFG_TA_NODISCARD_LAMBDA (char32_t &result, bool hex, int max_digits, char32_t max_value) -> std::string
+    auto ConsumeDigits = [&] CFG_TA_NODISCARD_LAMBDA (char32_t &result, bool hex, int max_digits, bool allow_less_digits = false) -> const char *
     {
         result = 0;
 
@@ -156,28 +314,29 @@ std::string ta_test::text::escape::UnescapeString(const char *&source, std::stri
 
             if (hex)
             {
-                is_digit =
+                is_digit = source != end && (
                     (is_decimal = *source >= '0' && *source <= '9') ||
                     (is_hex_lowercase = *source >= 'a' && *source <= 'f') ||
-                    (is_hex_uppercase = *source >= 'A' && *source <= 'F');
+                    (is_hex_uppercase = *source >= 'A' && *source <= 'F')
+                );
             }
             else
             {
                 is_decimal = true;
-                is_digit = *source >= '0' && *source <= '7';
+                is_digit = source != end && *source >= '0' && *source <= '7';
             }
 
             if (!is_digit)
             {
-                if (max_digits < 0 && i > 0)
+                if ((max_digits < 0 || allow_less_digits) && i > 0)
                     break;
                 else
-                    return CFG_TA_FMT_NAMESPACE::format("Expected {} digit in escape sequence.", hex ? "hexadecimal" : "octal");
+                    return hex ? "Expected hexadecimal digit in escape sequence." : "Expected octal digit in escape sequence.";
             }
 
             char32_t new_result = result * (hex ? 16 : 8) + char32_t(is_decimal ? *source - '0' : is_hex_lowercase ? *source - 'a' + 10 : *source - 'A' + 10);
-            if (new_result > max_value)
-                return "Escape sequence is out of range.";
+            if (new_result < result)
+                return "Overflow in escape sequence.";
 
             result = new_result;
 
@@ -189,132 +348,236 @@ std::string ta_test::text::escape::UnescapeString(const char *&source, std::stri
 
         if (max_digits == -2)
         {
-            if (*source != '}')
-                return "Expected `}` to close the escape sequence.";
+            if (source == end || *source != '}')
+                return "Expected closing `}` in the escape sequence.";
             source++;
         }
 
-        return "";
+        return nullptr;
     };
 
-    if (quote_char)
+    output_encode = false;
+
+    switch (*source++)
     {
-        if (*source != quote_char)
-            return CFG_TA_FMT_NAMESPACE::format("Expected opening `{}`.", quote_char);
-        source++;
-    }
+        case 'N': source--; return "Named character escapes are not supported.";
 
-    std::size_t char_counter = 0;
+        case '\'': output_char = '\''; return nullptr;
+        case '"':  output_char = '"';  return nullptr;
+        case '\\': output_char = '\\'; return nullptr;
+        case 'a':  output_char = '\a'; return nullptr;
+        case 'b':  output_char = '\b'; return nullptr;
+        case 'f':  output_char = '\f'; return nullptr;
+        case 'n':  output_char = '\n'; return nullptr;
+        case 'r':  output_char = '\r'; return nullptr;
+        case 't':  output_char = '\t'; return nullptr;
+        case 'v':  output_char = '\v'; return nullptr;
 
-    while (*source != '\0' && *source != quote_char)
-    {
-        char_counter++;
-        if (only_single_char && char_counter == 2)
-            break;
-
-        if (*source != '\\')
+      case 'o':
         {
-            output += *source++;
-            continue;
+            if (source == end || *source != '{')
+                return "Expected opening `{` in the escape sequence.";
+            source++;
+            if (auto error = ConsumeDigits(output_char, false, -2))
+                return error;
         }
-        source++;
+        break;
 
-        switch (*source++)
+      case 'x':
         {
-            case 'N': source--; return "Named character escapes are not supported.";
-
-            case '\'': output += '\''; break;
-            case '"':  output += '"';  break;
-            case '\\': output += '\\'; break;
-            case 'a':  output += '\a'; break;
-            case 'b':  output += '\b'; break;
-            case 'f':  output += '\f'; break;
-            case 'n':  output += '\n'; break;
-            case 'r':  output += '\r'; break;
-            case 't':  output += '\t'; break;
-            case 'v':  output += '\v'; break;
-
-          case 'o':
+            if (source != end && *source == '{')
             {
-                if (*source != '{')
-                    return "Expected `{` to begin the escape sequence.";
                 source++;
-                char32_t n = 0;
-                if (auto error = ConsumeDigits(n, false, -2, 0xff); !error.empty())
+                if (auto error = ConsumeDigits(output_char, true, -2))
                     return error;
-                output += char(n);
             }
-            break;
-
-          case 'x':
+            else
             {
-                char32_t n = 0;
-                if (*source == '{')
-                {
-                    source++;
-                    if (auto error = ConsumeDigits(n, true, -2, 0xff); !error.empty())
-                        return error;
-                }
-                else
-                {
-                    if (auto error = ConsumeDigits(n, true, -1, 0xff); !error.empty())
-                        return error;
-                }
-                output += char(n);
-            }
-            break;
-
-          case 'u':
-          case 'U':
-            {
-                char32_t n = 0;
-                if (*source == '{')
-                {
-                    source++;
-                    if (auto error = ConsumeDigits(n, true, -2, uni::max_char_value); !error.empty())
-                        return error;
-                }
-                else
-                {
-                    if (auto error = ConsumeDigits(n, true, source[-1] == 'u' ? 4 : 8, uni::max_char_value); !error.empty())
-                        return error;
-                }
-
-                char buffer[uni::max_char_len];
-                std::size_t len = uni::EncodeCharToBuffer(n, buffer);
-                if (only_single_char && n > 0x7f)
-                    return "Escape sequence is too large for this character type.";
-                for (std::size_t i = 0; i < len; i++)
-                    output += buffer[i];
-            }
-            break;
-
-          default:
-            source--;
-            if (*source >= '0' && *source <= '7')
-            {
-                char32_t n = 0;
-                if (auto error = ConsumeDigits(n, false, 3, 0xff); !error.empty())
+                if (auto error = ConsumeDigits(output_char, true, -1))
                     return error;
-                output += char(n);
-                break;
             }
-            return "Invalid escape sequence.";
+        }
+        break;
+
+      case 'u':
+      case 'U':
+        {
+            output_encode = true;
+            if (source[-1] == 'u' && source != end && *source == '{')
+            {
+                source++;
+                if (auto error = ConsumeDigits(output_char, true, -2))
+                    return error;
+            }
+            else
+            {
+                if (auto error = ConsumeDigits(output_char, true, source[-1] == 'u' ? 4 : 8))
+                    return error;
+            }
+        }
+        break;
+
+      default:
+        source--;
+        if (source != end && *source >= '0' && *source <= '7')
+        {
+            if (auto error = ConsumeDigits(output_char, false, 3, true))
+                return error;
+            break;
+        }
+        return "Invalid escape sequence.";
+    }
+
+    return nullptr;
+}
+
+template <ta_test::text::encoding::CharType T>
+bool ta_test::text::encoding::low::SkipTypePrefix(const char *&source)
+{
+    bool have_prefix = true;
+    for (std::size_t i = 0; i < type_prefix<T>.size(); i++)
+    {
+        if (type_prefix<T>[i] != source[i])
+        {
+            have_prefix = false;
+            break;
+        }
+    }
+    if (have_prefix)
+        source += type_prefix<T>.size();
+    return have_prefix;
+}
+
+#define DETAIL_TA_X(T) template bool ta_test::text::encoding::low::SkipTypePrefix<T>(const char *&source);
+DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+#undef DETAIL_TA_X
+
+template <ta_test::text::encoding::CharType OutChar>
+std::string ta_test::text::encoding::ParseQuotedString(const char *&source, bool allow_prefix, std::basic_string<OutChar> &output)
+{
+    if (allow_prefix)
+        low::SkipTypePrefix<OutChar>(source);
+
+    if (*source != '"')
+        return "Expected opening `\"`.";
+    source++;
+
+    while (*source && *source != '"')
+    {
+        char32_t ch = 0;
+        bool encode = true;
+        const char *old_source = source;
+        if (const char *error = low::DecodeAndUnescapeOne(source, nullptr, ch, encode))
+            return error;
+
+        if (const char *error = low::EncodeOne(ch, encode, output))
+        {
+            // Only roll back the pointer on encoding errors. This should point to the offending escape sequence.
+            source = old_source;
+            return error;
         }
     }
 
-    if (only_single_char && char_counter == 0)
-        return "Expected a character.";
-
-    if (quote_char)
-    {
-        if (*source != quote_char)
-            return CFG_TA_FMT_NAMESPACE::format("Expected closing `{}`.", quote_char);
-        source++;
-    }
+    if (*source != '"')
+        return "Expected closing `\"`.";
+    source++;
 
     return "";
 }
+
+#define DETAIL_TA_X(OutChar) template std::string ta_test::text::encoding::ParseQuotedString(const char *&source, bool allow_prefix, std::basic_string<OutChar> &output);
+DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+#undef DETAIL_TA_X
+
+template <ta_test::text::encoding::CharType OutChar>
+std::string ta_test::text::encoding::ParseQuotedChar(const char *&source, bool allow_prefix, OutChar &output)
+{
+    if (allow_prefix)
+        low::SkipTypePrefix<OutChar>(source);
+
+    if (*source != '\'')
+        return "Expected opening `'`.";
+    source++;
+
+    if (*source == '\'')
+        return "Expected a character before the closing `'`.";
+
+    const char *old_source = source;
+
+    char32_t ch = 0;
+    bool encode = true;
+    if (const char *error = low::DecodeAndUnescapeOne(source, nullptr, ch, encode))
+        return error;
+
+    if (*source != '\'')
+        return "Expected closing `'`.";
+
+    std::basic_string<OutChar> buffer;
+    if (const char *error = low::EncodeOne(ch, encode, buffer))
+    {
+        source = old_source;
+        return error;
+    }
+    if (buffer.size() != 1)
+    {
+        source = old_source;
+        return "This codepoint doesn't fit into a single character.";
+    }
+
+    output = buffer.front();
+
+    source++;
+
+    return "";
+}
+
+#define DETAIL_TA_X(OutChar) template std::string ta_test::text::encoding::ParseQuotedChar(const char *&source, bool allow_prefix, OutChar &output);
+DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+#undef DETAIL_TA_X
+
+template <ta_test::text::encoding::CharType InChar>
+void ta_test::text::encoding::MakeQuotedString(std::basic_string_view<InChar> source, char quote, bool add_prefix, std::string &output)
+{
+    if (add_prefix)
+        output += low::type_prefix<InChar>;
+
+    output += quote;
+
+    const InChar *cur = source.data();
+    const InChar *const end = source.data() + source.size();
+
+    while (cur != end)
+    {
+        char32_t ch = 0;
+        bool fail = bool(low::DecodeOne(cur, end, ch));
+        low::EncodeAndEscapeOne(ch, !fail, quote, output);
+    }
+
+    output += quote;
+}
+
+#define DETAIL_TA_X(InChar) template void ta_test::text::encoding::MakeQuotedString(std::basic_string_view<InChar> source, char quote, bool add_prefix, std::string &output);
+DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+#undef DETAIL_TA_X
+
+template <ta_test::text::encoding::CharType InChar, ta_test::text::encoding::CharType OutChar>
+void ta_test::text::encoding::ReencodeRelaxed(std::basic_string_view<InChar> source, std::basic_string<OutChar> &output)
+{
+    const InChar *cur = source.data();
+    const InChar *const end = source.data() + source.size();
+
+    while (cur != end)
+    {
+        char32_t ch = 0;
+        if (low::DecodeOne(cur, end, ch))
+            ch = fallback_char;
+        (void)low::EncodeOne(ch, true, output); // No need to handle errors here.
+    }
+}
+
+#define DETAIL_TA_X(InChar, OutChar) template void ta_test::text::encoding::ReencodeRelaxed(std::basic_string_view<InChar> source, std::basic_string<OutChar> &output);
+DETAIL_TA_FOR_EACH_CHAR_TYPE_2(DETAIL_TA_X)
+#undef DETAIL_TA_X
 
 ta_test::text::Demangler::Demangler() {}
 
@@ -415,85 +678,6 @@ std::string ta_test::string_conv::DefaultToStringTraits<ta_test::AssertFlags>::o
     return ret;
 }
 
-std::string ta_test::string_conv::DefaultFallbackToStringTraits<char>::operator()(char value) const
-{
-    std::string ret; // If you decide to change this to a fixed buffer, this should be at most 9 characters: `'\x{??}'\0`.
-    text::escape::EscapeString({&value, 1}, ret, false);
-    return ret;
-}
-
-std::string ta_test::string_conv::DefaultFallbackToStringTraits<std::string_view>::operator()(std::string_view value) const
-{
-    std::string ret;
-    ret.reserve(value.size() + 2); // +2 for quotes. This assumes the happy scenario without any escapes.
-    text::escape::EscapeString(value, ret, true);
-    return ret;
-}
-
-std::string ta_test::string_conv::DefaultToStringTraits<char32_t>::operator()(char32_t value) const
-{
-    std::string ret = "U'";
-    text::uni::Encode<text::uni::EncodeEscapeMode::single_quotes>(std::u32string_view{&value, 1}, ret);
-    ret += '\'';
-    return ret;
-}
-
-std::string ta_test::string_conv::DefaultToStringTraits<std::u32string_view>::operator()(std::u32string_view value) const
-{
-    std::string ret;
-    ret.reserve(value.size() * text::uni::max_char_len + 3); // +2 for quotes, +1 for the `U` prefix.
-    ret += "U\"";
-    text::uni::Encode<text::uni::EncodeEscapeMode::double_quotes>(value, ret);
-    ret += '"';
-    return ret;
-}
-
-std::string ta_test::string_conv::DefaultToStringTraits<char16_t>::operator()(char16_t value) const
-{
-    std::string ret = "u'";
-    text::uni::Encode<text::uni::EncodeEscapeMode::single_quotes>(std::u16string_view{&value, 1}, ret);
-    ret += '\'';
-    return ret;
-}
-
-std::string ta_test::string_conv::DefaultToStringTraits<std::u16string_view>::operator()(std::u16string_view value) const
-{
-    std::string ret;
-    ret.reserve(value.size() * text::uni::max_char_len + 3); // +2 for quotes, +1 for the `u` prefix.
-    ret += "u\"";
-    text::uni::Encode<text::uni::EncodeEscapeMode::double_quotes>(value, ret);
-    ret += '"';
-    return ret;
-}
-
-std::string ta_test::string_conv::DefaultToStringTraits<wchar_t>::operator()(wchar_t value) const
-{
-    std::string ret = "L'";
-    text::uni::Encode<text::uni::EncodeEscapeMode::single_quotes>(std::wstring_view{&value, 1}, ret);
-    ret += '\'';
-    return ret;
-}
-
-std::string ta_test::string_conv::DefaultToStringTraits<std::wstring_view>::operator()(std::wstring_view value) const
-{
-    std::string ret;
-    ret.reserve(value.size() * text::uni::max_char_len + 3); // +2 for quotes, +1 for the `u` prefix.
-    ret += "L\"";
-    text::uni::Encode<text::uni::EncodeEscapeMode::double_quotes>(value, ret);
-    ret += '"';
-    return ret;
-}
-
-std::string ta_test::string_conv::DefaultToStringTraits<char8_t>::operator()(char8_t value) const
-{
-    return "u8" + (ToString)(char(value));
-}
-
-std::string ta_test::string_conv::DefaultToStringTraits<std::u8string_view>::operator()(std::u8string_view value) const
-{
-    return "u8" + (ToString)(std::string_view(reinterpret_cast<const char *>(value.data()), value.size()));
-}
-
 std::string ta_test::string_conv::DefaultToStringTraits<std::filesystem::path>::operator()(const std::filesystem::path &value) const
 {
     return (ToString)(value.native());
@@ -502,18 +686,6 @@ std::string ta_test::string_conv::DefaultToStringTraits<std::filesystem::path>::
 std::string ta_test::string_conv::DefaultToStringTraits<std::type_index>::operator()(std::type_index value) const
 {
     return text::Demangler{}(value.name());
-}
-
-std::string ta_test::string_conv::DefaultFromStringTraits<char>::operator()(char &target, const char *&string) const
-{
-    std::string output;
-    std::string error = text::escape::UnescapeString(string, output, '\'', true);
-    if (!error.empty())
-        return error;
-    if (output.size() != 1)
-        HardError("Expected to get exactly one character.");
-    target = output.front();
-    return error; // This is empty here, but still returning it for NRVO.
 }
 
 std::string ta_test::string_conv::DefaultFromStringTraits<std::nullptr_t>::operator()(std::nullptr_t &target, const char *&string) const
@@ -541,7 +713,15 @@ std::string ta_test::string_conv::DefaultFromStringTraits<std::nullptr_t>::opera
     return "Expected one of: `nullptr`, `0x0`, `0`.";
 }
 
-
+std::string ta_test::string_conv::DefaultFromStringTraits<std::filesystem::path>::operator()(std::filesystem::path &target, const char *&string) const
+{
+    std::filesystem::path::string_type buf;
+    std::string ret = DefaultFromStringTraits<std::filesystem::path::string_type>{}(buf, string);
+    if (!ret.empty())
+        return ret;
+    target = buf;
+    return ret; // This is always empty, but good for NRVO.
+}
 
 ta_test::context::Context ta_test::context::CurrentContext()
 {
@@ -936,7 +1116,7 @@ void ta_test::output::TextCanvas::Print(const Terminal &terminal, Terminal::Styl
                 return;
 
             buffer.clear();
-            text::uni::Encode(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
+            text::encoding::ReencodeRelaxed(std::u32string_view(line.text.begin() + std::ptrdiff_t(segment_start), line.text.begin() + std::ptrdiff_t(end_pos)), buffer);
             terminal.Print("{}", std::string_view(buffer));
             segment_start = end_pos;
         };
@@ -1102,7 +1282,7 @@ std::size_t ta_test::output::TextCanvas::DrawString(std::size_t line, std::size_
 std::size_t ta_test::output::TextCanvas::DrawString(std::size_t line, std::size_t start, std::string_view text, const CellInfo &info)
 {
     std::u32string decoded_text;
-    text::uni::Decode(text, decoded_text);
+    text::encoding::ReencodeRelaxed(text, decoded_text);
     return DrawString(line, start, decoded_text, info);
 }
 
@@ -1229,7 +1409,7 @@ std::size_t ta_test::output::expr::DrawToCanvas(output::TextCanvas &canvas, std:
 
     auto lambda = [&](const char &ch, CharKind kind)
     {
-        if (!text::uni::IsFirstByte(ch))
+        if (!text::chars::IsFirstUtf8Byte(ch))
             return;
 
         TextCanvas::CellInfo &info = canvas.CellInfoAt(line, start + i);
@@ -1563,7 +1743,6 @@ ta_test::detail::AssertionExprStaticInfoImpl::AssertionExprStaticInfoImpl(std::s
 
     // Parse raw string.
     pos = 0;
-    std::size_t stack_depth = 0;
     text::expr::ParseExpr(raw_expr, nullptr, true, [&](bool exiting, std::string_view name, std::string_view args, std::size_t depth)
     {
         // This `depth` is useless to us, because it also counts the user parentheses.
@@ -1584,7 +1763,7 @@ ta_test::detail::AssertionExprStaticInfoImpl::AssertionExprStaticInfoImpl(std::s
         ArgInfo &this_info = args_info[bracket_stack.back()];
         bracket_stack.pop_back();
 
-        this_info.depth = stack_depth;
+        this_info.depth = bracket_stack.size();
 
         this_info.expr_offset = std::size_t(args.data() - raw_expr.data());
         this_info.expr_size = args.size();
@@ -3814,11 +3993,11 @@ ta_test::modules::ProgressPrinter::GeneratorValueShortener::GeneratorValueShorte
     std::size_t index = 0;
     for (const char &ch : value)
     {
-        if (text::uni::IsFirstByte(ch))
+        if (text::chars::IsFirstUtf8Byte(ch))
         {
             if (index == max_prefix)
             {
-                ellipsis_size = text::uni::CountFirstBytes(ellipsis);
+                ellipsis_size = text::chars::NumUtf8Chars(ellipsis);
                 prefix_end = &ch;
             }
             else if (index == max_prefix + ellipsis_size)
@@ -3910,7 +4089,7 @@ void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(output::Term
         chars_pre_indentation
     );
 
-    std::size_t single_indentation_width = text::uni::CountFirstBytes(chars_indentation);
+    std::size_t single_indentation_width = text::chars::NumUtf8Chars(chars_indentation);
 
     if (skip_characters > single_indentation_width * depth)
         return; // Everything is skipped.
@@ -3923,7 +4102,7 @@ void ta_test::modules::ProgressPrinter::PrintContextLineIndentation(output::Term
         std::size_t i = 0;
         for (const char &ch : chars_indentation)
         {
-            if (text::uni::IsFirstByte(ch))
+            if (text::chars::IsFirstUtf8Byte(ch))
                 i++;
 
             if (i > skipped_part)
@@ -3948,9 +4127,9 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(
     std::size_t repetition_counters_width = CFG_TA_FMT_NAMESPACE::formatted_size("{}", state.per_test.repetition_counter + 1);
     if (state.per_test.failed_generator_stacks.size() > 0)
     {
-        repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_prefix);
+        repetition_counters_width += text::chars::NumUtf8Chars(chars_failed_repetition_count_prefix);
         repetition_counters_width += CFG_TA_FMT_NAMESPACE::formatted_size("{}", state.per_test.failed_generator_stacks.size());
-        repetition_counters_width += text::uni::CountFirstBytes(chars_failed_repetition_count_suffix);
+        repetition_counters_width += text::chars::NumUtf8Chars(chars_failed_repetition_count_suffix);
     }
 
     // Print the repetition counter, or nothing if already printed during this repetition.
@@ -3996,7 +4175,7 @@ void ta_test::modules::ProgressPrinter::PrintGeneratorInfo(
     state.per_test.last_repetition_counters_width = repetition_counters_width;
 
     // Indentation.
-    std::size_t num_chars_removed_from_indentation = std::min(std::size_t(repetition_counters_width) + text::uni::CountFirstBytes(repetition_border_string), text::uni::CountFirstBytes(chars_indentation) * state.stack.size());
+    std::size_t num_chars_removed_from_indentation = std::min(std::size_t(repetition_counters_width) + text::chars::NumUtf8Chars(repetition_border_string), text::chars::NumUtf8Chars(chars_indentation) * state.stack.size());
     PrintContextLineIndentation(cur_style, state.stack.size() + test.generator_index, num_chars_removed_from_indentation);
 
     const auto &st_gen = repeating_info ? style_generator_repeated : style_generator;
@@ -4214,8 +4393,8 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const data::RunTestsResul
         );
 
         std::size_t max_test_name_width = 0;
-        std::size_t indentation_width = text::uni::CountFirstBytes(chars_indentation);
-        std::size_t prefix_width = text::uni::CountFirstBytes(chars_test_prefix);
+        std::size_t indentation_width = text::chars::NumUtf8Chars(chars_indentation);
+        std::size_t prefix_width = text::chars::NumUtf8Chars(chars_test_prefix);
 
         // Determine how much space to leave for the test name tree.
         for (const data::BasicTest *test : data.failed_tests)
@@ -4346,7 +4525,7 @@ void ta_test::modules::ProgressPrinter::OnPostRunSingleTest(const data::RunSingl
     // Print the ending separator.
     if (data.failed)
     {
-        std::size_t separator_segment_width = text::uni::CountFirstBytes(chars_test_failed_ending_separator);
+        std::size_t separator_segment_width = text::chars::NumUtf8Chars(chars_test_failed_ending_separator);
         std::string separator;
         for (std::size_t i = 0; i + separator_segment_width - 1 < separator_line_width; i += separator_segment_width)
             separator += chars_test_failed_ending_separator;
@@ -4526,10 +4705,10 @@ void ta_test::modules::ProgressPrinter::OnPreFailTest(const data::RunSingleTestP
 
     std::string generator_summary = MakeGeneratorSummary(data);
 
-    std::size_t separator_segment_width = text::uni::CountFirstBytes(chars_test_failed_separator);
+    std::size_t separator_segment_width = text::chars::NumUtf8Chars(chars_test_failed_separator);
     std::size_t separator_needed_width =
         separator_line_width
-        - text::uni::CountFirstBytes(chars_test_failed)
+        - text::chars::NumUtf8Chars(chars_test_failed)
         - data.test->Name().size()
         - generator_summary.size() - 2 * !generator_summary.empty()
         - 1/*space before separator*/;
@@ -4822,7 +5001,7 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
             if (this_state == data::AssertionExprDynamicInfo::ArgState::done)
             {
                 this_value.clear();
-                text::uni::Decode(expr->CurrentArgValue(arg_index), this_value);
+                text::encoding::ReencodeRelaxed(std::string_view(expr->CurrentArgValue(arg_index)), this_value);
 
                 std::size_t center_x = expr_column + this_info.expr_offset + (this_info.expr_size + 1) / 2 - 1;
                 std::size_t value_x = center_x - (this_value.size() + 1) / 2 + 1;

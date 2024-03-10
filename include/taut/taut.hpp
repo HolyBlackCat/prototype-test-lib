@@ -929,6 +929,19 @@ namespace ta_test
                 return !name.empty() && IsNonDigitIdentifierCharStrict(name.front()) && std::all_of(name.begin() + 1, name.end(), IsIdentifierCharStrict);
             }
 
+            // Given a byte, checks if it's the first byte of a multibyte UTF-8 character, or is a single-byte character.
+            // Even if this function returns true, `byte` can be an invalid first byte, that has to be tested separately.
+            [[nodiscard]] constexpr bool IsFirstUtf8Byte(char byte)
+            {
+                return (byte & 0b11000000) != 0b10000000;
+            }
+
+            // Counts the number of codepoints (usually characters) in a valid UTF8 string, by counting the bytes matching `IsFirstUtf8Byte()`.
+            [[nodiscard]] constexpr std::size_t NumUtf8Chars(std::string_view string)
+            {
+                return std::size_t(std::count_if(string.begin(), string.end(), IsFirstUtf8Byte));
+            }
+
             // Skips whitespace characters, if any.
             constexpr void SkipWhitespace(const char *&ch)
             {
@@ -1004,255 +1017,151 @@ namespace ta_test
             inline constexpr std::string_view generator_override_separators = ",&(";
         }
 
-        // String escaping.
-        namespace escape
+        // Escaping/unescaping and converting strings between different encodings.
+        namespace encoding
         {
-            // Escapes a string, appends the result to `output`. Includes quotes automatically.
-            // Tries to keep unicode characters unescaped, but escapes invalid UTF-8 bytes.
-            // if `auto_insert_quotes` is false, doesn't insert quotes at the beginning and at the end.
-            CFG_TA_API void EscapeString(std::string_view source, std::string &output, bool double_quotes, bool auto_insert_quotes = true);
+            // A [?] character that's used as a fallback on some errors.
+            constexpr char32_t fallback_char = 0xfffd;
 
-            // Unescapes a string.
-            // Appends the result to `output`. Returns the error message on failure, or empty string on success.
-            // Tries to support all standard escapes, except for `\N{...}` named characters, because that would be stupid.
-            // We also don't support the useless `\?`.
-            // If `quote_char` isn't zero, we expect it before and after the string.
-            // If `only_single_char` is true, will write at most one character (exactly one on success).
-            CFG_TA_API std::string UnescapeString(const char *&source, std::string &output, char quote_char, bool only_single_char);
-        }
+            template <typename T>
+            concept CharType =
+                std::is_same_v<T, char> || std::is_same_v<T, wchar_t> ||
+                std::is_same_v<T, char8_t> || std::is_same_v<T, char16_t> || std::is_same_v<T, char32_t>;
 
-        // A mini unicode library.
-        namespace uni
-        {
-            // A placeholder value for invalid characters.
-            constexpr char32_t default_char = 0xfffd;
-            // The largest valid character.
-            constexpr char32_t max_char_value = 0x10ffff;
+            // Calls `f` for each character type we support. The rest of the arguments are forwarded as is.
+            #define DETAIL_TA_FOR_EACH_CHAR_TYPE(f, ...) \
+                f(char     __VA_OPT__(,) __VA_ARGS__) \
+                f(wchar_t  __VA_OPT__(,) __VA_ARGS__) \
+                f(char8_t  __VA_OPT__(,) __VA_ARGS__) \
+                f(char16_t __VA_OPT__(,) __VA_ARGS__) \
+                f(char32_t __VA_OPT__(,) __VA_ARGS__) \
 
-            // Max bytes per character.
-            constexpr std::size_t max_char_len = 4;
+            // Calls `f` for each combination of two character types we support. The rest of the arguments are forwarded as is.
+            #define DETAIL_TA_FOR_EACH_CHAR_TYPE_2(f, ...) \
+                DETAIL_TA_FOR_EACH_CHAR_TYPE(f, char     __VA_OPT__(,) __VA_ARGS__) \
+                DETAIL_TA_FOR_EACH_CHAR_TYPE(f, wchar_t  __VA_OPT__(,) __VA_ARGS__) \
+                DETAIL_TA_FOR_EACH_CHAR_TYPE(f, char8_t  __VA_OPT__(,) __VA_ARGS__) \
+                DETAIL_TA_FOR_EACH_CHAR_TYPE(f, char16_t __VA_OPT__(,) __VA_ARGS__) \
+                DETAIL_TA_FOR_EACH_CHAR_TYPE(f, char32_t __VA_OPT__(,) __VA_ARGS__) \
 
-            // Given a byte, checks if it's the first byte of a multibyte character, or is a single-byte character.
-            // Even if this function returns true, `byte` can be an invalid first byte.
-            // To check for the byte validity, use `FirstByteToCharacterLength`.
-            [[nodiscard]] constexpr bool IsFirstByte(char byte)
+
+            namespace low
             {
-                return (byte & 0b11000000) != 0b10000000;
-            }
+                // Returns true if `ch` is larger than allowed in Unicode.
+                [[nodiscard]] constexpr bool CodepointIsTooLarge(char32_t ch) {return ch > 0x10ffff;}
 
-            // Counts the number of codepoints (usually characters) in a valid UTF8 string, by counting the bytes matching `IsFirstByte()`.
-            [[nodiscard]] constexpr std::size_t CountFirstBytes(std::string_view string)
-            {
-                return std::size_t(std::count_if(string.begin(), string.end(), IsFirstByte));
-            }
+                // Returns true if `ch` is a high surrogate (first element of a pair).
+                [[nodiscard]] constexpr bool CodepointIsHighSurrotate(char32_t ch) {return ch >= 0xd800 && ch <= 0xdbff;}
+                // Returns true if `ch` is a low surrogate (second element of a pair).
+                [[nodiscard]] constexpr bool CodepointIsLowSurrotate(char32_t ch) {return ch >= 0xdc00 && ch <= 0xdfff;}
+                // Returns true if `ch` is either element of a surrogate pair.
+                [[nodiscard]] constexpr bool CodepointIsSurrotate(char32_t ch) {return CodepointIsHighSurrotate(ch) || CodepointIsLowSurrotate(ch);}
 
-            // Given the first byte of a multibyte character (or a single-byte character), returns the amount of bytes occupied by the character.
-            // Returns 0 if this is not a valid first byte, or not a first byte at all.
-            [[nodiscard]] constexpr std::size_t FirstByteToCharacterLength(char first_byte)
-            {
-                if ((first_byte & 0b10000000) == 0b00000000) return 1; // Note the different bit pattern in this one.
-                if ((first_byte & 0b11100000) == 0b11000000) return 2;
-                if ((first_byte & 0b11110000) == 0b11100000) return 3;
-                if ((first_byte & 0b11111000) == 0b11110000) return 4;
-                return 0;
-            }
+                // Returns true if `ch` is not a valid codepoint, either because it's too large or because it's reserved for surrogate pairs.
+                [[nodiscard]] constexpr bool CodepointIsInvalid(char32_t ch) {return CodepointIsTooLarge(ch) || CodepointIsSurrotate(ch);}
 
-            // Returns true if `ch` is a valid unicode ch (aka 'codepoint').
-            [[nodiscard]] constexpr bool IsValidCharacterCode(char32_t ch)
-            {
-                return ch <= max_char_value;
-            }
-
-            // Returns the amount of bytes needed to represent a character.
-            // If the character is invalid (use `IsValidCharacterCode` to check for validity) returns 4, which is the maximum possible length
-            [[nodiscard]] constexpr std::size_t CharacterCodeToLength(char32_t ch)
-            {
-                if (ch <= 0x7f) return 1;
-                if (ch <= 0x7ff) return 2;
-                if (ch <= 0xffff) return 3;
-                // Here `ch <= 0x10ffff`, or the character is invalid.
-                // Mathematically the cap should be `0x1fffff`, but Unicode defines the max value to be lower.
-                return 4;
-            }
-
-            // Encodes a character into UTF8.
-            // The buffer length can be `max_char_len` (or use `CharacterCodeToLength` for the precise byte length).
-            // If the character is invalid, writes `default_char` instead.
-            // No null-terminator is added.
-            // Returns the amount of bytes written, equal to what `CharacterCodeToLength` would return.
-            [[nodiscard]] constexpr std::size_t EncodeCharToBuffer(char32_t ch, char *buffer)
-            {
-                if (!IsValidCharacterCode(ch))
-                    return EncodeCharToBuffer(default_char, buffer);
-
-                std::size_t len = CharacterCodeToLength(ch);
-                switch (len)
+                // Checks the codepoint as if by `CodepointIsInvalid(ch)`. Returns the error message on failure, or null on success.
+                [[nodiscard]] constexpr const char *ValidateCodepoint(char32_t ch)
                 {
-                  case 1:
-                    *buffer = char(ch);
-                    break;
-                  case 2:
-                    *buffer++ = char(0b11000000 | (ch >> 6));
-                    *buffer   = char(0b10000000 | (ch & 0b00111111));
-                    break;
-                  case 3:
-                    *buffer++ = char(0b11100000 |  (ch >> 12));
-                    *buffer++ = char(0b10000000 | ((ch >>  6) & 0b00111111));
-                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
-                    break;
-                  case 4:
-                    *buffer++ = char(0b11110000 |  (ch >> 18));
-                    *buffer++ = char(0b10000000 | ((ch >> 12) & 0b00111111));
-                    *buffer++ = char(0b10000000 | ((ch >> 6 ) & 0b00111111));
-                    *buffer   = char(0b10000000 | ( ch        & 0b00111111));
-                    break;
+                    if (CodepointIsTooLarge(ch))
+                        return "Invalid codepoint, larger than 0x10ffff.";
+                    if (CodepointIsSurrotate(ch))
+                        return "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs.";
+                    return nullptr;
                 }
 
-                return len;
+                // Encodes a single character to UTF-8 or UTF-16 or UTF-32. Gracefully recovers from failures.
+                // If `encode` is true, it's a potentially multicharacter "code point". This is a good default.
+                // If `encode` is false, this is a "code unit", which is directly cast to the target type.
+                // In any case, performs a range check on `ch` and returns an error on failure. But also writes a fallback character in that case.
+                // Returns null on success or the error message on failure. Gracefully recovers by writing `fallback_char` to the output.
+                // If `ch` is not `char32_t`, it's first converted to an unsigned version of itself, and then extended to `char32_t`.
+                template <CharType InChar, CharType OutChar>
+                const char *EncodeOne(InChar ch, bool encode, std::basic_string<OutChar> &output);
+
+                #define DETAIL_TA_X(T, U) extern template CFG_TA_API const char *EncodeOne(T ch, bool encode, std::basic_string<U> &output);
+                DETAIL_TA_FOR_EACH_CHAR_TYPE_2(DETAIL_TA_X)
+                #undef DETAIL_TA_X
+
+                // Like `EncodeOne`, but also escapes the character, and is limited to UTF-8 output and `char32_t` input for simplicity. Never fails.
+                // `quote_char` is the quote character that needs escaping, either `"` or `'`. Set this to `0` to escape both.
+                // If `encode == false`, always escapes the character.
+                CFG_TA_API void EncodeAndEscapeOne(char32_t ch, bool encode, char quote_char, std::string &output);
+
+                // Decodes a single character from `source`. Returns the error message or null on success.
+                // Gracefully recovers from failures, always fills `output_char` and advances the pointer.
+                // When passing the result to `Encode{,AndEscape}One()`, set `encode = true` if this returned null, and to `false` if this returned an error.
+                // `end` is optional. If specified, it's the end of the input string.
+                template <CharType T>
+                [[nodiscard]] const char *DecodeOne(const T *&source, const T *end, char32_t &output_char);
+
+                #define DETAIL_TA_X(T) extern template CFG_TA_API const char *DecodeOne(const T *&source, const T *end, char32_t &output_char);
+                DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+                #undef DETAIL_TA_X
+
+                // Decodes and unescapes a single character or escape sequence. Returns the error message or null on success.
+                // Unlike other functions above, this DOESN'T gracefully recover from failures.
+                // On failure, `source` will point to the error location, but `output_char` and `output_encode` will have indeterminate values.
+                // If `output_encode` is false, the `output_char` is a code unit rather than a code point,
+                //   i.e. should be casted directly to the target type without encoding. See `EncodeOne()` for details.
+                // This is limited to UTF-8 input for simplicity.
+                [[nodiscard]] CFG_TA_API const char *DecodeAndUnescapeOne(const char *&source, const char *end, char32_t &output_char, bool &output_encode);
+
+
+                // The literal prefix for character type `T`.
+                template <CharType T> inline constexpr std::string_view type_prefix = {};
+                template <> inline constexpr std::string_view type_prefix<wchar_t> = "L";
+                template <> inline constexpr std::string_view type_prefix<char8_t> = "u8";
+                template <> inline constexpr std::string_view type_prefix<char16_t> = "u";
+                template <> inline constexpr std::string_view type_prefix<char32_t> = "U";
+
+                // If `source` starts with `type_prefix<T>`, skips it and returns true. Otherwise returns false.
+                template <CharType T>
+                bool SkipTypePrefix(const char *&source);
+
+                #define DETAIL_TA_X(T) extern template CFG_TA_API bool SkipTypePrefix<T>(const char *&source);
+                DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+                #undef DETAIL_TA_X
             }
 
-            enum class EncodeEscapeMode
-            {
-                none,
-                double_quotes, // Escape as if for double quotes, but don't add the quotes themselves.
-                single_quotes, // Escape as if for single quotes, but don't add the quotes themselves.
-            };
 
-            // Encodes one string into another.
-            // We accept the string by reference to reuse the buffer, if any. Old contents are discarded.
-            // If `Escape` is true, also performs escaping. This must be done here to correctly escape large characters that are not representable in UTF-8.
-            template <EncodeEscapeMode Escape = EncodeEscapeMode::none, typename T>
-            requires std::is_same_v<T, std::wstring_view> || std::is_same_v<T, std::u16string_view> || std::is_same_v<T, std::u32string_view>
-            constexpr void Encode(T view, std::string &str)
-            {
-                str.reserve(str.size() + view.size() * max_char_len);
-                for (auto ch : view)
-                {
-                    // When escaping, if the character code is too big, write it as an escape sequence.
-                    if (Escape != EncodeEscapeMode::none && char32_t(ch) > text::uni::max_char_value)
-                    {
-                        char buf[16]; // U'\U{12345678}' + \0
-                        std::snprintf(buf, sizeof buf, "\\U{%08x}", (unsigned int)ch);
-                        str += buf;
-                        continue;
-                    }
+            // Parses a double-quoted escaped string. Returns the error on failure or null on success.
+            // Can write out-of-range characters to `output` due to escapes.
+            // If `allow_prefix == true`, will silently ignore the literal prefix for this character type.
+            template <CharType OutChar>
+            [[nodiscard]] std::string ParseQuotedString(const char *&source, bool allow_prefix, std::basic_string<OutChar> &output);
 
-                    char buf[max_char_len];
-                    std::size_t len = EncodeCharToBuffer(char32_t(ch), buf);
+            #define DETAIL_TA_X(OutChar) extern template CFG_TA_API std::string ParseQuotedString(const char *&source, bool allow_prefix, std::basic_string<OutChar> &output);
+            DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+            #undef DETAIL_TA_X
 
-                    // Escape if enabled.
-                    if (Escape != EncodeEscapeMode::none)
-                    {
-                        text::escape::EscapeString(std::string_view(buf, buf + len), str, Escape == EncodeEscapeMode::double_quotes, false);
-                        continue;
-                    }
+            // Parses a single-quoted escaped character. Returns the error on failure or null on success.
+            // Can write an out-of-range character to `output` due to escapes.
+            // If `allow_prefix == true`, will silently ignore the literal prefix for this character type.
+            template <CharType OutChar>
+            [[nodiscard]] std::string ParseQuotedChar(const char *&source, bool allow_prefix, OutChar &output);
 
-                    // Append without escaping.
-                    str.append(buf, len);
-                }
-            }
+            #define DETAIL_TA_X(OutChar) extern template CFG_TA_API std::string ParseQuotedChar(const char *&source, bool allow_prefix, OutChar &output);
+            DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+            #undef DETAIL_TA_X
 
-            // Decodes a UTF8 character.
-            // Returns a pointer to the first byte of the next character.
-            // If `end` is not null, it'll stop reading at `end`. In this case `end` will be returned.
-            [[nodiscard]] constexpr const char *FindNextCharacter(const char *data, const char *end = nullptr)
-            {
-                do
-                    data++;
-                while (data != end && !IsFirstByte(*data));
+            // Appends a quoted escaped string to `output`.
+            // Silently ignores encoding errors in input, and tries to escape them.
+            // If `add_prefix == true`, adds the proper literal prefix for this character type.
+            template <CharType InChar>
+            void MakeQuotedString(std::basic_string_view<InChar> source, char quote, bool add_prefix, std::string &output);
 
-                return data;
-            }
+            #define DETAIL_TA_X(InChar) extern template CFG_TA_API void MakeQuotedString(std::basic_string_view<InChar> source, char quote, bool add_prefix, std::string &output);
+            DETAIL_TA_FOR_EACH_CHAR_TYPE(DETAIL_TA_X)
+            #undef DETAIL_TA_X
 
-            // Returns a decoded character or `default_char` on failure.
-            // If `end` is not null, it won't attempt to read past it.
-            // If `next_char` is not null, it will be set to point to the next byte after the current character.
-            // If `data == end`, returns '\0'. (If `end != 0` and `data > end`, also returns '\0'.)
-            // If `data == 0`, returns '\0'.
-            constexpr char32_t DecodeCharFromBuffer(const char *data, const char *end = nullptr, const char **next_char = nullptr, bool *ok = nullptr)
-            {
-                if (ok)
-                    *ok = false;
+            // Converts `source` to a different encoding, appends to `output`. Silently ignores encoding errors.
+            template <CharType InChar, CharType OutChar>
+            void ReencodeRelaxed(std::basic_string_view<InChar> source, std::basic_string<OutChar> &output);
 
-                // Stop if `data` is a null pointer.
-                if (!data)
-                {
-                    if (next_char)
-                        *next_char = nullptr;
-                    return 0;
-                }
-
-                // Stop if we have an empty string.
-                if (end && data >= end) // For `data >= end` to be well-defined, `end` has to be not null if `data` is not null.
-                {
-                    if (next_char)
-                        *next_char = data;
-                    return 0;
-                }
-
-                // Get character length.
-                std::size_t len = FirstByteToCharacterLength(*data);
-
-                // Stop if this is not a valid first byte.
-                if (len == 0)
-                {
-                    if (next_char)
-                        *next_char = FindNextCharacter(data, end);
-                    return default_char;
-                }
-
-                // Handle single byte characters.
-                if (len == 1)
-                {
-                    if (next_char)
-                        *next_char = data+1;
-                    if (ok)
-                        *ok = true;
-                    return (unsigned char)*data;
-                }
-
-                // Stop if there is not enough characters left in `data`.
-                if (end && end - data < std::ptrdiff_t(len))
-                {
-                    if (next_char)
-                        *next_char = end;
-                    return default_char;
-                }
-
-                // Extract bits from the first byte.
-                char32_t ret = (unsigned char)*data & (0xff >> len); // `len + 1` would have the same effect as `len`, but it's longer to type.
-
-                // For each remaining byte...
-                for (std::size_t i = 1; i < len; i++)
-                {
-                    // Stop if it's a first byte of some character.
-                    if (IsFirstByte(data[i]))
-                    {
-                        if (next_char)
-                            *next_char = data + i;
-                        return default_char;
-                    }
-
-                    // Extract bits and append them to the code.
-                    ret = ret << 6 | ((unsigned char)data[i] & 0b00111111);
-                }
-
-                // Get next character position.
-                if (next_char)
-                    *next_char = data + len;
-
-                if (ok)
-                    *ok = true;
-                return ret;
-            }
-
-            // Decodes one string into another.
-            inline void Decode(std::string_view view, std::u32string &str)
-            {
-                str.reserve(str.size() + view.size());
-                for (const char *cur = view.data(); cur - view.data() < std::ptrdiff_t(view.size());)
-                    str += uni::DecodeCharFromBuffer(cur, view.data() + view.size(), &cur);
-            }
+            #define DETAIL_TA_X(InChar, OutChar) extern template CFG_TA_API void ReencodeRelaxed(std::basic_string_view<InChar> source, std::basic_string<OutChar> &output);
+            DETAIL_TA_FOR_EACH_CHAR_TYPE_2(DETAIL_TA_X)
+            #undef DETAIL_TA_X
         }
 
         namespace type_name_details
@@ -1483,57 +1392,43 @@ namespace ta_test
             CFG_TA_API std::string operator()(AssertFlags value) const;
         };
 
-        // Throw in some fallback formatters to escape strings, for format libraries that don't support this yet.
-        template <>
-        struct DefaultFallbackToStringTraits<char>
+        // Strings and characters.
+        // `char`-based ones are supposed to be supported, but not all standard libraries have them yet. The other ones seem to not be supported at all.
+        // We just use our own formatter for everything, because it doesn't escape printable unicode characters.
+        //   Otherwise it should be mostly equivalent to the standard one.
+        // If you decide to replace all those with `DefaultFallbackToStringTraits`, be aware that the range formatter will try to pick up strings instead,
+        //   probably should disable that somehow.
+        // Also libstdc++ 13 has a broken non-SFINAE-friendly `formatter<const char *>::set_debug_string()`, which causes issues,
+        //   but the `std::string_view` formatter is fine, so we can just use it instead.
+        template <text::encoding::CharType T>
+        struct DefaultToStringTraits<T>
         {
-            CFG_TA_API std::string operator()(char value) const;
+            std::string operator()(T value) const
+            {
+                std::string ret;
+                text::encoding::MakeQuotedString(std::basic_string_view{&value, 1}, '\'', true, ret);
+                return ret;
+            }
         };
-        template <>
-        struct DefaultFallbackToStringTraits<std::string_view>
+        template <text::encoding::CharType T>
+        struct DefaultToStringTraits<std::basic_string_view<T>>
         {
-            CFG_TA_API std::string operator()(std::string_view value) const;
+            std::string operator()(std::basic_string_view<T> value) const
+            {
+                std::string ret;
+                text::encoding::MakeQuotedString(value, '"', true, ret);
+                return ret;
+            }
         };
-
-        // libstdc++ 13 has a broken non-SFINAE-friendly `formatter<const char *>::set_debug_string()`, which causes issues.
-        // `std::string_view` formatter doesn't have this issue, so we just use it here instead.
-        // We throw in some other formatters just for consistency.
-        // Bug: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=112832
-        template <> struct DefaultToStringTraits<std::string > : DefaultToStringTraits<std::string_view> {};
-        template <> struct DefaultToStringTraits<      char *> : DefaultToStringTraits<std::string_view> {};
-        template <> struct DefaultToStringTraits<const char *> : DefaultToStringTraits<std::string_view> {};
-        // Somehow this catches const arrays too.
-        template <std::size_t N> struct DefaultToStringTraits<char[N]> : DefaultToStringTraits<std::string_view> {};
-
-        // All the character types. Formatting libraries don't seem to support this, but we do.
-        // char32_t:
-        template <> struct DefaultToStringTraits<char32_t> {CFG_TA_API std::string operator()(char32_t value) const;};
-        template <> struct DefaultToStringTraits<std::u32string_view> {CFG_TA_API std::string operator()(std::u32string_view value) const;};
-        template <> struct DefaultToStringTraits<std::u32string> : DefaultToStringTraits<std::u32string_view> {};
-        template <> struct DefaultToStringTraits<      char32_t *> : DefaultToStringTraits<std::u32string_view> {};
-        template <> struct DefaultToStringTraits<const char32_t *> : DefaultToStringTraits<std::u32string_view> {};
-        template <std::size_t N> struct DefaultToStringTraits<char32_t[N]> : DefaultToStringTraits<std::u32string_view> {};
-        // char16_t:
-        template <> struct DefaultToStringTraits<char16_t> {CFG_TA_API std::string operator()(char16_t value) const;};
-        template <> struct DefaultToStringTraits<std::u16string_view> {CFG_TA_API std::string operator()(std::u16string_view value) const;};
-        template <> struct DefaultToStringTraits<std::u16string> : DefaultToStringTraits<std::u16string_view> {};
-        template <> struct DefaultToStringTraits<      char16_t *> : DefaultToStringTraits<std::u16string_view> {};
-        template <> struct DefaultToStringTraits<const char16_t *> : DefaultToStringTraits<std::u16string_view> {};
-        template <std::size_t N> struct DefaultToStringTraits<char16_t[N]> : DefaultToStringTraits<std::u16string_view> {};
-        // wchar_t:
-        template <> struct DefaultToStringTraits<wchar_t> {CFG_TA_API std::string operator()(wchar_t value) const;};
-        template <> struct DefaultToStringTraits<std::wstring_view> {CFG_TA_API std::string operator()(std::wstring_view value) const;};
-        template <> struct DefaultToStringTraits<std::wstring> : DefaultToStringTraits<std::wstring_view> {};
-        template <> struct DefaultToStringTraits<      wchar_t *> : DefaultToStringTraits<std::wstring_view> {};
-        template <> struct DefaultToStringTraits<const wchar_t *> : DefaultToStringTraits<std::wstring_view> {};
-        template <std::size_t N> struct DefaultToStringTraits<wchar_t[N]> : DefaultToStringTraits<std::wstring_view> {};
-        // char8_t:
-        template <> struct DefaultToStringTraits<char8_t> {CFG_TA_API std::string operator()(char8_t value) const;};
-        template <> struct DefaultToStringTraits<std::u8string_view> {CFG_TA_API std::string operator()(std::u8string_view value) const;};
-        template <> struct DefaultToStringTraits<std::u8string> : DefaultToStringTraits<std::u8string_view> {};
-        template <> struct DefaultToStringTraits<      char8_t *> : DefaultToStringTraits<std::u8string_view> {};
-        template <> struct DefaultToStringTraits<const char8_t *> : DefaultToStringTraits<std::u8string_view> {};
-        template <std::size_t N> struct DefaultToStringTraits<char8_t[N]> : DefaultToStringTraits<std::u8string_view> {};
+        template <text::encoding::CharType T, typename ...P>
+        struct DefaultToStringTraits<std::basic_string<T, P...>> : DefaultToStringTraits<std::basic_string_view<T>> {};
+        template <text::encoding::CharType T>
+        struct DefaultToStringTraits<T *> : DefaultToStringTraits<std::basic_string_view<T>> {};
+        template <text::encoding::CharType T>
+        struct DefaultToStringTraits<const T *> : DefaultToStringTraits<std::basic_string_view<T>> {};
+        // This catches const arrays too.s
+        template <text::encoding::CharType T, std::size_t N>
+        struct DefaultToStringTraits<T[N]> : DefaultToStringTraits<std::basic_string_view<T>> {};
 
         // std::filesystem::path:
         // It seems `std::format` doesn't support it, but `libfmt` does. It's easier to just provide a formatter unconditionally.
@@ -1760,17 +1655,24 @@ namespace ta_test
 
         // Copies a string-like object into a string.
         // This is a bit questionable, but is surely faster on the happy path?
-        template <typename T> requires std::is_same_v<T, std::string> || std::is_same_v<T, std::string_view>
-        struct DefaultMaybeLazyToString<T>
+        template <typename ...P>
+        struct DefaultMaybeLazyToString<std::basic_string<P...>>
         {
-            std::string operator()(const T &source) const {return std::string(source);}
+            std::string operator()(const std::basic_string<P...> &source) const {return source;}
+        };
+        template <typename ...P>
+        struct DefaultMaybeLazyToString<std::basic_string_view<P...>>
+        {
+            std::string operator()(const std::basic_string_view<P...> &source) const {return std::basic_string<P...>(source);}
         };
 
 
         // --- FROM STRING ---
 
         template <typename T>
-        concept ScalarConvertibleFromString = (std::is_integral_v<T> && sizeof(T) <= sizeof(long long)) || (std::is_floating_point_v<T> && sizeof(T) <= sizeof(long double));
+        concept ScalarConvertibleFromString =
+            (std::is_integral_v<T> && sizeof(T) <= sizeof(long long)) ||
+            (std::is_floating_point_v<T> && sizeof(T) <= sizeof(long double));
 
         // Calls the most suitable `std::strto*` for the specified type.
         // The return type might be wider than `T`.
@@ -1865,6 +1767,7 @@ namespace ta_test
 
         // Scalars.
         template <ScalarConvertibleFromString T>
+        requires(!text::encoding::CharType<T>) // Reject character types, they are handled separately.
         struct DefaultFromStringTraits<T>
         {
             [[nodiscard]] std::string operator()(T &target, const char *&string) const
@@ -1878,18 +1781,36 @@ namespace ta_test
             }
         };
 
-        // Single character.
-        template <>
-        struct DefaultFromStringTraits<char>
-        {
-            [[nodiscard]] CFG_TA_API std::string operator()(char &target, const char *&string) const;
-        };
-
-        // Single character.
+        // Null pointer.
         template <>
         struct DefaultFromStringTraits<std::nullptr_t>
         {
             [[nodiscard]] CFG_TA_API std::string operator()(std::nullptr_t &target, const char *&string) const;
+        };
+
+        // Strings and characters.
+        template <text::encoding::CharType T>
+        struct DefaultFromStringTraits<T>
+        {
+            [[nodiscard]] std::string operator()(T &target, const char *&string) const
+            {
+                return text::encoding::ParseQuotedChar(string, true, target);
+            }
+        };
+        template <text::encoding::CharType T, typename ...P>
+        struct DefaultFromStringTraits<std::basic_string<T, P...>>
+        {
+            [[nodiscard]] std::string operator()(std::basic_string<T, P...> &target, const char *&string) const
+            {
+                return text::encoding::ParseQuotedString(string, true, target);
+            }
+        };
+
+        // std::filesystem::path
+        template <>
+        struct DefaultFromStringTraits<std::filesystem::path>
+        {
+            [[nodiscard]] CFG_TA_API std::string operator()(std::filesystem::path &target, const char *&string) const;
         };
 
         // Ranges.
@@ -1941,7 +1862,8 @@ namespace ta_test
             {
                 if constexpr (from_string_range_format_kind<T> == RangeKind::string)
                 {
-                    return text::escape::UnescapeString(string, target, '"', false);
+                    const char *error = text::encoding::ParseQuotedString(string, target);
+                    return error ? error : "";
                 }
                 else
                 {

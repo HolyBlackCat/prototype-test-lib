@@ -6,10 +6,10 @@
 
 #include <taut/taut.hpp>
 
-// Move regex out of line (including header!), because of the slow compilation times.
+// Container deserialization checks!
 
-// from-string for weird character types?
-// and for `std::filesystem::path`
+// Overload to accept both regex and exact strings. Is this possible?
+// Move regex out of line (including header!), because of the slow compilation times.
 
 
 TA_TEST(foo/test)
@@ -19,12 +19,12 @@ TA_TEST(foo/test)
 
 int main(int argc, char **argv)
 {
+    // reset && LANG= make -C tests COMPILERS=clang++ STDLIBS=libstdc++ FMTLIBS=stdfmt MODES=sanitizers SKIP='clang++_libstdc++_c++2b_stdfmt'
+
     return ta_test::RunSimple(argc, argv);
 }
 
 // TESTS!!
-
-// char{8,16,32}_t, respective strings, std::filesystem::path
 
 // Revert to stdout for output, and add a flag to change that.
 
@@ -61,10 +61,6 @@ int main(int argc, char **argv)
 // Later:
 //     Make another pass over the source and strictly move everything possible to the .cpp?
 //     Re-sort the defintions again.
-//     UTF-8 encoder/decoder:
-//         google how to better handle invalid bytes? but maybe not
-//         each invalid byte -> single [?] character
-//         then merge it upstream into imp-re
 
 // Maybe not?
 //     Allow more characters in bracket-less form: `:`, `.`, `->`?
@@ -169,6 +165,7 @@ int main(int argc, char **argv)
         single `char`:
             reject multibyte characters. And even characters with codes > 0x7f.
             reject empty literals: ''.
+        Test end-of-string in EVERY scenario where you'd also check for an invalid character.
 
 --- Expression colorizer
 
