@@ -597,12 +597,11 @@ const char *ta_test::text::Demangler::operator()(const char *name)
     if (status != 0) // -1 = out of memory, -2 = invalid string, -3 = invalid usage
         return name;
 
-    #if CFG_TA_CLEAN_UP_TYPE_NAMES
-    // Experiments show that `buf_size` does include the null terminator, which is exactly what we want here.
-    (void)type_name_details::CleanUpTypeName(buf_ptr, buf_size);
-    #endif
-
     return buf_ptr;
+    #elif CFG_TA_CLEAN_UP_TYPE_NAMES
+    buf = name;
+    buf.resize(type_name_details::CleanUpTypeName(buf.data(), buf.size() + 1) - 1);
+    return buf.c_str();
     #else
     return name;
     #endif

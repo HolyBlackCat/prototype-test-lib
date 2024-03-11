@@ -11,7 +11,6 @@
 // Overload to accept both regex and exact strings. Is this possible?
 // Move regex out of line (including header!), because of the slow compilation times.
 
-
 TA_TEST(foo/test)
 {
     std::cout << TA_GENERATE(x, std::array<float, 0>{}) << '\n';
@@ -139,6 +138,8 @@ int main(int argc, char **argv)
         user-defined tuple-like classes, with ADL get()
     nullptr
 
+    optional, variant?
+
     ta_test::ExactString
 
     ??? std::filesystem::path - don't crash with unicode symbols on non-unicode locales? Need to experiment.
@@ -158,6 +159,7 @@ int main(int argc, char **argv)
         allow spaces everywhere (except before and after)
     tuples
         empty tuples
+    optional, variant
     Unescaping strings - ugh
         how many chars we consume in the escape sequences
         reject large escapes (note that \0xx and \x should not produce multibyte chars?)

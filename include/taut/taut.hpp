@@ -1266,9 +1266,15 @@ namespace ta_test
         // It's recommended to only use it for runtime names, preferring `TypeName()` for compile-time stuff.
         class Demangler
         {
-            #if CFG_TA_CXXABI_DEMANGLE
+            #if CFG_TA_CXXABI_DEMANGLE && !CFG_TA_CLEAN_UP_TYPE_NAMES
             char *buf_ptr = nullptr;
             std::size_t buf_size = 0;
+            #elif !CFG_TA_CXXABI_DEMANGLE && CFG_TA_CLEAN_UP_TYPE_NAMES
+            std::string buf;
+            #elif !CFG_TA_CXXABI_DEMANGLE && !CFG_TA_CLEAN_UP_TYPE_NAMES
+            // Nothing.
+            #else
+            #error Invalid configuration.
             #endif
 
           public:
