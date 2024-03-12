@@ -6,8 +6,6 @@
 
 #include <taut/taut.hpp>
 
-// Container deserialization checks!
-
 // Overload to accept both regex and exact strings. Is this possible?
 // Move regex out of line (including header!), because of the slow compilation times.
 
@@ -94,6 +92,7 @@ int main(int argc, char **argv)
 //     Draw a fat bracket while explaining each test failure?
 //     `$[...]` could be useful to provide context for non-printable function calls (including void).
 //     -g messes up repetition counter a bit if a generator throws (while in the after-test generator update block)
+//     deserialize valueless_by_exception variants
 
 // Selling points:
 //     * Expression unwrapping
@@ -123,51 +122,6 @@ int main(int argc, char **argv)
 
 
 /* Pending tests:
-
---- ToString-ability of the common types:
-    char *, const char *
-    char[N], const char[N]
-    std::string_view
-    std::string
-        what about escaping strings?
-    char
-    int, short, long, float, double, long double
-
-    std::vector<int> std::set<int>, std::map<int, int>
-    tuple (including empty), pair, std::array
-        user-defined tuple-like classes, with ADL get()
-    nullptr
-
-    optional, variant?
-
-    ta_test::ExactString
-
-    ??? std::filesystem::path - don't crash with unicode symbols on non-unicode locales? Need to experiment.
-
-    ??? wchar_t, wstring, wstring_view? See what libfmt does, but probably later.
-    ?????? char16_t, char32_t
-
---- FromString
-    Same types as in ToString (especially std::array)
-    Reject duplicate keys in sets and maps
-    Reject spaces before and after:
-        scalars
-        strings, chars
-        containers
-    Containers:
-        empty containers
-        allow spaces everywhere (except before and after)
-    tuples
-        empty tuples
-    optional, variant
-    Unescaping strings - ugh
-        how many chars we consume in the escape sequences
-        reject large escapes (note that \0xx and \x should not produce multibyte chars?)
-        uppercase and lowercase hex
-        single `char`:
-            reject multibyte characters. And even characters with codes > 0x7f.
-            reject empty literals: ''.
-        Test end-of-string in EVERY scenario where you'd also check for an invalid character.
 
 --- Expression colorizer
 

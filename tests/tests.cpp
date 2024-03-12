@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <list>
 #include <map>
 #include <set>
 #include <sstream>
@@ -289,6 +290,7 @@ concept HasNativeDebufFormat = requires(CFG_TA_FMT_NAMESPACE::formatter<T> f){f.
 
 namespace TestTypes
 {
+    // A custom tuple-like type.
     struct UserDefinedTupleLike
     {
         int x = 0;
@@ -306,10 +308,85 @@ namespace TestTypes
         else
             static_assert(ta_test::meta::AlwaysFalse<ta_test::meta::ValueTag<I>, T>::value, "Bad tuple index!");
     }
+
+    // A helper to produce `valueless_by_exception` variants. From cppreference.
+    // We pass this to ToString.
+    struct ValuelessByExceptionHelper {
+        ValuelessByExceptionHelper(int) {}
+        ValuelessByExceptionHelper(const ValuelessByExceptionHelper &) {throw std::domain_error("copy ctor");}
+        ValuelessByExceptionHelper &operator=(const ValuelessByExceptionHelper &) = default;
+    };
+
+    // We pass this to FromString.
+    struct ValuelessByExceptionHelperEx : ValuelessByExceptionHelper
+    {
+        ValuelessByExceptionHelperEx() : ValuelessByExceptionHelper(42) {}
+        friend bool operator==(ValuelessByExceptionHelperEx, ValuelessByExceptionHelperEx) {return true;}
+    };
+
+    struct StringLikeVector : std::vector<wchar_t> {};
+    struct StringLikeList : std::list<wchar_t> {};
+    struct StringLikeSet : std::set<wchar_t> {};
+
+    struct StringLikeArray : std::array<wchar_t, 3> {};
+    template <std::size_t I, typename T>
+    requires std::is_same_v<std::remove_cvref_t<T>, StringLikeArray>
+    auto &&get(T &&value)
+    {
+        return std::forward<T>(value)[I];
+    }
+
+    struct MapLikeVector : std::vector<std::pair<int, std::string>> {};
+
+    struct VectorLikeMap : std::map<int, std::string> {};
+    struct SetLikeMap : std::map<int, std::string> {};
 }
+
+// Traits for `TestTypes`: [
 template <> struct std::tuple_size<TestTypes::UserDefinedTupleLike> : std::integral_constant<std::size_t, 2> {};
 template <> struct std::tuple_element<0, TestTypes::UserDefinedTupleLike> {using type = int;};
 template <> struct std::tuple_element<1, TestTypes::UserDefinedTupleLike> {using type = std::string;};
+
+template <typename T>
+requires std::is_same_v<T, TestTypes::ValuelessByExceptionHelper> || std::is_same_v<T, TestTypes::ValuelessByExceptionHelperEx>
+struct CFG_TA_FMT_NAMESPACE::formatter<T, char>
+{
+    constexpr auto parse(CFG_TA_FMT_NAMESPACE::basic_format_parse_context<char> &parse_ctx)
+    {
+        return parse_ctx.begin();
+    }
+
+    template <typename OutputIt>
+    constexpr auto format(const T &, CFG_TA_FMT_NAMESPACE::basic_format_context<OutputIt, char> &format_ctx) const
+    {
+        return CFG_TA_FMT_NAMESPACE::format_to(format_ctx.out(), "ValuelessByExceptionHelper");
+    }
+};
+
+template <>
+struct ta_test::string_conv::FromStringTraits<TestTypes::ValuelessByExceptionHelperEx>
+{
+    [[nodiscard]] std::string operator()(TestTypes::ValuelessByExceptionHelperEx &target, const char *&string) const
+    {
+        (void)target;
+        if (std::strncmp(string, "test", 4) == 0)
+            return nullptr;
+        else
+            return "Expected test.";
+    }
+};
+
+template <> inline constexpr auto ta_test::string_conv::range_format_kind<TestTypes::StringLikeVector> = ta_test::string_conv::RangeKind::string;
+template <> inline constexpr auto ta_test::string_conv::range_format_kind<TestTypes::StringLikeList> = ta_test::string_conv::RangeKind::string;
+template <> inline constexpr auto ta_test::string_conv::range_format_kind<TestTypes::StringLikeSet> = ta_test::string_conv::RangeKind::string;
+template <> inline constexpr auto ta_test::string_conv::range_format_kind<TestTypes::StringLikeArray> = ta_test::string_conv::RangeKind::string;
+template <> inline constexpr auto ta_test::string_conv::range_format_kind<TestTypes::MapLikeVector> = ta_test::string_conv::RangeKind::map;
+template <> inline constexpr auto ta_test::string_conv::range_format_kind<TestTypes::VectorLikeMap> = ta_test::string_conv::RangeKind::sequence;
+template <> inline constexpr auto ta_test::string_conv::range_format_kind<TestTypes::SetLikeMap> = ta_test::string_conv::RangeKind::set;
+
+template <> struct std::tuple_size<TestTypes::StringLikeArray> : std::integral_constant<std::size_t, 3> {};
+template <std::size_t I> struct std::tuple_element<I, TestTypes::StringLikeArray> {using type = wchar_t;};
+// ]
 
 // Test our own testing functions.
 TA_TEST(rig_selftest)
@@ -538,24 +615,45 @@ TA_TEST(string_conv/to_string)
         #endif
     }
 
-    // Ranges.
-    TA_CHECK( $[ta_test::string_conv::ToString(std::vector<int>{1,2,3})] == "[1, 2, 3]" );
-    TA_CHECK( $[ta_test::string_conv::ToString(std::vector<int>{})] == "[]" );
+    { // Ranges.
+        TA_CHECK( $[ta_test::string_conv::ToString(std::vector<int>{1,2,3})] == "[1, 2, 3]" );
+        TA_CHECK( $[ta_test::string_conv::ToString(std::vector<int>{})] == "[]" );
 
-    TA_CHECK( $[ta_test::string_conv::ToString(std::set<int>{1,2,3})] == "{1, 2, 3}" );
-    TA_CHECK( $[ta_test::string_conv::ToString(std::set<int>{})] == "{}" );
+        TA_CHECK( $[ta_test::string_conv::ToString(std::set<int>{1,2,3})] == "{1, 2, 3}" );
+        TA_CHECK( $[ta_test::string_conv::ToString(std::set<int>{})] == "{}" );
 
-    TA_CHECK( $[ta_test::string_conv::ToString(std::map<int, std::string>{{1,"a"},{2,"b"},{3,"c"}})] == R"({1: "a", 2: "b", 3: "c"})" );
-    TA_CHECK( $[ta_test::string_conv::ToString(std::map<int, std::string>{})] == "{}" );
+        TA_CHECK( $[ta_test::string_conv::ToString(std::map<int, std::string>{{1,"a"},{2,"b"},{3,"c"}})] == R"({1: "a", 2: "b", 3: "c"})" );
+        TA_CHECK( $[ta_test::string_conv::ToString(std::map<int, std::string>{})] == "{}" );
 
-    // `std::array` counts as a range.
-    TA_CHECK( $[ta_test::string_conv::ToString(std::array<int, 3>{1,2,3})] == "[1, 2, 3]" );
-    TA_CHECK( $[ta_test::string_conv::ToString(std::array<int, 0>{})] == "[]" );
+        // `std::array` counts as a range.
+        TA_CHECK( $[ta_test::string_conv::ToString(std::array<int, 3>{1,2,3})] == "[1, 2, 3]" );
+        TA_CHECK( $[ta_test::string_conv::ToString(std::array<int, 0>{})] == "[]" );
 
-    // Check that range element types use our formatter, if this is enabled.
-    TA_CHECK( $[ta_test::string_conv::ToString(std::vector{nullptr, nullptr})] ==
-        $[CFG_TA_FMT_ALLOW_NATIVE_RANGE_FORMATTING && CFG_TA_FMT_HAS_RANGE_FORMATTING ? "[0x0, 0x0]" : "[nullptr, nullptr]"]
-    );
+        // Plain array.
+        const int arr[3] = {1,2,3};
+        TA_CHECK( $[ta_test::string_conv::ToString(arr)] == "[1, 2, 3]" );
+
+        // Check that range element types use our formatter, if this is enabled.
+        TA_CHECK( $[ta_test::string_conv::ToString(std::vector{nullptr, nullptr})] ==
+            $[CFG_TA_FMT_ALLOW_NATIVE_RANGE_FORMATTING && CFG_TA_FMT_HAS_RANGE_FORMATTING ? "[0x0, 0x0]" : "[nullptr, nullptr]"]
+        );
+
+        // Make sure lists of pairs are not detected as maps.
+        TA_CHECK( $[ta_test::string_conv::ToString(std::vector<std::pair<int, int>>{{1,2},{3,4}})] == "[(1, 2), (3, 4)]" );
+        TA_CHECK( $[ta_test::string_conv::ToString(std::set<std::pair<int, int>>{{1,2},{3,4}})] == "{(1, 2), (3, 4)}" );
+
+        { // Format overrides.
+            TA_CHECK( $[ta_test::string_conv::ToString(TestTypes::StringLikeVector{{L'x',L'y'}})] == R"(L"xy")" );
+            TA_CHECK( $[ta_test::string_conv::ToString(TestTypes::StringLikeList{{L'x',L'y'}})] == R"(L"xy")" );
+            TA_CHECK( $[ta_test::string_conv::ToString(TestTypes::StringLikeSet{{L'x',L'y'}})] == R"(L"xy")" );
+            TA_CHECK( $[ta_test::string_conv::ToString(TestTypes::StringLikeArray{{L'x',L'y',L'z'}})] == R"(L"xyz")" );
+
+            TA_CHECK( $[ta_test::string_conv::ToString(TestTypes::MapLikeVector{{{1,"foo"},{2,"bar"}}})] == R"({1: "foo", 2: "bar"})" );
+
+            TA_CHECK( $[ta_test::string_conv::ToString(TestTypes::VectorLikeMap{{{1,"foo"},{2,"bar"}}})] == R"([(1, "foo"), (2, "bar")])" );
+            TA_CHECK( $[ta_test::string_conv::ToString(TestTypes::SetLikeMap{{{1,"foo"},{2,"bar"}}})] == R"({(1, "foo"), (2, "bar")})" );
+        }
+    }
 
     // Tuple-like:
     TA_CHECK( $[ta_test::string_conv::ToString(std::tuple{1,"a",3.4})] == "(1, \"a\", 3.4)" );
@@ -572,11 +670,30 @@ TA_TEST(string_conv/to_string)
 
     // Exact string.
     TA_CHECK( $[ta_test::string_conv::ToString(ta_test::string_conv::ExactString{"foo\nbar blah"})] == "foo\nbar blah" );
+
+    // std::optional
+    TA_CHECK( $[ta_test::string_conv::ToString(std::optional(42))] == "optional(42)" );
+    TA_CHECK( $[ta_test::string_conv::ToString(std::optional<int>{})] == "none" );
+
+    { // std::variant
+        std::variant<int, float, float, char, char, TestTypes::ValuelessByExceptionHelper> var(42);
+        TA_CHECK( $[ta_test::string_conv::ToString(var)] == "(int)42" );
+        var.emplace<1>(1.23f);
+        TA_CHECK( $[ta_test::string_conv::ToString(var)] == "(float#1)1.23" );
+        var.emplace<2>(4.56f);
+        TA_CHECK( $[ta_test::string_conv::ToString(var)] == "(float#2)4.56" );
+        var.emplace<3>('x');
+        TA_CHECK( $[ta_test::string_conv::ToString(var)] == "(char#3)'x'" );
+        var.emplace<4>('y');
+        TA_CHECK( $[ta_test::string_conv::ToString(var)] == "(char#4)'y'" );
+        try {var = TestTypes::ValuelessByExceptionHelper(42);} catch (...) {}
+        TA_CHECK( $[ta_test::string_conv::ToString(var)] == "valueless_by_exception" );
+    }
 }
 
 TA_TEST(string_conv/from_string)
 {
-    constexpr auto FromStringPasses = [&]<typename T>(const char *source, const T &expected, int unused_trailing_characters = 0)
+    constexpr auto FromStringPasses = [&]<typename T>(const char *source, const T &expected, int unused_trailing_characters = 0, ta_test::Trace<"FromStringPasses"> = {})
     {
         const char *orig_source = source;
 
@@ -599,10 +716,13 @@ TA_TEST(string_conv/from_string)
             }
         }
 
-        TA_CHECK( $[value] == $[expected] );
+        if constexpr (std::is_array_v<T>)
+            TA_CHECK( std::equal( std::begin(value), std::end(value), std::begin(expected) ) );
+        else
+            TA_CHECK( $[value] == $[expected] );
     };
 
-    constexpr auto FromStringFails = [&]<typename T>(const char *source, int pos, std::string_view error_regex)
+    constexpr auto FromStringFails = [&]<typename T>(const char *source, int pos, std::string_view expected_error, ta_test::Trace<"FromStringFails"> = {})
     {
         const char *orig_source = source;
 
@@ -614,7 +734,7 @@ TA_TEST(string_conv/from_string)
 
         std::string error = ta_test::string_conv::FromStringTraits<T>{}(value, source);
         TA_CHECK( error != "" );
-        TA_CHECK( std::regex_match($[error], std::regex($[error_regex].begin(), error_regex.end())) );
+        TA_CHECK( $[error] == $[expected_error] );
         TA_CHECK( $[source - orig_source] == $[pos] );
     };
 
@@ -657,7 +777,7 @@ TA_TEST(string_conv/from_string)
             FromStringPasses("-0B00101010", T(-42));
         }
 
-        std::string common_error = CFG_TA_FMT_NAMESPACE::format("Expected {}\\.", ta_test::text::TypeName<T>());
+        std::string common_error = CFG_TA_FMT_NAMESPACE::format("Expected {}.", ta_test::text::TypeName<T>());
 
         FromStringFails.operator()<T>("", 0, common_error);
         FromStringFails.operator()<T>(" 42", 0, common_error);
@@ -846,6 +966,26 @@ TA_TEST(string_conv/from_string)
     CheckFloat.operator()<double>();
     CheckFloat.operator()<long double>();
 
+    { // std::nullptr_t
+        const std::string common_error = "Expected one of: `nullptr`, `0x0`, `0`.";
+
+        FromStringPasses("0x0", nullptr); // The standard format.
+        FromStringPasses("nullptr", nullptr); // Our format.
+        FromStringPasses("0", nullptr); // Just for completeness.
+        FromStringPasses("0x0 ", nullptr, 1);
+        FromStringPasses("nullptr ", nullptr, 1);
+        FromStringPasses("0 ", nullptr, 1);
+        FromStringPasses("0x", nullptr, 1);
+        FromStringPasses("0x1", nullptr, 2);
+        FromStringFails.operator()<std::nullptr_t>(" 0", 0, common_error);
+        FromStringFails.operator()<std::nullptr_t>(" 0x0", 0, common_error);
+        FromStringFails.operator()<std::nullptr_t>(" nullptr", 0, common_error);
+        FromStringFails.operator()<std::nullptr_t>("1", 0, common_error);
+        FromStringFails.operator()<std::nullptr_t>("null", 0, common_error);
+        FromStringFails.operator()<std::nullptr_t>("NULL", 0, common_error);
+        FromStringFails.operator()<std::nullptr_t>("Nullptr", 0, common_error);
+    }
+
     { // Strings.
         // Basic sanity, with and without prefixes.
         FromStringPasses(R"("abc")", std::string("abc"));
@@ -858,8 +998,8 @@ TA_TEST(string_conv/from_string)
         FromStringPasses(R"("abc")", std::u32string(U"abc"));
         FromStringPasses(R"(U"abc")", std::u32string(U"abc"));
         // Reject mismatching prefix:
-        FromStringFails.operator()<std::string>(R"(u8"a")", 0, "Expected opening `\"`\\.");
-        FromStringFails.operator()<std::wstring>(R"(u8"a")", 0, "Expected opening `\"`\\.");
+        FromStringFails.operator()<std::string>(R"(u8"a")", 0, "Expected opening `\"`.");
+        FromStringFails.operator()<std::wstring>(R"(u8"a")", 0, "Expected opening `\"`.");
 
         // Empty strings.
         FromStringPasses(R"("")", std::string{});
@@ -868,19 +1008,19 @@ TA_TEST(string_conv/from_string)
         FromStringPasses(R"("")", std::u16string{});
         FromStringPasses(R"("")", std::u32string{});
 
-        FromStringFails.operator()<std::string>(R"( "")", 0, "Expected opening `\"`\\.");
-        FromStringFails.operator()<std::string>(R"(")", 1, "Expected closing `\"`\\.");
-        FromStringFails.operator()<std::string>(R"("x)", 2, "Expected closing `\"`\\.");
+        FromStringFails.operator()<std::string>(R"( "")", 0, "Expected opening `\"`.");
+        FromStringFails.operator()<std::string>(R"(")", 1, "Expected closing `\"`.");
+        FromStringFails.operator()<std::string>(R"("x)", 2, "Expected closing `\"`.");
 
         FromStringPasses(R"("abc"x)", std::string("abc"), 1);
 
         { // Escape sequences.
             // Invalid.
-            FromStringFails.operator()<std::string>(R"("\y")", 2, "Invalid escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\A")", 2, "Invalid escape sequence\\."); // Make sure we're case-sensitive.
-            FromStringFails.operator()<std::string>(R"("\-1")", 2, "Invalid escape sequence\\."); // Reject numbers with signs.
-            FromStringFails.operator()<std::string>(R"("\+1")", 2, "Invalid escape sequence\\."); // Reject numbers with signs.
-            FromStringFails.operator()<std::string>(R"("\N")", 2, "Named character escapes are not supported\\."); // Reject named character escapes.
+            FromStringFails.operator()<std::string>(R"("\y")", 2, "Invalid escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\A")", 2, "Invalid escape sequence."); // Make sure we're case-sensitive.
+            FromStringFails.operator()<std::string>(R"("\-1")", 2, "Invalid escape sequence."); // Reject numbers with signs.
+            FromStringFails.operator()<std::string>(R"("\+1")", 2, "Invalid escape sequence."); // Reject numbers with signs.
+            FromStringFails.operator()<std::string>(R"("\N")", 2, "Named character escapes are not supported."); // Reject named character escapes.
 
             // Quotes.
             FromStringPasses(R"("X\"Y")", std::string("X\"Y"));
@@ -889,7 +1029,7 @@ TA_TEST(string_conv/from_string)
             FromStringPasses(R"("X'Y")", std::string("X'Y"));
 
             // Question mark - meaningless and not supporetd.
-            FromStringFails.operator()<std::string>(R"("\?")", 2, "Invalid escape sequence\\.");
+            FromStringFails.operator()<std::string>(R"("\?")", 2, "Invalid escape sequence.");
 
             // Common escapes.
             FromStringPasses(R"("X\aY")", std::string("X\aY"));
@@ -909,15 +1049,15 @@ TA_TEST(string_conv/from_string)
             FromStringPasses(R"("X\5Y")", std::string("X\5Y"));
             FromStringPasses(R"("X\6Y")", std::string("X\6Y"));
             FromStringPasses(R"("X\7Y")", std::string("X\7Y"));
-            FromStringFails.operator()<std::string>(R"("\8")", 2, "Invalid escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\9")", 2, "Invalid escape sequence\\.");
+            FromStringFails.operator()<std::string>(R"("\8")", 2, "Invalid escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\9")", 2, "Invalid escape sequence.");
 
             FromStringPasses(R"("X\11Y")", std::string("X\11Y"));
             FromStringPasses(R"("X\111Y")", std::string("X\111Y"));
             FromStringPasses(R"("X\1111Y")", std::string("X\1111Y")); // Consume 3 digits max.
             FromStringPasses(R"("X\377Y")", std::string("X\377Y")); // 255
-            FromStringFails.operator()<std::string>(R"("\400")", 1, "This value is not representable in the target character type\\.");
-            FromStringFails.operator()<std::string>(R"("\777")", 1, "This value is not representable in the target character type\\.");
+            FromStringFails.operator()<std::string>(R"("\400")", 1, "This value is not representable in the target character type.");
+            FromStringFails.operator()<std::string>(R"("\777")", 1, "This value is not representable in the target character type.");
 
             FromStringPasses(R"("X\377Y")", std::u16string(u"X\377Y")); // 255
             FromStringPasses(R"("X\400Y")", std::u16string(u"X\400Y")); // 256
@@ -925,35 +1065,35 @@ TA_TEST(string_conv/from_string)
             FromStringPasses(R"("X\1111Y")", std::u16string(u"X\1111Y")); // Consume 3 digits max.
 
             // Octal braced.
-            FromStringFails.operator()<std::string>(R"("\o1")", 3, "Expected opening `\\{` in the escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\o{}")", 4, "Expected octal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\o{")", 4, "Expected octal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\o{8")", 4, "Expected octal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\o{x")", 4, "Expected octal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\o{-1}")", 4, "Expected octal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\o{+1}")", 4, "Expected octal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\o{1")", 5, "Expected closing `\\}` in the escape sequence\\.");
+            FromStringFails.operator()<std::string>(R"("\o1")", 3, "Expected opening `{` in the escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\o{}")", 4, "Expected octal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\o{")", 4, "Expected octal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\o{8")", 4, "Expected octal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\o{x")", 4, "Expected octal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\o{-1}")", 4, "Expected octal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\o{+1}")", 4, "Expected octal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\o{1")", 5, "Expected closing `}` in the escape sequence.");
             FromStringPasses(R"("X\o{0}Y")", std::string("X\0Y", 3));
             FromStringPasses(R"("X\o{1}Y")", std::string("X\1Y"));
             FromStringPasses(R"("X\o{1}1Y")", std::string("X\1""1Y"));
             FromStringPasses(R"("X\o{11}Y")", std::string("X\11Y"));
             FromStringPasses(R"("X\o{377}Y")", std::string("X\377Y"));
             FromStringPasses(R"("X\o{000000000377}Y")", std::string("X\377Y"));
-            FromStringFails.operator()<std::string>(R"("\o{400}")", 1, "This value is not representable in the target character type\\.");
-            FromStringFails.operator()<std::string>(R"("\o{1234}")", 1, "This value is not representable in the target character type\\.");
-            FromStringFails.operator()<std::string>(R"("\o{37777777777}")", 1, "This value is not representable in the target character type\\."); // 2^32 - 1
-            FromStringFails.operator()<std::string>(R"("\o{40000000000}")", 14, "Overflow in escape sequence\\."); // 2^32
+            FromStringFails.operator()<std::string>(R"("\o{400}")", 1, "This value is not representable in the target character type.");
+            FromStringFails.operator()<std::string>(R"("\o{1234}")", 1, "This value is not representable in the target character type.");
+            FromStringFails.operator()<std::string>(R"("\o{37777777777}")", 1, "This value is not representable in the target character type."); // 2^32 - 1
+            FromStringFails.operator()<std::string>(R"("\o{40000000000}")", 14, "Overflow in escape sequence."); // 2^32
 
             FromStringPasses(R"("X\o{0}Y")", std::u8string(u8"X\0Y", 3));
             FromStringPasses(R"("X\o{1}Y")", std::u8string(u8"X\1Y"));
             FromStringPasses(R"("X\o{11}Y")", std::u8string(u8"X\11Y"));
             FromStringPasses(R"("X\o{377}Y")", std::u8string(u8"X\377Y"));
-            FromStringFails.operator()<std::u8string>(R"("\o{400}")", 1, "This value is not representable in the target character type\\.");
+            FromStringFails.operator()<std::u8string>(R"("\o{400}")", 1, "This value is not representable in the target character type.");
 
             FromStringPasses(R"("X\o{377}Y")", std::u16string(u"X\377Y")); // 255
             FromStringPasses(R"("X\o{177777}Y")", std::u16string(u"X\xffffY")); // 2^16 - 1
-            FromStringFails.operator()<std::u16string>(R"("\o{200000}")", 1, "This value is not representable in the target character type\\.");
-            FromStringFails.operator()<std::u16string>(R"("\o{40000000000}")", 14, "Overflow in escape sequence\\."); // 2^32
+            FromStringFails.operator()<std::u16string>(R"("\o{200000}")", 1, "This value is not representable in the target character type.");
+            FromStringFails.operator()<std::u16string>(R"("\o{40000000000}")", 14, "Overflow in escape sequence."); // 2^32
 
             FromStringPasses(R"("X\o{153777}Y")", std::u16string(u"X\xd7ffY"));
             FromStringPasses(R"("X\o{154000}Y")", std::u16string(u"X\xd800Y")); // Surrogate.
@@ -963,7 +1103,7 @@ TA_TEST(string_conv/from_string)
             FromStringPasses(R"("X\o{377}Y")", std::u32string(U"X\377Y")); // 255
             FromStringPasses(R"("X\o{177777}Y")", std::u32string(U"X\xffffY")); // 2^16 - 1
             FromStringPasses(R"("X\o{37777777777}Y")", std::u32string(U"X\xffffffffY")); // 2^32 - 1
-            FromStringFails.operator()<std::u32string>(R"("\o{40000000000}")", 14, "Overflow in escape sequence\\."); // 2^32
+            FromStringFails.operator()<std::u32string>(R"("\o{40000000000}")", 14, "Overflow in escape sequence."); // 2^32
 
             FromStringPasses(R"("X\o{153777}Y")", std::u32string(U"X\xd7ffY"));
             FromStringPasses(R"("X\o{154000}Y")", std::u32string(U"X\xd800Y")); // Surrogate.
@@ -976,8 +1116,8 @@ TA_TEST(string_conv/from_string)
             {
                 FromStringPasses(R"("X\o{377}Y")", std::wstring(L"X\377Y")); // 255
                 FromStringPasses(R"("X\o{177777}Y")", std::wstring(L"X\xffffY")); // 2^16 - 1
-                FromStringFails.operator()<std::wstring>(R"("\o{200000}")", 1, "This value is not representable in the target character type\\.");
-                FromStringFails.operator()<std::wstring>(R"("\o{40000000000}")", 14, "Overflow in escape sequence\\."); // 2^32
+                FromStringFails.operator()<std::wstring>(R"("\o{200000}")", 1, "This value is not representable in the target character type.");
+                FromStringFails.operator()<std::wstring>(R"("\o{40000000000}")", 14, "Overflow in escape sequence."); // 2^32
             }
             else
             {
@@ -986,7 +1126,7 @@ TA_TEST(string_conv/from_string)
                 #ifndef _WIN32 // This doesn't compile for 2-byte `wchar_t`s.
                 FromStringPasses(R"("X\o{37777777777}Y")", std::wstring(L"X\xffffffffY")); // 2^32 - 1
                 #endif
-                FromStringFails.operator()<std::wstring>(R"("\o{40000000000}")", 14, "Overflow in escape sequence\\."); // 2^32
+                FromStringFails.operator()<std::wstring>(R"("\o{40000000000}")", 14, "Overflow in escape sequence."); // 2^32
             }
 
             // Hexadecimal.
@@ -995,14 +1135,14 @@ TA_TEST(string_conv/from_string)
             FromStringPasses(R"("X\x1FY")", std::string("X\x1FY"));
             FromStringPasses(R"("X\xfFY")", std::string("X\xffY"));
             FromStringPasses(R"("X\x00000000000fFY")", std::string("X\xffY"));
-            FromStringFails.operator()<std::string>(R"("X\x100Y")", 2, "This value is not representable in the target character type\\.");
+            FromStringFails.operator()<std::string>(R"("X\x100Y")", 2, "This value is not representable in the target character type.");
 
             // --- u16
             FromStringPasses(R"("X\x1Y")", std::u16string(u"X\x1Y"));
             FromStringPasses(R"("X\x1fY")", std::u16string(u"X\x1fY"));
             FromStringPasses(R"("X\x1f2Y")", std::u16string(u"X\x1f2Y"));
             FromStringPasses(R"("X\x1f2eY")", std::u16string(u"X\x1f2eY"));
-            FromStringFails.operator()<std::u16string>(R"("X\x10000Y")", 2, "This value is not representable in the target character type\\.");
+            FromStringFails.operator()<std::u16string>(R"("X\x10000Y")", 2, "This value is not representable in the target character type.");
 
             // --- --- Invalid codepints.
             FromStringPasses(R"("X\xd7ffY")", std::u16string(u"X\xd7ffY"));
@@ -1019,7 +1159,7 @@ TA_TEST(string_conv/from_string)
             FromStringPasses(R"("X\x1f2e3dY")", std::u32string(U"X\x1f2e3dY"));
             FromStringPasses(R"("X\x1f2e3d4Y")", std::u32string(U"X\x1f2e3d4Y"));
             FromStringPasses(R"("X\x1f2e3d4cY")", std::u32string(U"X\x1f2e3d4cY"));
-            FromStringFails.operator()<std::u32string>(R"("X\x100000000Y")", 12, "Overflow in escape sequence\\.");
+            FromStringFails.operator()<std::u32string>(R"("X\x100000000Y")", 12, "Overflow in escape sequence.");
 
             // --- --- Invalid codepoints.
             FromStringPasses(R"("X\xd7ffY")", std::u32string(U"X\xd7ffY"));
@@ -1030,26 +1170,26 @@ TA_TEST(string_conv/from_string)
             FromStringPasses(R"("X\x110000Y")", std::u32string(U"X\x110000Y")); // Out-of-range character.
 
             // Hexadecimal braced.
-            FromStringFails.operator()<std::string>(R"("\x{}")", 4, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\x{")", 4, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\x{x")", 4, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\x{-1}")", 4, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\x{+1}")", 4, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("\x{1")", 5, "Expected closing `\\}` in the escape sequence\\.");
+            FromStringFails.operator()<std::string>(R"("\x{}")", 4, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\x{")", 4, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\x{x")", 4, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\x{-1}")", 4, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\x{+1}")", 4, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("\x{1")", 5, "Expected closing `}` in the escape sequence.");
             FromStringPasses(R"("X\x{0}Y")", std::string("X\x0Y", 3));
             FromStringPasses(R"("X\x{1}Y")", std::string("X\x1Y"));
             FromStringPasses(R"("X\x{1}1Y")", std::string("X\x1""1Y"));
             FromStringPasses(R"("X\x{1f}Y")", std::string("X\x1fY"));
             FromStringPasses(R"("X\x{fF}Y")", std::string("X\xffY"));
             FromStringPasses(R"("X\x{0000000000000fF}Y")", std::string("X\xffY"));
-            FromStringFails.operator()<std::string>(R"("\x{100}")", 1, "This value is not representable in the target character type\\.");
+            FromStringFails.operator()<std::string>(R"("\x{100}")", 1, "This value is not representable in the target character type.");
 
             // --- u16
             FromStringPasses(R"("X\x{1}Y")", std::u16string(u"X\x1Y"));
             FromStringPasses(R"("X\x{11}Y")", std::u16string(u"X\x11Y"));
             FromStringPasses(R"("X\x{111}Y")", std::u16string(u"X\x111Y"));
             FromStringPasses(R"("X\x{1111}Y")", std::u16string(u"X\x1111Y"));
-            FromStringFails.operator()<std::u16string>(R"("\x{10000}")", 1, "This value is not representable in the target character type\\.");
+            FromStringFails.operator()<std::u16string>(R"("\x{10000}")", 1, "This value is not representable in the target character type.");
 
             // --- u32
             FromStringPasses(R"("X\x{1}Y")", std::u32string(U"X\x1Y"));
@@ -1060,13 +1200,13 @@ TA_TEST(string_conv/from_string)
             FromStringPasses(R"("X\x{1f1e1d}Y")", std::u32string(U"X\x1f1e1dY"));
             FromStringPasses(R"("X\x{1f1e1d1}Y")", std::u32string(U"X\x1f1e1d1Y"));
             FromStringPasses(R"("X\x{1f1e1d1c}Y")", std::u32string(U"X\x1f1e1d1cY"));
-            FromStringFails.operator()<std::u32string>(R"("\x{100000000}")", 12, "Overflow in escape sequence\\.");
+            FromStringFails.operator()<std::u32string>(R"("\x{100000000}")", 12, "Overflow in escape sequence.");
 
             // Unicode, 4 digits.
-            FromStringFails.operator()<std::string>(R"("X\uY")", 4, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\ufY")", 5, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\ufFY")", 6, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\ufF1Y")", 7, "Expected hexadecimal digit in escape sequence\\.");
+            FromStringFails.operator()<std::string>(R"("X\uY")", 4, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\ufY")", 5, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\ufFY")", 6, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\ufF1Y")", 7, "Expected hexadecimal digit in escape sequence.");
             FromStringPasses(R"("X\ufF12Y")", std::string("X\ufF12Y"));
             FromStringPasses(R"("X\ufF123Y")", std::string("X\ufF123Y"));
             FromStringPasses(R"("X\u0000Y")", std::string("X\0Y", 3));
@@ -1076,69 +1216,69 @@ TA_TEST(string_conv/from_string)
 
             // --- Invalid codepoints.
             FromStringPasses(R"("X\ud7ffY")", std::string("X\ud7ffY"));
-            FromStringFails.operator()<std::string>(R"("X\ud800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
-            FromStringFails.operator()<std::string>(R"("X\udfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
+            FromStringFails.operator()<std::string>(R"("X\ud800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
+            FromStringFails.operator()<std::string>(R"("X\udfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
             FromStringPasses(R"("X\ue000Y")", std::string("X\ue000Y"));
             // --- --- u16
             FromStringPasses(R"("X\ud7ffY")", std::u16string(u"X\ud7ffY"));
-            FromStringFails.operator()<std::u16string>(R"("X\ud800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
-            FromStringFails.operator()<std::u16string>(R"("X\udfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
+            FromStringFails.operator()<std::u16string>(R"("X\ud800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
+            FromStringFails.operator()<std::u16string>(R"("X\udfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
             FromStringPasses(R"("X\ue000Y")", std::u16string(u"X\ue000Y"));
             // --- --- u32
             FromStringPasses(R"("X\ud7ffY")", std::u32string(U"X\ud7ffY"));
-            FromStringFails.operator()<std::u32string>(R"("X\ud800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
-            FromStringFails.operator()<std::u32string>(R"("X\udfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
+            FromStringFails.operator()<std::u32string>(R"("X\ud800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
+            FromStringFails.operator()<std::u32string>(R"("X\udfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
             FromStringPasses(R"("X\ue000Y")", std::u32string(U"X\ue000Y"));
 
             // Unicode, 8 digits.
-            FromStringFails.operator()<std::string>(R"("X\UY")", 4, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\UfY")", 5, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\UfFY")", 6, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\UfF1Y")", 7, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\UfF12Y")", 8, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\UfF123Y")", 9, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\UfF1234Y")", 10, "Expected hexadecimal digit in escape sequence\\.");
-            FromStringFails.operator()<std::string>(R"("X\UfF12345Y")", 11, "Expected hexadecimal digit in escape sequence\\.");
+            FromStringFails.operator()<std::string>(R"("X\UY")", 4, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\UfY")", 5, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\UfFY")", 6, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\UfF1Y")", 7, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\UfF12Y")", 8, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\UfF123Y")", 9, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\UfF1234Y")", 10, "Expected hexadecimal digit in escape sequence.");
+            FromStringFails.operator()<std::string>(R"("X\UfF12345Y")", 11, "Expected hexadecimal digit in escape sequence.");
             FromStringPasses(R"("X\U0010ffffY")", std::string("X\U0010ffffY"));
             FromStringPasses(R"("X\U0010ffff1Y")", std::string("X\U0010ffff1Y"));
             FromStringPasses(R"("X\U00000000Y")", std::string("X\0Y", 3));
 
             // --- Invalid codepoints.
             FromStringPasses(R"("X\U0000d7ffY")", std::string("X\U0000d7ffY"));
-            FromStringFails.operator()<std::string>(R"("X\U0000d800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
-            FromStringFails.operator()<std::string>(R"("X\U0000dfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
+            FromStringFails.operator()<std::string>(R"("X\U0000d800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
+            FromStringFails.operator()<std::string>(R"("X\U0000dfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
             FromStringPasses(R"("X\U0000e000Y")", std::string("X\U0000e000Y"));
             FromStringPasses(R"("X\U0010ffffY")", std::string("X\U0010ffffY"));
-            FromStringFails.operator()<std::string>(R"("X\U00110000Y")", 2, "Invalid codepoint, larger than 0x10ffff\\."); // Out-of-range character.
+            FromStringFails.operator()<std::string>(R"("X\U00110000Y")", 2, "Invalid codepoint, larger than 0x10ffff."); // Out-of-range character.
             // --- --- u16
             FromStringPasses(R"("X\U0000d7ffY")", std::u16string(u"X\U0000d7ffY"));
-            FromStringFails.operator()<std::u16string>(R"("X\U0000d800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
-            FromStringFails.operator()<std::u16string>(R"("X\U0000dfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
+            FromStringFails.operator()<std::u16string>(R"("X\U0000d800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
+            FromStringFails.operator()<std::u16string>(R"("X\U0000dfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
             FromStringPasses(R"("X\U0000e000Y")", std::u16string(u"X\U0000e000Y"));
             FromStringPasses(R"("X\U0010ffffY")", std::u16string(u"X\U0010ffffY"));
-            FromStringFails.operator()<std::u16string>(R"("X\U00110000Y")", 2, "Invalid codepoint, larger than 0x10ffff\\."); // Out-of-range character.
+            FromStringFails.operator()<std::u16string>(R"("X\U00110000Y")", 2, "Invalid codepoint, larger than 0x10ffff."); // Out-of-range character.
             // --- --- u32
             FromStringPasses(R"("X\U0000d7ffY")", std::u32string(U"X\U0000d7ffY"));
-            FromStringFails.operator()<std::u32string>(R"("X\U0000d800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
-            FromStringFails.operator()<std::u32string>(R"("X\U0000dfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
+            FromStringFails.operator()<std::u32string>(R"("X\U0000d800Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
+            FromStringFails.operator()<std::u32string>(R"("X\U0000dfffY")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
             FromStringPasses(R"("X\U0000e000Y")", std::u32string(U"X\U0000e000Y"));
             FromStringPasses(R"("X\U0010ffffY")", std::u32string(U"X\U0010ffffY"));
-            FromStringFails.operator()<std::u32string>(R"("X\U00110000Y")", 2, "Invalid codepoint, larger than 0x10ffff\\."); // Out-of-range character.
+            FromStringFails.operator()<std::u32string>(R"("X\U00110000Y")", 2, "Invalid codepoint, larger than 0x10ffff."); // Out-of-range character.
 
             // Unicode, braced.
-            FromStringFails.operator()<std::string>(R"("\U{1}")", 3, "Expected hexadecimal digit in escape sequence\\."); // Only lowercase `u` allows braces.
+            FromStringFails.operator()<std::string>(R"("\U{1}")", 3, "Expected hexadecimal digit in escape sequence."); // Only lowercase `u` allows braces.
             FromStringPasses(R"("X\u{1}Y")", std::string("X\x01Y"));
             FromStringPasses(R"("X\u{000000000000001036}Y")", std::string("X\u1036Y"));
             FromStringPasses(R"("X\u{0010ffff}Y")", std::string("X\U0010ffffY"));
-            FromStringFails.operator()<std::string>(R"("\u{100000000}")", 12, "Overflow in escape sequence\\.");
+            FromStringFails.operator()<std::string>(R"("\u{100000000}")", 12, "Overflow in escape sequence.");
 
             // --- Invalid codepoints.
             FromStringPasses(R"("X\u{d7ff}Y")", std::string("X\U0000d7ffY"));
-            FromStringFails.operator()<std::string>(R"("X\u{d800}Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
-            FromStringFails.operator()<std::string>(R"("X\u{dfff}Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs\\."); // Surrogate.
+            FromStringFails.operator()<std::string>(R"("X\u{d800}Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
+            FromStringFails.operator()<std::string>(R"("X\u{dfff}Y")", 2, "Invalid codepoint, range 0xd800-0xdfff is reserved for surrogate pairs."); // Surrogate.
             FromStringPasses(R"("X\u{e000}Y")", std::string("X\U0000e000Y"));
             FromStringPasses(R"("X\u{10ffff}Y")", std::string("X\U0010ffffY"));
-            FromStringFails.operator()<std::string>(R"("X\u{110000}Y")", 2, "Invalid codepoint, larger than 0x10ffff\\."); // Out-of-range character.
+            FromStringFails.operator()<std::string>(R"("X\u{110000}Y")", 2, "Invalid codepoint, larger than 0x10ffff."); // Out-of-range character.
         }
 
         { // Encoding primitives.
@@ -1274,11 +1414,11 @@ TA_TEST(string_conv/from_string)
         FromStringPasses("'\\0'", '\0');
         FromStringPasses("'\\xff'", '\xff');
         FromStringPasses("'\\u{12}'", '\u0012');
-        FromStringFails.operator()<char>("'\\u{ff}'", 1, "This codepoint doesn't fit into a single character\\.");
+        FromStringFails.operator()<char>("'\\u{ff}'", 1, "This codepoint doesn't fit into a single character.");
 
         FromStringPasses("'a' ", 'a', 1);
-        FromStringFails.operator()<char>(" 'a'", 0, "Expected opening `'`\\.");
-        FromStringFails.operator()<char>("''", 1, "Expected a character before the closing `'`\\.");
+        FromStringFails.operator()<char>(" 'a'", 0, "Expected opening `'`.");
+        FromStringFails.operator()<char>("''", 1, "Expected a character before the closing `'`.");
         FromStringFails.operator()<char>("'aa'", 2, "Expected closing `'`.");
 
         // char8_t
@@ -1288,7 +1428,7 @@ TA_TEST(string_conv/from_string)
         FromStringPasses("'\\0'", u8'\0');
         FromStringPasses("'\\xff'", u8'\xff');
         FromStringPasses("'\\u{12}'", u8'\u0012');
-        FromStringFails.operator()<char8_t>("'\\u{ff}'", 1, "This codepoint doesn't fit into a single character\\.");
+        FromStringFails.operator()<char8_t>("'\\u{ff}'", 1, "This codepoint doesn't fit into a single character.");
 
         // char16_t
         FromStringPasses("'a'", u'a');
@@ -1299,7 +1439,7 @@ TA_TEST(string_conv/from_string)
         FromStringPasses("'\\u{12}'", u'\u0012');
         FromStringPasses("'\\u{ff}'", u'\u00ff');
         FromStringPasses("'\\xffff'", u'\xffff');
-        FromStringFails.operator()<char16_t>("'\\u{1fbca}'", 1, "This codepoint doesn't fit into a single character\\.");
+        FromStringFails.operator()<char16_t>("'\\u{1fbca}'", 1, "This codepoint doesn't fit into a single character.");
 
         // char32_t
         FromStringPasses("'a'", U'a');
@@ -1312,7 +1452,7 @@ TA_TEST(string_conv/from_string)
         FromStringPasses("'\\xffff'", U'\xffff');
         FromStringPasses("'\\uffff'", U'\uffff');
         FromStringPasses("'\\U0010ffff'", U'\U0010ffff');
-        FromStringFails.operator()<char32_t>("'\\u{00110000}'", 1, "Invalid codepoint, larger than 0x10ffff\\.");
+        FromStringFails.operator()<char32_t>("'\\u{00110000}'", 1, "Invalid codepoint, larger than 0x10ffff.");
 
         // wchar_t
         FromStringPasses("'a'", L'a');
@@ -1325,16 +1465,202 @@ TA_TEST(string_conv/from_string)
         FromStringPasses("'\\xffff'", L'\xffff');
         if constexpr (sizeof(wchar_t) == 2)
         {
-            FromStringFails.operator()<wchar_t>("'\\u{1fbca}'", 1, "This codepoint doesn't fit into a single character\\.");
+            FromStringFails.operator()<wchar_t>("'\\u{1fbca}'", 1, "This codepoint doesn't fit into a single character.");
         }
         else
         {
             #ifndef _WIN32 // This doesn't compile at all with 2-byte `wchar_t`.
             FromStringPasses("'\\uffff'", L'\uffff');
             FromStringPasses("'\\U0010ffff'", L'\U0010ffff');
-            FromStringFails.operator()<wchar_t>("'\\u{00110000}'", 1, "Invalid codepoint, larger than 0x10ffff\\.");
+            FromStringFails.operator()<wchar_t>("'\\u{00110000}'", 1, "Invalid codepoint, larger than 0x10ffff.");
             #endif
         }
+    }
+
+    { // Containers.
+        { // std::array
+            FromStringPasses("[1,2,3]", std::array{1,2,3});
+            FromStringPasses("[1,2,3] ", std::array{1,2,3}, 1);
+            FromStringPasses("[  1  ,  2  ,  3  ]  ", std::array{1,2,3}, 2);
+            FromStringFails.operator()<std::array<int, 3>>(" [1,2,3] ", 0, "Expected opening `[`.");
+            FromStringFails.operator()<std::array<int, 3>>("[", 1, "Expected int.");
+            FromStringFails.operator()<std::array<int, 3>>("[ ", 2, "Expected int.");
+            FromStringFails.operator()<std::array<int, 3>>("[1", 2, "Expected `,`.");
+            FromStringFails.operator()<std::array<int, 3>>("[1,", 3, "Expected int.");
+            FromStringFails.operator()<std::array<int, 3>>("[1,2", 4, "Expected `,`.");
+            FromStringFails.operator()<std::array<int, 3>>("[1,2,", 5, "Expected int.");
+            FromStringFails.operator()<std::array<int, 3>>("[1,2,3", 6, "Expected closing `]`.");
+            FromStringFails.operator()<std::array<int, 3>>("[1,2,3,", 6, "Expected closing `]`.");
+            FromStringFails.operator()<std::array<int, 3>>("[1,2,3x", 6, "Expected closing `]`.");
+
+            FromStringPasses("[]", std::array<int, 0>{});
+            FromStringPasses("[] ", std::array<int, 0>{}, 1);
+            FromStringPasses("[  ]  ", std::array<int, 0>{}, 2);
+            FromStringFails.operator()<std::array<int, 0>>(" [] ", 0, "Expected opening `[`.");
+            FromStringFails.operator()<std::array<int, 0>>("[,] ", 1, "Expected closing `]`.");
+            FromStringFails.operator()<std::array<int, 0>>("[1] ", 1, "Expected closing `]`.");
+        }
+
+        { // std::tuple
+            FromStringPasses("(1,2,\"foo\")", std::tuple{1,2,std::string("foo")});
+            FromStringPasses("(1,2,\"foo\") ", std::tuple{1,2,std::string("foo")}, 1);
+            FromStringPasses("(  1  ,  2  ,  \"foo\"  )  ", std::tuple{1,2,std::string("foo")}, 2);
+            FromStringFails.operator()<std::tuple<int,int,std::string>>(" (1,2,\"foo\") ", 0, "Expected opening `(`.");
+            FromStringFails.operator()<std::tuple<int,int,std::string>>("(", 1, "Expected int.");
+            FromStringFails.operator()<std::tuple<int,int,std::string>>("( ", 2, "Expected int.");
+            FromStringFails.operator()<std::tuple<int,int,std::string>>("(1", 2, "Expected `,`.");
+            FromStringFails.operator()<std::tuple<int,int,std::string>>("(1,", 3, "Expected int.");
+            FromStringFails.operator()<std::tuple<int,int,std::string>>("(1,2", 4, "Expected `,`.");
+            FromStringFails.operator()<std::tuple<int,int,std::string>>("(1,2,", 5, "Expected opening `\"`.");
+            FromStringFails.operator()<std::tuple<int,int,std::string>>("(1,2,\"foo\"", 10, "Expected closing `)`.");
+            FromStringFails.operator()<std::tuple<int,int,std::string>>("(1,2,\"foo\",", 10, "Expected closing `)`.");
+            FromStringFails.operator()<std::tuple<int,int,std::string>>("(1,2,\"foo\"x", 10, "Expected closing `)`.");
+
+            FromStringPasses("()", std::tuple{});
+            FromStringPasses("() ", std::tuple{}, 1);
+            FromStringPasses("(  )  ", std::tuple{}, 2);
+            FromStringFails.operator()<std::tuple<>>(" () ", 0, "Expected opening `(`.");
+            FromStringFails.operator()<std::tuple<>>("(,) ", 1, "Expected closing `)`.");
+            FromStringFails.operator()<std::tuple<>>("(1) ", 1, "Expected closing `)`.");
+        }
+
+        { // Plain array
+            const int arr[3] = {1,2,3};
+
+            FromStringPasses("[1,2,3]", arr);
+            FromStringPasses("[1,2,3] ", arr, 1);
+            FromStringPasses("[  1  ,  2  ,  3  ]  ", arr, 2);
+            FromStringFails.operator()<int[3]>(" [1,2,3] ", 0, "Expected opening `[`.");
+            FromStringFails.operator()<int[3]>("[", 1, "Expected int.");
+            FromStringFails.operator()<int[3]>("[ ", 2, "Expected int.");
+            FromStringFails.operator()<int[3]>("[1", 2, "Expected `,`.");
+            FromStringFails.operator()<int[3]>("[1,", 3, "Expected int.");
+            FromStringFails.operator()<int[3]>("[1,2", 4, "Expected `,`.");
+            FromStringFails.operator()<int[3]>("[1,2,", 5, "Expected int.");
+            FromStringFails.operator()<int[3]>("[1,2,3", 6, "Expected closing `]`.");
+            FromStringFails.operator()<int[3]>("[1,2,3,", 6, "Expected closing `]`.");
+            FromStringFails.operator()<int[3]>("[1,2,3x", 6, "Expected closing `]`.");
+        }
+
+        { // std::vector
+            FromStringPasses("[]", std::vector<int>{});
+            FromStringPasses("[] ", std::vector<int>{}, 1);
+            FromStringPasses("[  ]  ", std::vector<int>{}, 2);
+            FromStringPasses("[1,2,3]", std::vector<int>{1,2,3});
+            FromStringPasses("[1,2,3] ", std::vector<int>{1,2,3}, 1);
+            FromStringPasses("[  1  ,  2  ,  3  ]  ", std::vector<int>{1,2,3}, 2);
+            FromStringFails.operator()<std::vector<int>>(" []", 0, "Expected opening `[`.");
+            FromStringFails.operator()<std::vector<int>>("[", 1, "Expected int.");
+            FromStringFails.operator()<std::vector<int>>("[,]", 1, "Expected int.");
+            FromStringFails.operator()<std::vector<int>>("[1,2,3x]", 6, "Expected `,` or closing `]`.");
+            FromStringFails.operator()<std::vector<int>>("[1,2,3,]", 7, "Expected int.");
+        }
+
+        { // std::set
+            FromStringPasses("{}", std::set<int>{});
+            FromStringPasses("{} ", std::set<int>{}, 1);
+            FromStringPasses("{  }  ", std::set<int>{}, 2);
+            FromStringPasses("{1,2,3}", std::set<int>{1,2,3});
+            FromStringPasses("{1,2,3} ", std::set<int>{1,2,3}, 1);
+            FromStringPasses("{  1  ,  2  ,  3  }  ", std::set<int>{1,2,3}, 2);
+            FromStringFails.operator()<std::set<int>>(" {}", 0, "Expected opening `{`.");
+            FromStringFails.operator()<std::set<int>>("{", 1, "Expected int.");
+            FromStringFails.operator()<std::set<int>>("{,}", 1, "Expected int.");
+            FromStringFails.operator()<std::set<int>>("{1,2,3x}", 6, "Expected `,` or closing `}`.");
+            FromStringFails.operator()<std::set<int>>("{1,2,3,}", 7, "Expected int.");
+            FromStringFails.operator()<std::set<int>>("{1,2,3,2}", 7, "Duplicate set element.");
+        }
+
+        { // std::map
+            static_assert(ta_test::string_conv::RangeSupportingFromStringWeak<std::map<int, std::string>>);
+            FromStringPasses("{}", std::map<int,std::string>{});
+            FromStringPasses("{} ", std::map<int,std::string>{}, 1);
+            FromStringPasses("{  }  ", std::map<int,std::string>{}, 2);
+            FromStringPasses("{1:\"foo\",2:\"bar\",3:\"baz\"}", std::map<int,std::string>{{1,"foo"},{2,"bar"},{3,"baz"}});
+            FromStringPasses("{1:\"foo\",2:\"bar\",3:\"baz\"} ", std::map<int,std::string>{{1,"foo"},{2,"bar"},{3,"baz"}}, 1);
+            FromStringPasses("{  1  :  \"foo\"  ,  2  :  \"bar\"  ,  3  :  \"baz\"  }  ", std::map<int,std::string>{{1,"foo"},{2,"bar"},{3,"baz"}}, 2);
+            FromStringFails.operator()<std::map<int,std::string>>(" {}", 0, "Expected opening `{`.");
+            FromStringFails.operator()<std::map<int,std::string>>("{", 1, "Expected int.");
+            FromStringFails.operator()<std::map<int,std::string>>("{,}", 1, "Expected int.");
+            FromStringFails.operator()<std::map<int,std::string>>("{:}", 1, "Expected int.");
+            FromStringFails.operator()<std::map<int,std::string>>("{1}", 2, "Expected `:` after the key.");
+            FromStringFails.operator()<std::map<int,std::string>>("{1:}", 3, "Expected opening `\"`.");
+            FromStringFails.operator()<std::map<int,std::string>>("{1:\"foo\",2:\"bar\",}", 17, "Expected int.");
+            FromStringFails.operator()<std::map<int,std::string>>("{1:\"foo\",2:\"bar\":}", 16, "Expected `,` or closing `}`.");
+            FromStringFails.operator()<std::map<int,std::string>>("{1:\"foo\",2:\"bar\",1:\"baz\"}", 17, "Duplicate key.");
+        }
+
+        { // Weird shit.
+            // Make sure we're not using the map deserializer for wrong types.
+            FromStringPasses("[(1,2),(3,4)]", std::vector<std::pair<int, int>>{{1,2},{3,4}});
+            FromStringFails.operator()<std::vector<std::pair<int, int>>>("[1:2,3:4]", 1, "Expected opening `(`.");
+            FromStringPasses("{(1,2),(3,4)}", std::set<std::pair<int, int>>{{1,2},{3,4}});
+            FromStringFails.operator()<std::set<std::pair<int, int>>>("{1:2,3:4}", 1, "Expected opening `(`.");
+
+            { // Format overrides.
+                static_assert(ta_test::string_conv::RangeSupportingFromStringAsFixedSize<TestTypes::StringLikeArray>);
+
+                FromStringPasses( R"(L"xy")", TestTypes::StringLikeVector{{L'x',L'y'}} );
+                FromStringPasses( R"(L"xy")", TestTypes::StringLikeList{{L'x',L'y'}} );
+                FromStringPasses( R"(L"xy")", TestTypes::StringLikeSet{{L'x',L'y'}} );
+                FromStringPasses( R"(L"xyz")", TestTypes::StringLikeArray{{L'x',L'y',L'z'}} );
+
+                FromStringPasses( R"({1: "foo", 2: "bar"})", TestTypes::MapLikeVector{{{1,"foo"},{2,"bar"}}} );
+
+                FromStringPasses( R"([(1, "foo"), (2, "bar")])", TestTypes::VectorLikeMap{{{1,"foo"},{2,"bar"}}} );
+                FromStringPasses( R"({(1, "foo"), (2, "bar")})", TestTypes::SetLikeMap{{{1,"foo"},{2,"bar"}}} );
+            }
+        }
+    }
+
+    { // std::optional
+        FromStringPasses("none", std::optional<int>{});
+        FromStringPasses("none ", std::optional<int>{}, 1);
+        FromStringPasses("nonex", std::optional<int>{}, 1);
+        FromStringPasses("optional(42)", std::optional(42));
+        FromStringPasses("optional(42) ", std::optional(42), 1);
+        FromStringPasses("optional ( 42 )", std::optional(42));
+        FromStringPasses("optional  (  42  )", std::optional(42));
+        FromStringFails.operator()<std::optional<int>>("nono", 0, "Expected `none` or `optional(...)`.");
+        FromStringFails.operator()<std::optional<int>>("optional", 8, "Expected opening `(`.");
+        FromStringFails.operator()<std::optional<int>>("optional42", 8, "Expected opening `(`.");
+        FromStringFails.operator()<std::optional<int>>("optional ", 9, "Expected opening `(`.");
+        FromStringFails.operator()<std::optional<int>>("optional(", 9, "Expected int.");
+        FromStringFails.operator()<std::optional<int>>("optional( ", 10, "Expected int.");
+        FromStringFails.operator()<std::optional<int>>("optional(42", 11, "Expected closing `)`.");
+        FromStringFails.operator()<std::optional<int>>("optional(42x", 11, "Expected closing `)`.");
+        FromStringFails.operator()<std::optional<int>>("optional(42 ", 12, "Expected closing `)`.");
+    }
+
+    { // std::variant
+        using VarType = std::variant<int, float, float, char, char, TestTypes::ValuelessByExceptionHelperEx>;
+
+        const std::string type_must_be_one_of = "The variant type must be one of: `int`, `float#1`, `float#2`, `char#3`, `char#4`, `TestTypes::ValuelessByExceptionHelperEx`.";
+
+        FromStringPasses("(int)42", VarType(42));
+        FromStringPasses("(  int  )  42  ", VarType(42), 2);
+        FromStringPasses("(  float#1  )  12.3  ", VarType(std::in_place_index<1>, 12.3f), 2);
+        FromStringFails.operator()<VarType>(" (int)42", 0, "Expected opening `(` before the variant type.");
+        FromStringFails.operator()<VarType>("(int#0)42", 4, "Expected closing `)` after the variant type.");
+        FromStringFails.operator()<VarType>("(float)12.3", 1, type_must_be_one_of);
+        FromStringFails.operator()<VarType>("(float#)12.3", 1, type_must_be_one_of);
+        FromStringFails.operator()<VarType>("(float#0)12.3", 1, type_must_be_one_of);
+        FromStringFails.operator()<VarType>("(float #1)12.3", 1, type_must_be_one_of);
+        FromStringFails.operator()<VarType>("(float# 1)12.3", 1, type_must_be_one_of);
+        FromStringFails.operator()<VarType>("(float#3)12.3", 1, type_must_be_one_of);
+        FromStringFails.operator()<VarType>("(float#34567)12.3", 1, type_must_be_one_of);
+        FromStringFails.operator()<VarType>("(float#2345)12.3", 8, "Expected closing `)` after the variant type."); // This matches `float#2` as a prefix.
+        FromStringFails.operator()<VarType>("(float#-100500)12.3", 1, type_must_be_one_of);
+        FromStringFails.operator()<VarType>("valueless_by_exception", 0, "Deserializing `valueless_by_exception` variants is currently not supported.");
+        FromStringFails.operator()<VarType>(" valueless_by_exception", 0, "Expected opening `(` before the variant type.");
+        FromStringPasses("(float#1)12.3", VarType(std::in_place_index<1>, 12.3f));
+        FromStringPasses("(float#2)12.3", VarType(std::in_place_index<2>, 12.3f));
+        TA_CHECK( VarType(std::in_place_index<1>, 42) != VarType(std::in_place_index<2>, 42) );
+
+        // Here `int#1` is a prefix of `int#10`, we need to make sure that both work.
+        using VarType2 = std::variant<int, int, int, int, int, int, int, int, int, int, int>; // 11x int
+        FromStringPasses("(int#1)42", VarType2(std::in_place_index<1>, 42));
+        FromStringPasses("(int#10)42", VarType2(std::in_place_index<10>, 42));
     }
 }
 

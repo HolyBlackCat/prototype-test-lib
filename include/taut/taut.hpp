@@ -1376,7 +1376,7 @@ namespace ta_test
         // Converts `value` to a string using `ToStringTraits`.
         // We don't support non-const ranges for now, and we probably shouldn't (don't want to mess up user's stateful views?).
         template <typename T>
-        requires std::is_same_v<T, std::remove_cvref_t<T>>
+        requires std::is_same_v<T, std::remove_cvref_t<T>> && SupportsToString<T>
         [[nodiscard]] std::string ToString(const T &value)
         {
             return ToStringTraits<std::remove_cvref_t<T>>{}(value);
@@ -1514,7 +1514,7 @@ namespace ta_test
                 using Elem = std::remove_cvref_t<std::ranges::range_reference_t<T>>;
                 // `std::tuple_size_v` is SFINAE-unfriendly, so we're using `std::tuple_size` instead.
                 // This condition is slightly simplified compared to what cppreference uses, but whatever.
-                if constexpr (requires{requires std::tuple_size<Elem>::value == 2;})
+                if constexpr (requires{typename T::mapped_type; requires std::tuple_size<Elem>::value == 2;})
                     return RangeKind::map;
                 else
                     return RangeKind::set;
@@ -1529,14 +1529,25 @@ namespace ta_test
         #if !CFG_TA_FMT_ALLOW_NATIVE_RANGE_FORMATTING || !CFG_TA_FMT_HAS_RANGE_FORMATTING
         // Range formatter.
         template <typename T>
-        requires(range_format_kind<T> != RangeKind::disabled)
+        requires
+            (range_format_kind<T> != RangeKind::disabled) &&
+            SupportsToString<std::ranges::range_value_t<T>> &&
+            std::is_same_v<std::remove_cvref_t<std::ranges::range_reference_t<T>>, std::ranges::range_value_t<T>>
         struct DefaultToStringTraits<T>
         {
             std::string operator()(const T &value) const
             {
                 if constexpr (range_format_kind<T> == RangeKind::string)
                 {
-                    if constexpr (std::contiguous_iterator<std::ranges::iterator_t<T>>)
+                    static_assert(text::encoding::CharType<std::ranges::range_value_t<T>>, "Range printing mode is set to `string`, but it doesn't contain characters.");
+
+                    if constexpr (
+                        (
+                            std::is_same_v<std::ranges::range_reference_t<T>, std::ranges::range_value_t<T> &> ||
+                            std::is_same_v<std::ranges::range_reference_t<T>, const std::ranges::range_value_t<T> &>
+                        ) &&
+                        std::contiguous_iterator<std::ranges::iterator_t<T>>
+                    )
                     {
                         std::basic_string_view<std::ranges::range_value_t<T>> view(std::to_address(value.begin()), std::to_address(value.end()));
                         return (ToString)(view);
@@ -1580,7 +1591,11 @@ namespace ta_test
         // Tuple formatter.
         // This reject `std::array`, that goes to the range formatter. I'd prefer `(...)`, but `std::format` (and libfmt) uses `[...]` here.
         template <TupleLike T>
-        requires(range_format_kind<T> == RangeKind::disabled)
+        requires
+            (range_format_kind<T> == RangeKind::disabled) &&
+            ([]<std::size_t ...I>(std::index_sequence<I...>){
+                return (SupportsToString<std::tuple_element_t<I, T>> && ...);
+            }(std::make_index_sequence<std::tuple_size_v<T>>{}))
         struct DefaultToStringTraits<T>
         {
             std::string operator()(const T &value) const
@@ -1599,6 +1614,69 @@ namespace ta_test
             }
         };
         #endif
+
+        // std::optional:
+
+        // `std::format` doesn't support it, but libfmt prints it as `none` or `optional(42)`. This looks good to me, so I also use this format.
+        // Reimplementing it here unconditionally, just in case libfmt decides to change the format in the future.
+
+        template <typename T>
+        struct ToStringTraits<std::optional<T>>
+        {
+            std::string operator()(const std::optional<T> &value) const
+            {
+                if (value)
+                    return "optional(" + (ToString)(*value) + ")";
+                else
+                    return "none";
+            }
+        };
+
+        // std::variant:
+
+        // `std::format` doesn't support it, and libfmt has a weird format prone to ambiguities (`variant(value)`).
+
+        namespace string_conv_detail
+        {
+            static constexpr std::string_view variant_valueless_by_exception = "valueless_by_exception";
+
+            // Returns the type name for `I`th element of `std::variant<P...>`.
+            // Disambiguates the names for duplicate types with a `#i` suffix, where `i` is `.index()`.
+            template <std::size_t I, typename ...P>
+            std::string VariantElemTypeName()
+            {
+                using type = std::variant_alternative_t<I, std::variant<P...>>;
+                std::string ret(text::TypeName<type>());
+
+                constexpr bool ambiguous_type = (std::is_same_v<type, P> + ...) > 1;
+                if constexpr (ambiguous_type)
+                {
+                    ret += '#';
+                    ret += std::to_string(I);
+                }
+                return ret;
+            }
+        }
+
+        template <typename ...P>
+        struct ToStringTraits<std::variant<P...>>
+        {
+            std::string operator()(const std::variant<P...> &value) const
+            {
+                if (value.valueless_by_exception())
+                {
+                    return std::string(string_conv_detail::variant_valueless_by_exception);
+                }
+                else
+                {
+                    static const auto names = []<std::size_t ...I>(std::index_sequence<I...>){
+                        return std::array{string_conv_detail::VariantElemTypeName<I, P...>()...};
+                    }(std::make_index_sequence<sizeof...(P)>{});
+                    return "(" + names[value.index()] + ")" +
+                        std::visit([](const auto &elem){return (ToString)(elem);}, value);
+                }
+            }
+        };
 
 
         // --- LAZY TO STRING ---
@@ -1759,14 +1837,18 @@ namespace ta_test
             // std::string operator()(T &target, const char *&string) const;
         };
 
-        // Whether `FromString()` works on `T`. `T` must be cvref-unqualified.
+        // Whether `FromString()` works on `T`, assuming it's already constructed somehow. `T` must be cvref-unqualified.
         template <typename T>
-        concept SupportsFromString =
-            std::is_same_v<T, std::remove_cvref_t<T>>
-            && requires(T &target, const char *&string)
+        concept SupportsFromStringWeak =
+            std::is_same_v<T, std::remove_cvref_t<T>> &&
+            requires(T &target, const char *&string)
             {
                 { FromStringTraits<T>{}(target, string) } -> std::same_as<std::string>;
             };
+
+        // Whether `FromString()` works on `T`. `T` must be default-constructible and cvref-unqualified.
+        template <typename T>
+        concept SupportsFromString = SupportsFromStringWeak<T> && std::default_initializable<T>;
 
 
         // --- FROM STRING SPECIALIZATIONS ---
@@ -1841,24 +1923,31 @@ namespace ta_test
 
         // Whether `T` is a range that possibly could be converted from string. We further constrain this concept below.
         template <typename T>
-        concept RangeSupportingFromStringWeak = from_string_range_format_kind<T> != RangeKind::disabled;
+        concept RangeSupportingFromStringWeak =
+            from_string_range_format_kind<T> != RangeKind::disabled &&
+            SupportsFromStringWeak<typename AdjustRangeElemToConvertFromString<std::ranges::range_value_t<T>>::type>;
         // Whether we can `.emplace_back()` to this range.
         // This is nice, because we can insert first, and then operate on a reference.
         template <typename T>
         concept RangeSupportingEmplaceBack = RangeSupportingFromStringWeak<T> &&
             std::is_same_v<typename AdjustRangeElemToConvertFromString<T>::type, T> &&
-            requires(T &target) {requires std::is_same_v<decltype(target.emplace_back()), std::ranges::range_value_t<T> &>;};
+            requires(T &target, std::ranges::range_value_t<T> &&value) {target.emplace_back() = std::move(value);};
         // Whether we can `.push_back()` to this range. Unsure what container would actually need this over `emplace_back()`, perhaps something non-standard?
         template <typename T>
         concept RangeSupportingPushBack = RangeSupportingFromStringWeak<T> &&
-            requires(T &target, std::ranges::range_value_t<T> &&e){target.push_back(std::move(e));};
+            std::default_initializable<typename AdjustRangeElemToConvertFromString<std::ranges::range_value_t<T>>::type> &&
+            requires(T &target, typename AdjustRangeElemToConvertFromString<std::ranges::range_value_t<T>>::type &&e){target.push_back(std::move(e));};
         // Whether we can `.insert()` to this range.
         template <typename T>
         concept RangeSupportingInsert = RangeSupportingFromStringWeak<T> &&
-            requires(T &target, std::ranges::range_value_t<T> &&e){requires std::is_same_v<decltype(target.insert(std::move(e)).second), bool>;};
+            std::default_initializable<typename AdjustRangeElemToConvertFromString<std::ranges::range_value_t<T>>::type> &&
+            requires(T &target, typename AdjustRangeElemToConvertFromString<std::ranges::range_value_t<T>>::type &&e){requires std::is_same_v<decltype(target.insert(std::move(e)).second), bool>;};
+        // Whether this is a fixed-size tuple-like range.
+        template <typename T>
+        concept RangeSupportingFromStringAsFixedSize = RangeSupportingFromStringWeak<T> && (std::is_array_v<T> || TupleLike<T>);
         // Whether this range can be converted from a string.
         template <typename T>
-        concept RangeSupportingFromString = RangeSupportingEmplaceBack<T> || RangeSupportingPushBack<T> || RangeSupportingInsert<T>;
+        concept RangeSupportingFromString = RangeSupportingEmplaceBack<T> || RangeSupportingPushBack<T> || RangeSupportingInsert<T> || RangeSupportingFromStringAsFixedSize<T>;
 
         // The actual code for ranges. Escaped strings are handled here too.
         template <RangeSupportingFromString T>
@@ -1868,8 +1957,52 @@ namespace ta_test
             {
                 if constexpr (from_string_range_format_kind<T> == RangeKind::string)
                 {
-                    const char *error = text::encoding::ParseQuotedString(string, target);
-                    return error ? error : "";
+                    static_assert(text::encoding::CharType<std::ranges::range_value_t<T>>, "Range deserialization mode is set to `string`, but it doesn't contain characters.");
+
+                    std::basic_string<std::ranges::range_value_t<T>> buf;
+                    const char *const old_string = string;
+                    if (std::string error = FromStringTraits<decltype(buf)>{}(buf, string); !error.empty())
+                        return error;
+
+                    if constexpr (RangeSupportingFromStringAsFixedSize<T>)
+                    {
+                        if (buf.size() != target.size())
+                            return CFG_TA_FMT_NAMESPACE::format("Wrong string size {}, expected exactly {}.", buf.size(), target.size());
+                    }
+
+                    if constexpr (requires{target.reserve(std::size_t{});})
+                        target.reserve(buf.size());
+
+                    std::size_t i = 0;
+
+                    // Insert the elements.
+                    for (auto ch : buf)
+                    {
+                        if constexpr (RangeSupportingFromStringAsFixedSize<T>)
+                        {
+                            target[i++] = ch;
+                        }
+                        else if constexpr (RangeSupportingInsert<T>)
+                        {
+                            if (!target.insert(ch).second)
+                            {
+                                string = old_string;
+                                return "Duplicate set element.";
+                            }
+                        }
+                        else if constexpr (RangeSupportingPushBack<T>)
+                        {
+                            target.push_back(ch);
+                        }
+                        else if constexpr (RangeSupportingEmplaceBack<T>)
+                        {
+                            target.emplace_back() = ch; // This is probably useless.
+                        }
+                        else
+                        {
+                            static_assert(meta::AlwaysFalse<T>::value, "Internal error: Don't know how to append to this string-like container.");
+                        }
+                    }
                 }
                 else
                 {
@@ -1882,30 +2015,30 @@ namespace ta_test
                         return CFG_TA_FMT_NAMESPACE::format("Expected opening `{}`.", brace_open);
                     string++;
 
-                    bool first = true;
+                    std::size_t index = 0;
 
-                    while (true)
+                    auto ProcessOneElement = [&] CFG_TA_NODISCARD_LAMBDA (bool *stop) -> std::string
                     {
                         text::chars::SkipWhitespace(string);
 
                         // Stop on closing brace.
-                        if (*string == brace_close)
+                        if constexpr (!RangeSupportingFromStringAsFixedSize<T>)
                         {
-                            string++;
-                            break;
+                            if (*string == brace_close)
+                            {
+                                string++;
+                                *stop = true;
+                                return "";
+                            }
                         }
 
                         // Consume comma.
-                        if (first)
-                        {
-                            first = false;
-                        }
-                        else
+                        if (index != 0)
                         {
                             if (*string == ',')
                                 string++;
                             else
-                                return CFG_TA_FMT_NAMESPACE::format("Expected `,` or closing `{}`.", brace_close);
+                                return RangeSupportingFromStringAsFixedSize<T> ? "Expected `,`." : CFG_TA_FMT_NAMESPACE::format("Expected `,` or closing `{}`.", brace_close);
 
                             text::chars::SkipWhitespace(string);
                         }
@@ -1928,7 +2061,7 @@ namespace ta_test
                                 text::chars::SkipWhitespace(string);
 
                                 if (*string != ':')
-                                    return "Expected `:` after the element key.";
+                                    return "Expected `:` after the key.";
                                 string++;
 
                                 text::chars::SkipWhitespace(string);
@@ -1941,7 +2074,13 @@ namespace ta_test
                         };
 
                         // Insert the element.
-                        if constexpr (RangeSupportingInsert<T>)
+                        if constexpr (RangeSupportingFromStringAsFixedSize<T>)
+                        {
+                            std::string error = ConsumeElem(target[index]);
+                            if (!error.empty())
+                                return error;
+                        }
+                        else if constexpr (RangeSupportingInsert<T>)
                         {
                             const char *old_string = string;
                             Elem elem{};
@@ -1951,7 +2090,7 @@ namespace ta_test
                             if (!target.insert(std::move(elem)).second)
                             {
                                 string = old_string;
-                                return "Duplicate key.";
+                                return from_string_range_format_kind<T> == RangeKind::map ? "Duplicate key." : "Duplicate set element.";
                             }
                         }
                         else if constexpr (RangeSupportingEmplaceBack<T>)
@@ -1972,16 +2111,53 @@ namespace ta_test
                         {
                             static_assert(meta::AlwaysFalse<T>::value, "Internal error: Unknown container flavor.");
                         }
+
+                        index++;
+                        return "";
+                    };
+
+                    if constexpr (RangeSupportingFromStringAsFixedSize<T>)
+                    {
+                        while (index < std::size(target))
+                        {
+                            if (std::string error = ProcessOneElement(nullptr); !error.empty())
+                                return error;
+                        }
+                    }
+                    else
+                    {
+                        while (true)
+                        {
+                            bool stop = false;
+                            if (std::string error = ProcessOneElement(&stop); !error.empty())
+                                return error;
+                            if (stop)
+                                break;
+                        }
                     }
 
-                    return "";
+                    // Check the closing brace for fixed-size ranges.
+                    if constexpr (RangeSupportingFromStringAsFixedSize<T>)
+                    {
+                        text::chars::SkipWhitespace(string);
+                        if (*string != brace_close)
+                            return CFG_TA_FMT_NAMESPACE::format("Expected closing `{}`.", brace_close);
+                        string++;
+                    }
                 }
+
+                return "";
             }
         };
 
         // Tuples.
 
         template <TupleLike T>
+        requires
+            (!RangeSupportingFromStringAsFixedSize<T>) &&
+            ([]<std::size_t ...I>(std::index_sequence<I...>){
+                return (SupportsFromStringWeak<std::tuple_element_t<I, T>> && ...);
+            }(std::make_index_sequence<std::tuple_size_v<T>>{}))
         struct DefaultFromStringTraits<T>
         {
             [[nodiscard]] std::string operator()(T &target, const char *&string) const
@@ -2025,6 +2201,124 @@ namespace ta_test
                 string++;
 
                 return "";
+            }
+        };
+
+        // std::optional
+
+        template <SupportsFromString T>
+        struct DefaultFromStringTraits<std::optional<T>>
+        {
+            [[nodiscard]] std::string operator()(std::optional<T> &target, const char *&string) const
+            {
+                // Using manual comparisons because it's unclear
+                if (string[0] == 'n' &&
+                    string[1] == 'o' &&
+                    string[2] == 'n' &&
+                    string[3] == 'e'
+                )
+                {
+                    string += 4;
+                    target = std::nullopt;
+                    return "";
+                }
+                else if (
+                    string[0] == 'o' &&
+                    string[1] == 'p' &&
+                    string[2] == 't' &&
+                    string[3] == 'i' &&
+                    string[4] == 'o' &&
+                    string[5] == 'n' &&
+                    string[6] == 'a' &&
+                    string[7] == 'l'
+                )
+                {
+                    string += 8;
+                    text::chars::SkipWhitespace(string);
+                    if (*string != '(')
+                        return "Expected opening `(`.";
+                    string++;
+                    text::chars::SkipWhitespace(string);
+                    std::string error = FromStringTraits<T>{}(target.emplace(), string);
+                    if (!error.empty())
+                        return error;
+                    text::chars::SkipWhitespace(string);
+                    if (*string != ')')
+                        return "Expected closing `)`.";
+                    string++;
+                    return "";
+                }
+                else
+                {
+                    return "Expected `none` or `optional(...)`.";
+                }
+            }
+        };
+
+        template <SupportsFromString ...P>
+        struct DefaultFromStringTraits<std::variant<P...>>
+        {
+            [[nodiscard]] std::string operator()(std::variant<P...> &target, const char *&string) const
+            {
+                if (std::strncmp(string, string_conv_detail::variant_valueless_by_exception.data(), string_conv_detail::variant_valueless_by_exception.size()) == 0)
+                {
+                    // string += string_conv_detail::variant_valueless_by_exception.size();
+                    // Supporting this would require directly modifying the variant's memory? Everything else is likely not viable.
+                    return "Deserializing `valueless_by_exception` variants is currently not supported.";
+                }
+
+                if (*string != '(')
+                    return "Expected opening `(` before the variant type.";
+                string++;
+                text::chars::SkipWhitespace(string);
+
+                // Prepare a list of names. Sort by decreasing length, to give longer strings priority.
+                static const auto names = []{
+                    auto ret = []<std::size_t ...I>(std::index_sequence<I...>){
+                        return std::array{std::pair(string_conv_detail::VariantElemTypeName<I, P...>(), I)...};
+                    }(std::make_index_sequence<sizeof...(P)>{});
+                    std::sort(ret.begin(), ret.end(), [](const auto &a, const auto &b){return a.first.size() > b.first.size();});
+                    return ret;
+                }();
+
+                auto iter = std::find_if(names.begin(), names.end(), [&](const auto &elem)
+                {
+                    return std::strncmp(string, elem.first.data(), elem.first.size()) == 0;
+                });
+                if (iter == names.end())
+                {
+                    std::string ret = "The variant type must be one of: ";
+                    [&]<std::size_t ...I>(std::index_sequence<I...>){
+                        ([&]{
+                            if constexpr (I > 0)
+                                ret += ", ";
+                            ret += '`';
+                            ret += string_conv_detail::VariantElemTypeName<I, P...>();
+                            ret += '`';
+                        }(), ...);
+                    }(std::make_index_sequence<sizeof...(P)>{});
+                    ret += ".";
+                    return ret;
+                }
+                string += iter->first.size();
+                text::chars::SkipWhitespace(string);
+
+                if (*string != ')')
+                    return "Expected closing `)` after the variant type.";
+                string++;
+
+                text::chars::SkipWhitespace(string);
+
+                static constexpr auto funcs = []<std::size_t ...I>(std::index_sequence<I...>){
+                    return std::array{
+                        +[](std::variant<P...> &target, const char *&string) -> std::string
+                        {
+                            return FromStringTraits<P>{}(target.template emplace<I>(), string);
+                        }...
+                    };
+                }(std::make_index_sequence<sizeof...(P)>{});
+
+                return funcs[iter->second](target, string);
             }
         };
     }
@@ -3775,24 +4069,19 @@ namespace ta_test
             }
             else
             {
-                // Prepare a list of names. Stable-sort by decreasing length, to give longer strings priority.
+                // Prepare a list of names. Sort by decreasing length, to give longer strings priority.
                 static const std::vector<std::pair<std::string_view, std::size_t>> list = []{
                     std::vector<std::pair<std::string_view, std::size_t>> ret;
                     ret.reserve(N);
                     for (std::size_t i = 0; i < N; i++)
                         ret.emplace_back(NameLambda{}(i), i);
-                    std::stable_sort(ret.begin(), ret.end(), [](const auto &a, const auto &b){return a.first.size() > b.first.size();});
+                    std::sort(ret.begin(), ret.end(), [](const auto &a, const auto &b){return a.first.size() > b.first.size();});
                     return ret;
                 }();
 
                 auto iter = std::find_if(list.begin(), list.end(), [&](const auto &p)
                 {
-                    for (std::size_t i = 0; i < p.first.size(); i++)
-                    {
-                        if (p.first[i] != string[i] || string[i] == '\0')
-                            return false;
-                    }
-                    return true;
+                    return std::strncmp(string, p.first.data(), p.first.size()) == 0;
                 });
 
                 if (iter == list.end())
