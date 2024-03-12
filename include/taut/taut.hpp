@@ -1967,7 +1967,10 @@ namespace ta_test
                     if constexpr (RangeSupportingFromStringAsFixedSize<T>)
                     {
                         if (buf.size() != target.size())
-                            return CFG_TA_FMT_NAMESPACE::format("Wrong string size {}, expected exactly {}.", buf.size(), target.size());
+                        {
+                            string = old_string;
+                            return CFG_TA_FMT_NAMESPACE::format("Wrong string size, got {} but expected exactly {}.", buf.size(), target.size());
+                        }
                     }
 
                     if constexpr (requires{target.reserve(std::size_t{});})

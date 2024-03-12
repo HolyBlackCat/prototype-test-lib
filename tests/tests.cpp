@@ -1603,7 +1603,10 @@ TA_TEST(string_conv/from_string)
                 FromStringPasses( R"(L"xy")", TestTypes::StringLikeVector{{L'x',L'y'}} );
                 FromStringPasses( R"(L"xy")", TestTypes::StringLikeList{{L'x',L'y'}} );
                 FromStringPasses( R"(L"xy")", TestTypes::StringLikeSet{{L'x',L'y'}} );
+
                 FromStringPasses( R"(L"xyz")", TestTypes::StringLikeArray{{L'x',L'y',L'z'}} );
+                FromStringFails.operator()<TestTypes::StringLikeArray>(R"(L"xy")", 0, "Wrong string size, got 2 but expected exactly 3.");
+                FromStringFails.operator()<TestTypes::StringLikeArray>(R"(L"xyzw")", 0, "Wrong string size, got 4 but expected exactly 3.");
 
                 FromStringPasses( R"({1: "foo", 2: "bar"})", TestTypes::MapLikeVector{{{1,"foo"},{2,"bar"}}} );
 
