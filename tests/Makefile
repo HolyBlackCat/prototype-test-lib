@@ -209,22 +209,26 @@ $(call var,_cxx := $(comp) $(if $(filter-out stock,$(stdlib)),-stdlib=$(stdlib))
 	$(CXXFLAGS)\
 )
 
+# The output directory.
+$(call var,_build_dir := $(BUILD_DIR)/$(_config))
+$(_build_dir):
+	@mkdir -p $$@
+
 # Object file for the static library.
 $(call var,_obj_file_static := $(BUILD_DIR)/$(_config)/taut-static.o)
-$(_obj_file_static): ../source/taut.cpp $(wildcard ../include/taut/*)
+$(_obj_file_static): ../source/taut.cpp $(wildcard ../include/taut/*) | $(_build_dir)
 	$$(info [$(_config)] Compiling: $$(notdir $$@))
-	@mkdir -p $$(dir $$@)
 	@$(_cxx) -c $$< -o $$@ -I../include -fvisibility=hidden
 
+# Object file for the dynamic library.
 $(call var,_obj_file_shared := $(BUILD_DIR)/$(_config)/taut.o)
-$(_obj_file_shared): ../source/taut.cpp $(wildcard ../include/taut/*)
+$(_obj_file_shared): ../source/taut.cpp $(wildcard ../include/taut/*) | $(_build_dir)
 	$$(info [$(_config)] Compiling: $$(notdir $$@))
-	@mkdir -p $$(dir $$@)
 	@$(_cxx) -c $$< -o $$@ -I../include -fvisibility=hidden -fPIC -DCFG_TA_SHARED
 
 # Static library.
 $(call var,_static_lib := $(BUILD_DIR)/$(_config)/libtaut-static.a)
-$(_static_lib): $(_obj_file_static)
+$(_static_lib): $(_obj_file_static) | $(_build_dir)
 	$(call, ### Remove the old library because `ar` always appends to the existing one.)
 	$$(info [$(_config)] Creating static library: $$(notdir $$@))
 	@rm -f $$@
@@ -232,7 +236,7 @@ $(_static_lib): $(_obj_file_static)
 
 # Shared library.
 $(call var,_shared_lib := $(BUILD_DIR)/$(_config)/libtaut$(DLL_EXT))
-$(_shared_lib): $(_obj_file_shared)
+$(_shared_lib): $(_obj_file_shared) | $(_build_dir)
 	$$(info [$(_config)] Creating shared library: $$(notdir $$@))
 	@$(_cxx) -shared $$^ -o $$@ $(LDFLAGS)
 
@@ -279,7 +283,7 @@ endef
 override define snippet_test_program =
 $(call var,_this_exe := $(BUILD_DIR)/$(_config)/$(if $(findstring /,$(source)),_)$(notdir $(source:.cpp=$(EXT_EXE))))
 $(call var,_all_exes += $(_this_exe))
-$(_this_exe): $(source) $(_shared_lib)
+$(_this_exe): $(source) $(_shared_lib) | $(_build_dir)
 	$$(info [$(_config)] Creating executable: $(notdir $(_this_exe)))
 	@$(_cxx) $$(filter %.cpp,$$^) -I../include -DCFG_TA_SHARED -L$(dir $(_shared_lib)) -ltaut -o $$@
 endef

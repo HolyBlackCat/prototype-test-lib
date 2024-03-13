@@ -3,7 +3,7 @@
 #endif
 
 #include <taut/taut.hpp>
-#include <taut/modules.hpp>
+#include <taut/internals.hpp>
 
 #include <iterator>
 

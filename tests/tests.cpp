@@ -9,6 +9,7 @@
 // * `EXE_RUNNER` - the wrapper program used to run the executables, if any.
 
 #include <taut/taut.hpp>
+#include <taut/internals.hpp>
 
 #include <cmath>
 #include <cstdlib>
@@ -284,6 +285,27 @@ struct CodeRunner
     return runner;
 }
 
+// This version of `output::Terminal` redirects the output to a string.
+class TerminalToString : public ta_test::output::Terminal
+{
+  public:
+    std::string value;
+
+    TerminalToString(bool color)
+    {
+        enable_color = color;
+        output_func = [this](std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args)
+        {
+            std::vformat_to(std::back_inserter(value), fmt, args);
+        };
+    }
+
+    TerminalToString(const TerminalToString &) = delete;
+    TerminalToString &operator=(const TerminalToString &) = delete;
+};
+
+// ---
+
 // Whether `T` has a native `{:?}` debug format in this formatting library.
 template <typename T>
 concept HasNativeDebufFormat = requires(CFG_TA_FMT_NAMESPACE::formatter<T> f){f.set_debug_format();};
@@ -388,8 +410,13 @@ template <> struct std::tuple_size<TestTypes::StringLikeArray> : std::integral_c
 template <std::size_t I> struct std::tuple_element<I, TestTypes::StringLikeArray> {using type = wchar_t;};
 // ]
 
+static const std::string common_program_prefix = R"(#line 2 "dir/subdir/file.cpp"
+#include <taut/taut.hpp>
+int main(int argc, char **argv) {return ta_test::RunSimple(argc, argv);}
+)";
+
 // Test our own testing functions.
-TA_TEST(rig_selftest)
+TA_TEST( rig_selftest )
 {
     MustCompile("#include <version>");
     MustNotCompile("blah");
@@ -403,7 +430,7 @@ TA_TEST(rig_selftest)
         .FailWithExactOutput("", "Hello, world!\n");
 }
 
-TA_TEST(string_conv/to_string)
+TA_TEST( string_conv/to_string )
 {
     // Integers.
     auto CheckInt = [&]<typename T>
@@ -691,7 +718,7 @@ TA_TEST(string_conv/to_string)
     }
 }
 
-TA_TEST(string_conv/from_string)
+TA_TEST( string_conv/from_string )
 {
     constexpr auto FromStringPasses = [&]<typename T>(const char *source, const T &expected, int unused_trailing_characters = 0, ta_test::Trace<"FromStringPasses"> = {})
     {
@@ -1665,6 +1692,41 @@ TA_TEST(string_conv/from_string)
         FromStringPasses("(int#1)42", VarType2(std::in_place_index<1>, 42));
         FromStringPasses("(int#10)42", VarType2(std::in_place_index<10>, 42));
     }
+}
+
+TA_TEST( misc/expression_colorizer )
+{
+    ta_test::output::CommonData common_data;
+    ta_test::output::TextCanvas canv(&common_data);
+    std::size_t line = 0;
+    // Literal suffixes not starting with `_` are highlighted in the same way as the numbers themselves, because it's easier this way.
+    // If you decide to change this, we need to somehow handle `e` and `p` exponents (should they apply to all number types?), and perhaps more.
+    ta_test::output::expr::DrawToCanvas(canv, line++, 3, "foo(42, .5f,.5f, 5.f, 5.4f, 42_lit, 42lit, 42_foo42_bar, +42,-42, 123'456'789, 0x123'456, 0123'456)");
+    ta_test::output::expr::DrawToCanvas(canv, line++, 3, "foo(12e5,12e+5,12e-5,12.3e5,12.3e+5,12.3e-5,0x1p2,0x1p+2,0x1p-2,0x12.34p2)");
+    ta_test::output::expr::DrawToCanvas(canv, line++, 3, "1+1"); // `+` must not be highlighted as a number
+    ta_test::output::expr::DrawToCanvas(canv, line++, 3, "foo(\"meow\",foo42foo\"meow\"bar42bar,\"meow\"_bar42bar,\"foo\\\"bar\")");
+    ta_test::output::expr::DrawToCanvas(canv, line++, 3, "foo('a','\\n','meow',foo42foo'meow'bar42bar,'meow'_bar42bar,'foo\\'bar')");
+    ta_test::output::expr::DrawToCanvas(canv, line++, 3, "foo(R\"(meow)\",foo42fooR\"(meow)\"bar42bar,u8R\"(meow)\"_bar42bar,R\"(foo\"bar)\",R\"ab(foo\"f)\"g)a\"bar)ab\")");
+    // Different identifier/keyword categories:
+    ta_test::output::expr::DrawToCanvas(canv, line++, 3, "($ ( foo42bar bitand static_cast<int>(0) && __COUNTER__ ) && $[foo()] && $[false])");
+    // Unicode: (make sure unicode chars are not highlighted as punctuation)
+    ta_test::output::expr::DrawToCanvas(canv, line++, 3, "[мур] int");
+    TerminalToString term(true);
+    auto style_guard = term.MakeStyleGuard();
+    canv.Print(term, style_guard);
+    style_guard.ResetStyle();
+
+    CheckStringEquality(term.value, ReadFile("expression_colorizer_output.txt"));
+}
+
+TA_TEST( output/arg_colors )
+{
+    MustCompileAndThen(common_program_prefix + R"(TA_TEST( foo )
+{
+    TA_CHECK($["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && false);
+}
+)").FailWithExactOutput("--color", ReadFile("argument_colors_output.txt"));
+
 }
 
 

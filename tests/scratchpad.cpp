@@ -38,7 +38,7 @@ int main(int argc, char **argv)
 // Add CMakeLists.txt!
 //     pkg-config files!!
 
-// Introduction and license in headers? Maybe not the license? A short introduction in modules.hpp too.
+// Introduction and license in headers? Maybe not the license? A short introduction in internals.hpp too.
 
 // Documentation!
 //     Document configuring different IDEs/debuggers.
@@ -122,28 +122,6 @@ int main(int argc, char **argv)
 
 
 /* Pending tests:
-
---- Expression colorizer
-
-ta_test::text::CommonData common;
-ta_test::text::TextCanvas canv(&common);
-ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(42, .5f,.5f, 5.f, 5.4f, 42_lit, 42lit, 42_foo42_bar, +42,-42, 123'456'789, 0x123'456, 0123'456)");
-ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(12e5,12e+5,12e-5,12.3e5,12.3e+5,12.3e-5,0x1p2,0x1p+2,0x1p-2,0x12.34p2)");
-ta_test::text::expr::DrawToCanvas(canv, line++, 3, "1+1"); // `+` must not be highlighted as a number
-ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(\"meow\",foo42foo\"meow\"bar42bar,\"meow\"_bar42bar,\"foo\\\"bar\")");
-ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo('a','\\n','meow',foo42foo'meow'bar42bar,'meow'_bar42bar,'foo\\'bar')");
-ta_test::text::expr::DrawToCanvas(canv, line++, 3, "foo(R\"(meow)\",foo42fooR\"(meow)\"bar42bar,u8R\"(meow)\"_bar42bar,R\"(foo\"bar)\",R\"ab(foo\"f)\"g)a\"bar)ab\")");
-// Different identifier/keyword categories:
-ta_test::text::expr::DrawToCanvas(canv, line++, 3, "($ ( foo42bar bitand static_cast<int>(0) && __COUNTER__ ) && $[foo(]) && $[false])");
-// Unicode: (make sure unicode chars are not highlighted as punctuation)
-ta_test::text::expr::DrawToCanvas(canv, line++, 3, "[мур] int");
-canv.Print(ta_test::Terminal{});
-
---- Colors
-
-TA_CHECK($["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && false);
-
---- Werror on everything?
 
 Results printer:
     A custom message when no tests are registered

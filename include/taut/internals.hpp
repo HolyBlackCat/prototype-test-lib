@@ -841,7 +841,7 @@ namespace ta_test
             // When we print a macro call, it's indented by this many spaces.
             std::size_t code_indentation = 4;
 
-            // Whether to pad the argument of `TA_CHECK()` and other macros with a space on each side.
+            // Whether to pad the argum&commonent of `TA_CHECK()` and other macros with a space on each side.
             // We can't check if the user actually had spaces, so we add them ourselves.
             // They look nice anyway.
             bool spaces_in_macro_call_parentheses = true;
