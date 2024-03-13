@@ -2081,12 +2081,21 @@ void ta_test::detail::RegisterTest(const BasicTestImpl *singleton)
         }
         else
         {
-            // Make sure a test name is not also used as a group name.
-            // Note, don't need to check `name.size() > it->first.size()` here, because if it was equal,
-            // we wouldn't enter `else` at all, and if it was less, `.starts_with()` would return false.
-            if (name.starts_with(it->first) && name[it->first.size()] == '/')
-                HardError(CFG_TA_FMT_NAMESPACE::format("A test name (`{}`) can't double as a category name (`{}`). Append `/something` to the first name.", it->first, name), HardErrorKind::user);
+            // Make sure a test name is not also used as a group name. (1/2)
+            // Note, don't need to check `it->first.size() > name.size()` here, because if it was equal,
+            //   we wouldn't enter `else` at all, and if it was less, `.starts_with()` would return false.
+            // And even ignoring that. Getting the null terminator with `[]` should be legal.
+            if (it->first.starts_with(name) && it->first[name.size()] == '/')
+                HardError(CFG_TA_FMT_NAMESPACE::format("A test name (`{}`) can't double as a category name (`{}`). Append `/something` to the first name.", name, it->first), HardErrorKind::user);
         }
+    }
+    // Make sure a test name is not also used as a group name. (2/2)
+    // This is the symmetric test, to catch the opposite registration order.
+    if (it != state.name_to_test_index.begin())
+    {
+        auto prev_it = std::prev(it);
+        if (name.starts_with(prev_it->first) && name[prev_it->first.size()] == '/')
+            HardError(CFG_TA_FMT_NAMESPACE::format("A test name (`{}`) can't double as a category name (`{}`). Append `/something` to the first name.", prev_it->first, name), HardErrorKind::user);
     }
 
     state.name_to_test_index.try_emplace(name, state.tests.size());

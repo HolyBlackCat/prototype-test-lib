@@ -146,25 +146,12 @@ Results printer:
 
 Non-zero exit code when all tests are skipped, or none are registered
 
-Test both shared and static library builds.
-    Static library only once, and prefer shared for all tests.
-    On Linux also add `-fvisibility-hidden` to catch missing `CFG_TA_API` calls.
-
 Big-ass test:
-    with different macro values
+    with different macro values (maybe not?
         CFG_TA_FMT_HAS_FILE_VPRINT=0
         CFG_TA_FMT_HAS_RANGE_FORMATTING=0
 
 TA_TEST
-    Name validation
-        Allow a-z A-Z 0-9 _
-        No $
-        Allow digits at the beginning of test names
-        No /foo
-        No foo/
-        No foo//bar
-        No other stuff: - .
-    Duplicate names in the same file = compile error
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
@@ -172,7 +159,6 @@ TA_CHECK:
     local variable capture actually works, and the values are correct
     `TA_CHECK(true, true)` shouldn't compile because of a comma
     make sure that two values can't be printed side-by-side
-    hard errors on unprintable stuff only in non-dependent contexts
     When doing a oneliner: `TA_CHECK(true), TA_CHECK(false)` - the first one shouldn't extend its scope into the next one.
     We're performing a proper contextual bool conversion.
     A non-const format string is a compilation error.
@@ -199,7 +185,7 @@ TA_CHECK:
     Challenge the parsing:
         strings, char literals, raw strings - all containing opening/closing brackets, whole $[...]
 
-    TA_CHECK( ((((((((((((($[(((42)))]))))))))))))) ) // There's some internal limit on the number of parens, but this is way below it.
+    TA_CHECK( ((((((((((((($[(((42)))]))))))))))))) )
 
     TA_CHECK( $ [ 42 ] ) - spaces must work
 

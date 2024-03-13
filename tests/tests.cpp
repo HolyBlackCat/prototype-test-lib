@@ -111,6 +111,9 @@ struct TryCompileParams
     // If true, the compiler output isn't printed to the terminal.
     // Has no effect when `compiler_output` is set, because that also suppresses the output.
     bool discard_compiler_output = false;
+
+    bool werror = false;
+    bool no_warnings = false;
 };
 
 // Tries to compile `code`, returns the compiler's exit status.
@@ -145,6 +148,11 @@ struct TryCompileParams
         compiler_command += " " + linker_flags + " -o " + *params.exe_filename;
     }
 
+    if (params.werror)
+        compiler_command += " -Werror";
+    if (params.no_warnings)
+        compiler_command += " -w";
+
     std::string output_filename;
     if (params.compiler_output)
     {
@@ -171,19 +179,19 @@ struct TryCompileParams
     return status;
 }
 
-// Check that `code` compiles.
-void MustCompile(std::string_view code)
+// Check that `code` compiles (even with `-Werror`).
+void MustCompile(std::string_view code, ta_test::Trace<"MustCompile"> = {})
 {
-    TA_CHECK( TryCompile(code) == 0 );
+    TA_CHECK( TryCompile(code, {.werror = true}) == 0 );
 }
 
-// Check that `code` fails with a compilation error.
+// Check that `code` fails with a compilation error (even with all warnings disabled).
 // If `regex` isn't empty, also validates the compiler output against the regex.
-void MustNotCompile(std::string_view code, std::string_view regex = "")
+void MustNotCompile(std::string_view code, std::string_view regex = "", ta_test::Trace<"MustNotCompile"> = {})
 {
     std::string output;
 
-    TryCompileParams params;
+    TryCompileParams params{.no_warnings = true};
     if (!regex.empty())
         params.compiler_output = &output;
     else
@@ -276,10 +284,10 @@ struct CodeRunner
     }
 };
 // Compile the code and then run some checks on the exe.
-[[nodiscard]] CodeRunner MustCompileAndThen(std::string_view code)
+[[nodiscard]] CodeRunner MustCompileAndThen(std::string_view code, ta_test::Trace<"MustCompileAndThen"> = {})
 {
     CodeRunner runner;
-    TryCompileParams params;
+    TryCompileParams params{.werror = true};
     params.exe_filename = &runner.exe_filename;
     TA_CHECK( TryCompile(code, params) == 0 );
     return runner;
@@ -1694,7 +1702,7 @@ TA_TEST( string_conv/from_string )
     }
 }
 
-TA_TEST( misc/expression_colorizer )
+TA_TEST( output/expression_colorizer )
 {
     ta_test::output::CommonData common_data;
     ta_test::output::TextCanvas canv(&common_data);
@@ -1727,6 +1735,36 @@ TA_TEST( output/arg_colors )
 }
 )").FailWithExactOutput("--color", ReadFile("argument_colors_output.txt"));
 
+}
+
+TA_TEST( ta_test/name_validation )
+{
+    MustCompile(common_program_prefix + "TA_TEST( 54/foo/Bar/Ba_z123/42foo ) {}");
+    MustCompile(common_program_prefix + "TA_TEST(foo) {}");
+    MustCompile(common_program_prefix + "TA_TEST(foo/bar) {}");
+    MustCompile(common_program_prefix + "TA_TEST(foo ) {}");
+    MustCompile(common_program_prefix + "TA_TEST( foo) {}");
+    MustCompile(common_program_prefix + "TA_TEST( foo ) {}");
+    MustCompile(common_program_prefix + "TA_TEST( 1 ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST() {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( / ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo/ ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( /foo ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo//foo ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo-bar ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo.bar ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo$bar ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo ) {}\nTA_TEST( foo ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo bar ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo/ bar ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo /bar ) {}");
+    MustNotCompile(common_program_prefix + "TA_TEST( foo / bar ) {}");
+
+    // One test can't be prefix of another.
+    MustCompileAndThen(common_program_prefix + "TA_TEST(foo){}\nTA_TEST(foo/bar){}")
+        .FailWithExactOutput("", "ta_test: Error: A test name (`foo`) can't double as a category name (`foo/bar`). Append `/something` to the first name.\n");
+    MustCompileAndThen(common_program_prefix + "TA_TEST(foo/bar){}\nTA_TEST(foo){}")
+        .FailWithExactOutput("", "ta_test: Error: A test name (`foo`) can't double as a category name (`foo/bar`). Append `/something` to the first name.\n");
 }
 
 
