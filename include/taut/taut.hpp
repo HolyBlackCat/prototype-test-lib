@@ -323,9 +323,6 @@
 //     TA_FAIL("Stuff {}!", "failed"); // With a message and formatting.
 //     TA_FAIL(ta_test::soft); // Let the test continue after the failure.
 #define TA_FAIL DETAIL_TA_FAIL
-// Stops the test immediately, not necessarily failing it.
-// Equivalent to throwing `ta_test::InterruptTestException`.
-#define TA_INTERRUPT_TEST DETAIL_TA_INTERRUPT_TEST
 
 #if CFG_TA_USE_DOLLAR
 // Can only be used inside of `TA_CHECK(...)`. Wrap a subexpression in this to print its value if the assertion fails.
@@ -508,8 +505,6 @@
     .DETAIL_TA_ADD_EXTRAS
 
 #define DETAIL_TA_FAIL DETAIL_TA_CHECK("", "", false)
-
-#define DETAIL_TA_INTERRUPT_TEST (throw ::ta_test::InterruptTestException{})
 
 #define DETAIL_TA_ADD_EXTRAS(...) \
     AddExtras([&](auto &&_ta_add_extras){_ta_add_extras(__VA_ARGS__);})
@@ -700,8 +695,9 @@ namespace ta_test
     {
         ok = 0,
         test_failed = 1, // One or more tests failed.
-        bad_command_line_arguments = 2, // A generic issue with command line arguments.
-        no_test_name_match = 3, // `--include` or `--exclude` didn't match any tests.
+        no_tests_to_run = 2, // There are no tests to run. It's moot if this should be an error, but I believe it should.
+        bad_command_line_arguments = 3, // A generic issue with command line arguments.
+        no_test_name_match = 4, // `--include` or `--exclude` didn't match any tests.
     };
 
     // We try to classify the hard errors into interal ones and user-induced ones, but this is only an approximation.

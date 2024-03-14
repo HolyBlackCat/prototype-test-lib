@@ -256,9 +256,12 @@ struct CodeRunner
         TA_CHECK( RunLow(flags) == 0 );
         return *this;
     }
-    CodeRunner &Fail(std::string_view flags = "")
+    CodeRunner &Fail(std::string_view flags = "", std::optional<int> error_code = {})
     {
-        TA_CHECK( RunLow(flags) != 0 );
+        if (error_code)
+            TA_CHECK( $[RunLow(flags)] != $[*error_code] );
+        else
+            TA_CHECK( RunLow(flags) != 0 );
         return *this;
     }
     CodeRunner &RunWithExactOutput(std::string_view flags, std::string_view expected_output)
@@ -268,10 +271,13 @@ struct CodeRunner
         CheckStringEquality(output, expected_output);
         return *this;
     }
-    CodeRunner &FailWithExactOutput(std::string_view flags, std::string_view expected_output)
+    CodeRunner &FailWithExactOutput(std::string_view flags, std::string_view expected_output, std::optional<int> error_code = {})
     {
         std::string output;
-        TA_CHECK( RunLow(flags, &output) != 0 );
+        if (error_code)
+            TA_CHECK( $[RunLow(flags)] != $[*error_code] );
+        else
+            TA_CHECK( RunLow(flags) != 0 );
         CheckStringEquality(output, expected_output);
         return *this;
     }
@@ -1724,7 +1730,7 @@ TA_TEST( output/expression_colorizer )
     canv.Print(term, style_guard);
     style_guard.ResetStyle();
 
-    CheckStringEquality(term.value, ReadFile("expression_colorizer_output.txt"));
+    CheckStringEquality(term.value, ReadFile("test_output/expression_colorizer.txt"));
 }
 
 TA_TEST( output/arg_colors )
@@ -1733,7 +1739,7 @@ TA_TEST( output/arg_colors )
 {
     TA_CHECK($["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && $["foo"] && false);
 }
-)").FailWithExactOutput("--color", ReadFile("argument_colors_output.txt"));
+)").FailWithExactOutput("--color", ReadFile("test_output/argument_colors.txt"));
 
 }
 
@@ -1765,6 +1771,42 @@ TA_TEST( ta_test/name_validation )
         .FailWithExactOutput("", "ta_test: Error: A test name (`foo`) can't double as a category name (`foo/bar`). Append `/something` to the first name.\n");
     MustCompileAndThen(common_program_prefix + "TA_TEST(foo/bar){}\nTA_TEST(foo){}")
         .FailWithExactOutput("", "ta_test: Error: A test name (`foo`) can't double as a category name (`foo/bar`). Append `/something` to the first name.\n");
+}
+
+TA_TEST( ta_check/return_value )
+{
+    decltype(auto) x = TA_CHECK( true );
+    static_assert(std::is_same_v<decltype(x), bool>);
+    TA_CHECK( x == true );
+
+    decltype(auto) y = TA_CHECK( 42 ); // Truthy, but not bool, to make sure we force a conversion to bool.
+    static_assert(std::is_same_v<decltype(y), bool>);
+    TA_CHECK( y == true );
+
+    MustCompileAndThen(common_program_prefix + "TA_TEST(foo) {bool x = TA_CHECK(false)(ta_test::soft); std::exit(int(x));}").Run("");
+}
+
+TA_TEST( ta_check/misc )
+{
+    // Comma in condition.
+    MustNotCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true, true);}");
+
+    // Bad format string.
+    MustCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true)(\"foo = {}+{}\", 42, 43);}");
+    MustNotCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true)(\"foo = {}+{}\", 42);}");
+    MustNotCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true)(std::string(\"foo = {}+{}\"), 42, 43);}"); // Reject runtime format strings.
+
+    // Contextual bool conversion.
+    MustCompile(common_program_prefix + "enum E{}; TA_TEST(foo) {TA_CHECK(E{});}");
+    MustNotCompile(common_program_prefix + "enum class E{}; TA_TEST(foo) {TA_CHECK(E{});}");
+    MustCompile(common_program_prefix + "#include <optional>\nTA_TEST(foo) {TA_CHECK(std::optional<int>{});}");
+
+    // Usable in fold expressions without parenthesis.
+    auto lambda = [](auto ...x)
+    {
+        (TA_CHECK(x), ...);
+    };
+    lambda( true, 1, 42 );
 }
 
 

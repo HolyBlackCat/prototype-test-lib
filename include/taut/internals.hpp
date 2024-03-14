@@ -521,8 +521,8 @@ namespace ta_test
             // The characters are written to this `std::vprintf`-style callback.
             std::function<void(std::string_view fmt, CFG_TA_FMT_NAMESPACE::format_args args)> output_func;
 
-            // Default to stderr, to be able to easily shut application logging to stdout.
-            Terminal() : Terminal(stderr) {}
+            // Default to stdout.
+            Terminal() : Terminal(stdout) {}
 
             // Sets `output_func` to print to `stream`.
             // Also guesses `enable_color` (always false when `stream` is neither `stdout` nor `stderr`).

@@ -2804,7 +2804,7 @@ int ta_test::Runner::Run()
 
     module_lists.Call<&BasicModule::OnPostRunTests>(results);
 
-    return results.failed_tests.size() > 0 ? int(ExitCode::test_failed) : 0;
+    return results.failed_tests.size() > 0 ? int(ExitCode::test_failed) : results.num_tests == 0 ? int(ExitCode::no_tests_to_run) : 0;
 }
 
 void ta_test::Runner::SetOutputStream(FILE *stream) const

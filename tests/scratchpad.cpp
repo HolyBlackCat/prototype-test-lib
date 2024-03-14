@@ -23,7 +23,7 @@ int main(int argc, char **argv)
 
 // TESTS!!
 
-// Revert to stdout for output, and add a flag to change that.
+// Add a flag to change the output stream. How do I name it?
 
 // Investigate forceinline + artificial for things that must not be debugged.
 
@@ -146,30 +146,17 @@ Results printer:
 
 Non-zero exit code when all tests are skipped, or none are registered
 
-Big-ass test:
-    with different macro values (maybe not?
-        CFG_TA_FMT_HAS_FILE_VPRINT=0
-        CFG_TA_FMT_HAS_RANGE_FORMATTING=0
+Big-ass test
 
 TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    returns the condition value (casted to bool)
     local variable capture actually works, and the values are correct
-    `TA_CHECK(true, true)` shouldn't compile because of a comma
     make sure that two values can't be printed side-by-side
     When doing a oneliner: `TA_CHECK(true), TA_CHECK(false)` - the first one shouldn't extend its scope into the next one.
-    We're performing a proper contextual bool conversion.
-    A non-const format string is a compilation error.
-    A bad format is a compilation error.
-    Check that on libfmt, the check for `{:?}` being supported actually passes.
-    correctly breaks on the call site
-    usable without (...) in fold expressions
-    Gracefully fail the test if the lazy message throws?
-    Error if outlives the test. Error if destroyed out of order?
     ExactString -> control characters should be printed as unicode replacements
-    Compilation error on comma
+    Gracefully fail the test if the lazy message throws?
 
     Check all overloads of the second (...)
         flags
@@ -177,6 +164,9 @@ TA_CHECK:
         message...
         flags, message...
         flags, location, message...
+
+
+
 
     Does `$[...]` has top-level (...) in expansion? I think not. Add a negative test.
 
@@ -202,8 +192,6 @@ TA_CHECK:
 
 --- TA_FAIL
     With and without the message.
-
---- TA_INTERRUPT_TEST
 
 --- TA_MUST_THROW:
     local variable capture actually works, and the values are correct
@@ -521,17 +509,6 @@ Due to exception.
 User messages in assertions.
     But not in assertion stack, since it's hard to do with our current implementation.
 
---- Test name validation
-Bad test names:
-    Empty name
-    Starts with slash
-    Ends with slash
-    Two consecutive slashes
-    Bad characters
-    Dollar in name
-Good test names:
-    a-zA-Z0-9_/
-
 --- Build errors when:
     $[...] lexically outside of ASSERT().
     No error when ASSERT() is lexically outside of a test.
@@ -575,8 +552,6 @@ Good test names:
     A run with all features, and --no-unicode, automatically test that no unicode crap is printed.
 
 --- Try to start the tests again while they are already running. Should crash with an error.
-
-Absolutely no `{}:{}` in the code, all error locations must use
 
 ta_test::IsFailing()
 

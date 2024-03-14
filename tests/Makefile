@@ -71,7 +71,7 @@ $(if $(EXE_RUNNER),$(info EXE_RUNNER = $(EXE_RUNNER)))
 # --- Variables mostly for internal use:
 
 # Those variables need to be baked into VSCode config when selecting the current target.
-override config_var_list := HOST_OS TARGET_OS COMPILERS MODES STANDARDS STDLIBS FMTLIBS EXE_RUNNER
+override config_var_list := HOST_OS TARGET_OS COMPILERS MODES STANDARDS STDLIBS FMTLIBS EXE_RUNNER ARGS
 
 # If set to 0, disables automatic capability discovery for the detected compilers.
 # You must manually set all the variables above to sane values.
@@ -274,7 +274,7 @@ test_$(_config): $(if $(AUTO_REBUILD_TESTS),$(_all_exes))
 	$$(call,$$(shell LD_LIBRARY_PATH=$(BUILD_DIR)/$(_config) $(EXE_RUNNER) ./$(BUILD_DIR)/$(_config)/_sanity_check$(EXT_EXE) $(if $(tracing),,>/dev/null 2>/dev/null) --throw-exception))$$(if $$(filter 0,$$(.SHELLSTATUS)),$$(error Sanity check failed for `$(_config)` (thrown exception)))
 	$$(info [$(_config)] Sanity check passed)
 	$(call, ### Run main tests.)
-	@$(_tests_env) $(EXE_RUNNER) $(BUILD_DIR)/$(_config)/tests$(EXT_EXE) >$(_tests_log) 2>$(_tests_log) || (cat $(_tests_log) && false)
+	@$(_tests_env) $(EXE_RUNNER) $(BUILD_DIR)/$(_config)/tests$(EXT_EXE) $(ARGS) >$(_tests_log) 2>$(_tests_log) || (cat $(_tests_log) && false)
 	@echo '[$(_config)] Main tests passed'
 	@true
 
