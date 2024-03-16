@@ -338,8 +338,9 @@
 // Returns an instance of `ta_test::CaughtException`, which contains information about the exception and lets you validate its type and message.
 // Example usage:
 //     TA_MUST_THROW( throw std::runtime_error("Foo!") );
-//     TA_MUST_THROW( throw std::runtime_error("Foo!") ).CheckMessage(".*!"); // E.g. you can validate the message with a regex. See `class CaughtException` for more.
-//     TA_MUST_THROW( std::vector<int> x; x.at(0); ).CheckMessage(".*!"); // Multiple statements are allowed.
+//     TA_MUST_THROW( throw std::runtime_error("Foo!") ).CheckMessage("Foo!"); // E.g. check message for an exact match.
+//     TA_MUST_THROW( throw std::runtime_error("Foo!") ).CheckMessageRegex(".*!"); // Or with a regex (must match the whole string).
+//     TA_MUST_THROW( std::vector<int> x; x.at(0); ).CheckMessageRegex(".*!"); // Multiple statements are allowed.
 // Like `TA_CHECK(...)`, can be followed by a second parenthesis with optional parameters. Following overloads are available:
 //     TA_MUST_THROW(body)(message...)
 //     TA_MUST_THROW(body)(flags)
@@ -1286,9 +1287,20 @@ namespace ta_test
             [[nodiscard]] CFG_TA_API const char *operator()(const char *name);
         };
 
-        // Returns true if the test name `name` matches regex `regex`.
-        // Currently this matches the whole name or any prefix ending at `/` (including or excluding `/`).
-        [[nodiscard]] CFG_TA_API bool TestNameMatchesRegex(std::string_view name, const std::regex &regex);
+        namespace regex
+        {
+            // Constructs a regex from a string.
+            // Not calling the constructor directly helps with the compilation times.
+            [[nodiscard]] CFG_TA_API std::regex ConstructRegex(std::string_view string);
+
+            // Checks if the regex matches the whole string.
+            // Not calling `std::regex_match()` directly helps with the compilation times.
+            [[nodiscard]] CFG_TA_API bool WholeStringMatchesRegex(std::string_view str, const std::regex &regex);
+
+            // Returns true if the test name `name` matches regex `regex`.
+            // Currently this matches the whole name or any prefix ending at `/` (including or excluding `/`).
+            [[nodiscard]] CFG_TA_API bool TestNameMatchesRegex(std::string_view name, const std::regex &regex);
+        }
     }
 
     // String conversions.
@@ -4250,6 +4262,10 @@ namespace ta_test
     // Either an index of an exception element in `CaughtException`, or a enum designating one or more elements.
     using ExceptionElemVar = std::variant<ExceptionElem, int>;
 
+    struct ExceptionElemsCombinedTag {explicit ExceptionElemsCombinedTag() = default;};
+    // The functions checking exception message accept this in addition to `ExceptionElem` to check the whole message.
+    inline constexpr ExceptionElemsCombinedTag combined;
+
     template <>
     struct string_conv::DefaultToStringTraits<ExceptionElem>
     {
@@ -4259,6 +4275,11 @@ namespace ta_test
     struct string_conv::DefaultToStringTraits<ExceptionElemVar>
     {
         CFG_TA_API std::string operator()(const ExceptionElemVar &value) const;
+    };
+    template <>
+    struct string_conv::DefaultToStringTraits<ExceptionElemsCombinedTag>
+    {
+        CFG_TA_API std::string operator()(ExceptionElemsCombinedTag) const;
     };
 
     // Internals of `CaughtException`.
@@ -4330,25 +4351,83 @@ namespace ta_test
                 }
             }
 
-            // Checks that the exception message matches the regex.
-            // The entire message must match, not just a part of it.
-            Ref CheckMessage(/* elem = top_level, */ std::string_view regex, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessage"> trace = {}) const
+            // Concatenates the exception message with the messages from all nested exceptions, joining them with `separator`.
+            [[nodiscard]] std::string CombinedMessage(std::string_view separator = "\n") const
             {
-                // No need to wrap this.
-                trace.AddArgs(regex, flags);
-                return CheckMessage(ExceptionElem::top_level, regex, flags, trace.Hide());
+                if constexpr (IsWrapper)
+                    return State().GetElems();
+                else
+                {
+                    std::string ret;
+                    if (!State())
+                        return ret; // Always empty here, but should help with NRVO.
+                    bool first = true;
+                    for (const auto &elem : State()->elems)
+                    {
+                        if (first)
+                            first = false;
+                        else
+                            ret += separator;
+                        ret += elem.message;
+                    }
+                }
             }
-            // Checks that the exception message matches the regex.
-            // The entire message must match, not just a part of it.
-            Ref CheckMessage(ExceptionElemVar elem, std::string_view regex, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessage"> trace = {}) const
+
+            // Checks that the exception message is equal to a string.
+            Ref CheckMessage(/* elem = top_level, */ std::string_view expected_message, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessage"> trace = {}) const
             {
                 // No need to wrap this.
-                trace.AddArgs(elem, regex, flags);
-                std::regex r(regex.begin(), regex.end());
+                trace.AddArgs(expected_message, flags);
+                return CheckMessage(ExceptionElem::top_level, expected_message, flags, trace.Hide());
+            }
+            // Checks that the exception expected_message is equal to a string.
+            Ref CheckMessage(ExceptionElemVar elem, std::string_view expected_message, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessage"> trace = {}) const
+            {
+                // No need to wrap this.
+                trace.AddArgs(elem, expected_message, flags);
                 return CheckElemLow(elem,
                     [&](const SingleException &elem)
                     {
-                        return std::regex_match(elem.message, r);
+                        return elem.message == expected_message;
+                    },
+                    [&]
+                    {
+                        return CFG_TA_FMT_NAMESPACE::format("The exception message is not equal to `{}`.", expected_message);
+                    },
+                    flags, trace.Hide()
+                );
+            }
+            // Checks that the combined exception message is equal to a string.
+            Ref CheckMessage(ExceptionElemsCombinedTag tag, std::string_view expected_message, AssertFlags flags = AssertFlags::hard, std::string_view separator = "\n", Trace<"CheckMessage"> trace = {}) const
+            {
+                // No need to wrap this.
+                trace.AddArgs(tag, expected_message, flags, separator);
+                if (auto guard = MakeContextGuard(-1, flags))
+                {
+                    if (CombinedMessage(separator) != expected_message)
+                        TA_FAIL("The combined exception message is not equal to `{}`.", expected_message);
+                }
+            }
+
+            // Checks that the exception message matches the regex.
+            // The entire message must match, not just a part of it.
+            Ref CheckMessageRegex(/* elem = top_level, */ std::string_view regex, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessageRegex"> trace = {}) const
+            {
+                // No need to wrap this.
+                trace.AddArgs(regex, flags);
+                return CheckMessageRegex(ExceptionElem::top_level, regex, flags, trace.Hide());
+            }
+            // Checks that the exception message matches the regex.
+            // The entire message must match, not just a part of it.
+            Ref CheckMessageRegex(ExceptionElemVar elem, std::string_view regex, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessageRegex"> trace = {}) const
+            {
+                // No need to wrap this.
+                trace.AddArgs(elem, regex, flags);
+                std::regex r(text::regex::ConstructRegex(regex));
+                return CheckElemLow(elem,
+                    [&](const SingleException &elem)
+                    {
+                        return text::regex::WholeStringMatchesRegex(elem.message, r);
                     },
                     [&]
                     {
@@ -4356,6 +4435,19 @@ namespace ta_test
                     },
                     flags, trace.Hide()
                 );
+            }
+            // Checks that the combined exception message matches the regex.
+            // The entire message must match, not just a part of it.
+            Ref CheckMessageRegex(ExceptionElemsCombinedTag tag, std::string_view regex, AssertFlags flags = AssertFlags::hard, std::string_view separator = "\n", Trace<"CheckMessage"> trace = {}) const
+            {
+                // No need to wrap this.
+                std::regex r(text::regex::ConstructRegex(regex));
+                trace.AddArgs(tag, regex, flags, separator);
+                if (auto guard = MakeContextGuard(-1, flags))
+                {
+                    if (!text::regex::WholeStringMatchesRegex(CombinedMessage(separator), r))
+                        TA_FAIL("The combined exception message doesn't match the regex `{}`.", regex);
+                }
             }
 
             // Checks that the exception type is exactly `T`.

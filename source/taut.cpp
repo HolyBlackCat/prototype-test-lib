@@ -607,7 +607,17 @@ const char *ta_test::text::Demangler::operator()(const char *name)
     #endif
 }
 
-bool ta_test::text::TestNameMatchesRegex(std::string_view name, const std::regex &regex)
+std::regex ta_test::text::regex::ConstructRegex(std::string_view string)
+{
+    return std::regex(string.begin(), string.end());
+}
+
+bool ta_test::text::regex::WholeStringMatchesRegex(std::string_view str, const std::regex &regex)
+{
+    return std::regex_match(str.begin(), str.end(), regex);
+}
+
+bool ta_test::text::regex::TestNameMatchesRegex(std::string_view name, const std::regex &regex)
 {
     // Try matching the whole name.
     if (std::regex_match(name.begin(), name.end(), regex))
@@ -2360,6 +2370,11 @@ std::string ta_test::string_conv::DefaultToStringTraits<ta_test::ExceptionElemVa
     }, value);
 }
 
+std::string ta_test::string_conv::DefaultToStringTraits<ta_test::ExceptionElemsCombinedTag>::operator()(ExceptionElemsCombinedTag) const
+{
+    return "combined";
+}
+
 const std::vector<ta_test::SingleException> &ta_test::detail::GetEmptyExceptionListSingleton()
 {
     // This is a little stupid, but probably better than a `HardError()`?
@@ -2983,7 +2998,7 @@ void ta_test::modules::TestSelector::OnFilterTest(const data::BasicTest &test, b
         if (enable != pattern.exclude)
             continue; // The test is already enabled/disabled.
 
-        if (ta_test::text::TestNameMatchesRegex(test.Name(), pattern.regex))
+        if (ta_test::text::regex::TestNameMatchesRegex(test.Name(), pattern.regex))
         {
             pattern.was_used = true;
                 enable = !pattern.exclude;
@@ -3284,7 +3299,7 @@ bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const dat
         {
             const Entry &entry = *it;
 
-            if (text::TestNameMatchesRegex(test.test->Name(), entry.test_regex))
+            if (text::regex::TestNameMatchesRegex(test.test->Name(), entry.test_regex))
             {
                 entry.was_used = true;
                 test_state->active_flags.push_back({
