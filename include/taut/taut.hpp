@@ -288,11 +288,12 @@
 
 // --- INTERFACE MACROS ---
 
-// Define a test. Must be followed by `{...}`.
+// Define a test, e.g. `TA_TEST(name) {body}`.
 // `name` is the test name without quotes and without spaces. You can use letters, digits, and `_`.
 // Use `/` as a separator to make test groups: `group/sub_group/test_foo`. There must be no spaces around the slashes.
 // The grouping only affects the reporting output (and sometimes the execution order, to run the entire group together).
-#define TA_TEST(name) DETAIL_TA_TEST(name)
+// The name can be followed by flags of type `ta_test::TestFlags`, e.g. `ta_test::disabled` to disable this test by default.
+#define TA_TEST DETAIL_TA_TEST
 
 // Check condition. If it's false or throws, the test is marked as false, and also `InterruptTestException` is thrown to quickly exit the test.
 // You can wrap any part of the condition in `$[...]` to print it on failure (there can be several, possibly nested).
@@ -357,16 +358,16 @@
 //     TA_LOG("Hello!");
 //     TA_LOG("x = {}", 42);
 // The trailing `\n`, if any, is ignored.
-#define TA_LOG(...) DETAIL_TA_LOG(__VA_ARGS__)
+#define TA_LOG DETAIL_TA_LOG
 // Creates a scoped log message. It's printed only if this line is in scope on test failure.
 // Unlike `TA_LOG()`, the message can be printed multiple times, if there are multiple failures in this scope.
 // The trailing `\n`, if any, is ignored.
 // The code calls this a "scoped log", and "context" means something else in the code.
-#define TA_CONTEXT(...) DETAIL_TA_CONTEXT(__VA_ARGS__)
+#define TA_CONTEXT DETAIL_TA_CONTEXT
 // Like `TA_CONTEXT`, but only evaluates the message when needed.
 // This means you need to make sure none of your variables dangle, and that they have sane values for the entire lifetime of this context.
 // Can evaluate the message more than once. You can utilize this to display the current variable values.
-#define TA_CONTEXT_LAZY(...) DETAIL_TA_CONTEXT_LAZY(__VA_ARGS__)
+#define TA_CONTEXT_LAZY DETAIL_TA_CONTEXT_LAZY
 
 // Repeats the test for all values in the range, which is either a braced list or a C++20 range.
 // Example usage: `int x = TA_GENERATE(foo, {1,2,3});`.
@@ -376,7 +377,7 @@
 //   Use `TA_GENERATE_FUNC(...)` with `ta_test::RangeToGeneratorFunc(...)` to do that.
 // Accepts an optional parameter before the range, of type `ta_test::GeneratorFlags`, same as `RangeToGeneratorFunc()`.
 //   E.g. pass `ta_test::interrupt_test_if_empty` to allow empty ranges.
-#define TA_GENERATE(name, ...) DETAIL_TA_GENERATE(name, __VA_ARGS__)
+#define TA_GENERATE DETAIL_TA_GENERATE
 
 // Repeats the test for all values returned by the lambda.
 // Usage: `T x = TA_GENERATE_FUNC(name, [flags,] lambda);`.
@@ -398,7 +399,7 @@
 // We guarantee that the lambda isn't copied or moved AT ALL.
 // The lambda can be preceded by an optional parameter of type `ta_test::GeneratorFlags`.
 // Or you can pass an instance of `ta_test::GenerateFuncParam`, which combines the flags and the lambda into one object.
-#define TA_GENERATE_FUNC(name, ...) DETAIL_TA_GENERATE_FUNC(name, __VA_ARGS__)
+#define TA_GENERATE_FUNC DETAIL_TA_GENERATE_FUNC
 
 // A version of `TA_GENERATE` for generating types (and other template parameters, such as constant values or templates).
 // Despite how the syntax looks like, the whole test is repeated for each type/value, not just the braced block.
@@ -432,7 +433,7 @@
 // `ta_test::expand` must be followed by exactly one type, which must be a template specialization `T<U...>` (where `U` can be anything, not necessarily a type).
 // Here's an example with `expand` and flags:
 //     TA_GENERATE_PARAM(typename T, (ta_test::expand, std::tuple<A,B,C>), ta_test::interrupt_test_if_empty)
-#define TA_GENERATE_PARAM(param, ...) DETAIL_TA_GENERATE_PARAM(param, __VA_ARGS__)
+#define TA_GENERATE_PARAM DETAIL_TA_GENERATE_PARAM
 
 // Repeats the test several times, once for each of the several code fragments (a spin on `TA_GENERATE(...)`).
 // Example usage:
@@ -456,9 +457,9 @@
 //   This isn't entirely intentional design; our macros use a loop internally so those keywords have to do *something*,
 //   so the only reasonable option was to make them do this.
 // We guarantee that exactly one variant is executed for a `TA_SELECT(...)`.
-#define TA_SELECT(...) DETAIL_TA_SELECT(__VA_ARGS__)
+#define TA_SELECT DETAIL_TA_SELECT
 // Marks one of the several code fragments to be executed by `TA_VARIANT(...)`. See that macro for details.
-#define TA_VARIANT(name) DETAIL_TA_VARIANT(name)
+#define TA_VARIANT DETAIL_TA_VARIANT
 
 
 // --- INTERNAL MACROS ---
@@ -482,7 +483,7 @@
 #define DETAIL_TA_CAT(x, ...) DETAIL_TA_CAT_(x, __VA_ARGS__)
 #define DETAIL_TA_CAT_(x, ...) x##__VA_ARGS__
 
-#define DETAIL_TA_TEST(name) \
+#define DETAIL_TA_TEST(name, .../*flags*/) \
     inline void _ta_test_func(::ta_test::meta::ConstStringTag<#name>); \
     /* This must be non-inline, because we want to repeat registration for each TU, to detect source location mismatches. */\
     /* But the test body is inline to reduce bloat when tests are in headers. */\
@@ -492,7 +493,8 @@
                 ::ta_test::meta::ConstStringTag<#name>\
             )>(_ta_test_func),\
             []{CFG_TA_BREAKPOINT();},\
-            #name, __FILE__, __LINE__>\
+            #name, __FILE__, __LINE__\
+            __VA_OPT__(,) __VA_ARGS__>\
         >\
     >{})) {} \
     inline void _ta_test_func(::ta_test::meta::ConstStringTag<#name>)
@@ -715,6 +717,15 @@ namespace ta_test
     // This is useful if you use soft assertion, and want to manually stop on failure.
     // If no test is currently running, returns false.
     [[nodiscard]] CFG_TA_API bool IsFailing();
+
+    // Flags for `TA_TEST(...)`. Pass them after the name, as an optional parameter.
+    enum class TestFlags
+    {
+        // Disables this test. It can still be enabled with `--include`.
+        disabled = 1 << 0,
+    };
+    DETAIL_TA_FLAG_OPERATORS(TestFlags)
+    using enum TestFlags;
 
     // Flags for `TA_CHECK(...)`. Pass them before the condition, as an optional parameter.
     enum class AssertFlags
@@ -2499,6 +2510,9 @@ namespace ta_test
             // The name passed to the test macro.
             [[nodiscard]] virtual std::string_view Name() const = 0;
 
+            // The optional flags passed to the test macro.
+            [[nodiscard]] virtual TestFlags Flags() const = 0;
+
             // Where the test was declared.
             [[nodiscard]] virtual SourceLoc SourceLocation() const = 0;
         };
@@ -3541,7 +3555,7 @@ namespace ta_test
         // An implementation of `BasicTestImpl` for a specific test.
         // `P` is a pointer to the test function, see `DETAIL_TA_TEST()` for details.
         // `B` is a lambda that triggers a breakpoint in the test location itself when called.
-        template <auto P, auto B, meta::ConstString TestName, meta::ConstString LocFile, int LocLine>
+        template <auto P, auto B, meta::ConstString TestName, meta::ConstString LocFile, int LocLine, TestFlags FlagsValue = TestFlags{}>
         struct SpecificTest final : BasicTestImpl
         {
             static constexpr bool test_name_is_valid = []{
@@ -3561,6 +3575,10 @@ namespace ta_test
             std::string_view Name() const override
             {
                 return TestName.view();
+            }
+            TestFlags Flags() const override
+            {
+                return FlagsValue;
             }
             data::SourceLoc SourceLocation() const override
             {

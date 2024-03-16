@@ -185,7 +185,8 @@ namespace ta_test
         // --- RUNNING TESTS ---
 
         // Whether the test should run.
-        // This is called once for every test, with `enable` initially set to true. If it ends up false, the test is skipped.
+        // This is called once for every test, with `enable` initially set to true (or false if the test has the `disabled` flag).
+        // If it ends up false, the test is skipped.
         virtual void OnFilterTest(const data::BasicTest &test, bool &enable) noexcept {(void)test; (void)enable;}
 
         // This is called first, before any tests run.

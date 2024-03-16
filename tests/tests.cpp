@@ -275,9 +275,9 @@ struct CodeRunner
     {
         std::string output;
         if (error_code)
-            TA_CHECK( $[RunLow(flags)] != $[*error_code] );
+            TA_CHECK( $[RunLow(flags, &output)] != $[*error_code] );
         else
-            TA_CHECK( RunLow(flags) != 0 );
+            TA_CHECK( RunLow(flags, &output) != 0 );
         CheckStringEquality(output, expected_output);
         return *this;
     }

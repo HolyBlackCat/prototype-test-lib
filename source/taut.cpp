@@ -2616,7 +2616,7 @@ int ta_test::Runner::Run()
 
         for (std::size_t i = 0; i < state.tests.size(); i++)
         {
-            bool enable = true;
+            bool enable = !bool(state.tests[i]->Flags() & TestFlags::disabled);
             module_lists.Call<&BasicModule::OnFilterTest>(*state.tests[i], enable);
             if (enable)
                 ordered_tests.push_back(i);
