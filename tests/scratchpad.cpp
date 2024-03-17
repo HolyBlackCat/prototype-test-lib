@@ -158,15 +158,6 @@ TA_CHECK:
     ExactString -> control characters should be printed as unicode replacements
     Gracefully fail the test if the lazy message throws?
 
-    Check all overloads of the second (...)
-        flags
-        flags, location
-        message...
-        flags, message...
-        flags, location, message...
-
-
-
 
     Does `$[...]` has top-level (...) in expansion? I think not. Add a negative test.
 

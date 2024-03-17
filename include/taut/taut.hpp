@@ -36,6 +36,10 @@
 #include <vector>
 #include <version>
 
+#if __cpp_lib_source_location
+#include <source_location>
+#endif
+
 
 // --- CONFIGURATION MACROS ---
 
@@ -2491,12 +2495,24 @@ namespace ta_test
         {
             std::string_view file;
             int line = 0;
+
+            constexpr SourceLoc() {}
+            constexpr SourceLoc(std::string_view file, int line) : file(file), line(line) {}
+            #if __cpp_lib_source_location
+            SourceLoc(std::source_location loc) : file(loc.file_name()), line(int(loc.line())) {}
+            #endif
+
             friend auto operator<=>(const SourceLoc &, const SourceLoc &) = default;
         };
         // A source location with a value of `__COUNTER__`.
         struct SourceLocWithCounter : SourceLoc
         {
             int counter = 0;
+
+            constexpr SourceLocWithCounter() {}
+            constexpr SourceLocWithCounter(std::string_view file, int line, int counter) : SourceLoc(file, line), counter(counter) {}
+            constexpr SourceLocWithCounter(SourceLoc loc, int counter) : SourceLoc(loc), counter(counter) {}
+
             friend auto operator<=>(const SourceLocWithCounter &, const SourceLocWithCounter &) = default;
         };
 
@@ -3675,13 +3691,7 @@ namespace ta_test
             template <typename G>
             SpecificGenerator(G &&make_func) : func(std::forward<G>(make_func)()) {}
 
-            static constexpr data::SourceLocWithCounter location = {
-                data::SourceLoc{
-                    .file = LocFile.view(),
-                    .line = LocLine,
-                },
-                LocCounter,
-            };
+            static constexpr auto location = data::SourceLocWithCounter(LocFile.view(), LocLine, LocCounter);
 
             const data::SourceLocWithCounter &SourceLocation() const override
             {

@@ -2192,6 +2192,277 @@ FAILED           1         0
 )");
 }
 
+TA_TEST( ta_check/softness )
+{
+    // Hard and soft assertion modes.
+
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+TA_TEST(blah)
+{
+    try
+    {
+        std::cout << "a\n";
+        TA_CHECK( true );
+        std::cout << "b\n";
+        TA_CHECK( false )(ta_test::soft);
+        std::cout << "c\n";
+        TA_CHECK( false );
+        std::cout << "d\n";
+    }
+    catch (ta_test::InterruptTestException)
+    {
+        std::cout << "catch!\n";
+    }
+}
+TA_TEST(bleh)
+{
+    std::cout << "x\n";
+    TA_CHECK( false )(ta_test::soft);
+    std::cout << "y\n";
+    TA_CHECK( false )(ta_test::hard);
+    std::cout << "z\n";
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/2 │  ● blah
+a
+b
+
+dir/subdir/file.cpp:6:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:13:
+Assertion failed:
+
+    TA_CHECK( false )
+
+c
+dir/subdir/file.cpp:15:
+Assertion failed:
+
+    TA_CHECK( false )
+
+catch!
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+2/2 [1] │  ● bleh
+x
+
+dir/subdir/file.cpp:23:
+TEST FAILED: bleh ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:26:
+Assertion failed:
+
+    TA_CHECK( false )
+
+y
+dir/subdir/file.cpp:28:
+Assertion failed:
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:6
+● bleh      │ dir/subdir/file.cpp:23
+
+             Tests    Checks
+Executed         2         5
+Passed           0         1
+FAILED           2         4
+
+)");
+}
+
+TA_TEST( ta_check/overloads )
+{
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(1) {TA_CHECK(false)("Msg!");}     // message
+TA_TEST(2) {TA_CHECK(false)("x={}", 42);} // message with formatting
+TA_TEST(3) {TA_CHECK(false)(ta_test::hard);}             // flags
+TA_TEST(4) {TA_CHECK(false)(ta_test::hard, "Msg!");}     // flags, message
+TA_TEST(5) {TA_CHECK(false)(ta_test::hard, "x={}", 42);} // flags, message with formatting
+TA_TEST(6) {TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42));}             // flags, location
+TA_TEST(7) {TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "Msg!");}     // flags, location, message
+TA_TEST(8) {TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "x={}", 42);} // flags, location, message with formatting
+#if __cpp_lib_source_location
+TA_TEST(9) {TA_CHECK(false)(ta_test::hard, std::source_location::current());}              // flags, location
+TA_TEST(10) {TA_CHECK(false)(ta_test::hard, std::source_location::current(), "Msg!");}     // flags, location, message
+TA_TEST(11) {TA_CHECK(false)(ta_test::hard, std::source_location::current(), "x={}", 42);} // flags, location, message with formatting
+#endif
+)")
+    .FailWithExactOutput("", R"(
+Running tests...
+ 1/11 │  ● 1
+
+dir/subdir/file.cpp:5:
+TEST FAILED: 1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:5:
+Assertion failed: Msg!
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+ 2/11 [1] │  ● 2
+
+dir/subdir/file.cpp:6:
+TEST FAILED: 2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:6:
+Assertion failed: x=42
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+ 3/11 [2] │  ● 3
+
+dir/subdir/file.cpp:7:
+TEST FAILED: 3 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:7:
+Assertion failed:
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+ 4/11 [3] │  ● 4
+
+dir/subdir/file.cpp:8:
+TEST FAILED: 4 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:8:
+Assertion failed: Msg!
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+ 5/11 [4] │  ● 5
+
+dir/subdir/file.cpp:9:
+TEST FAILED: 5 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:9:
+Assertion failed: x=42
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+ 6/11 [5] │  ● 6
+
+dir/subdir/file.cpp:10:
+TEST FAILED: 6 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MY_FILE:42:
+Assertion failed:
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+ 7/11 [6] │  ● 7
+
+dir/subdir/file.cpp:11:
+TEST FAILED: 7 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MY_FILE:42:
+Assertion failed: Msg!
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+ 8/11 [7] │  ● 8
+
+dir/subdir/file.cpp:12:
+TEST FAILED: 8 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MY_FILE:42:
+Assertion failed: x=42
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+ 9/11 [8] │  ● 9
+
+dir/subdir/file.cpp:14:
+TEST FAILED: 9 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:14:
+Assertion failed:
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+10/11 [9] │  ● 10
+
+dir/subdir/file.cpp:15:
+TEST FAILED: 10 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:15:
+Assertion failed: Msg!
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+11/11 [10] │  ● 11
+
+dir/subdir/file.cpp:16:
+TEST FAILED: 11 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:16:
+Assertion failed: x=42
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● 1       │ dir/subdir/file.cpp:5
+● 2       │ dir/subdir/file.cpp:6
+● 3       │ dir/subdir/file.cpp:7
+● 4       │ dir/subdir/file.cpp:8
+● 5       │ dir/subdir/file.cpp:9
+● 6       │ dir/subdir/file.cpp:10
+● 7       │ dir/subdir/file.cpp:11
+● 8       │ dir/subdir/file.cpp:12
+● 9       │ dir/subdir/file.cpp:14
+● 10      │ dir/subdir/file.cpp:15
+● 11      │ dir/subdir/file.cpp:16
+
+             Tests    Checks
+FAILED          11        11
+
+)");
+
+    // No parameters in second `(...)` = build error.
+    MustNotCompile(common_program_prefix + "\nTA_TEST(1) {TA_CHECK(false)();}");
+}
+
 TA_TEST( ta_check/return_value )
 {
     decltype(auto) x = TA_CHECK( true );
