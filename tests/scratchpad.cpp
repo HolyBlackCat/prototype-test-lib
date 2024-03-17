@@ -154,7 +154,6 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    make sure that two values can't be printed side-by-side
     When doing a oneliner: `TA_CHECK(true), TA_CHECK(false)` - the first one shouldn't extend its scope into the next one.
     ExactString -> control characters should be printed as unicode replacements
     Gracefully fail the test if the lazy message throws?

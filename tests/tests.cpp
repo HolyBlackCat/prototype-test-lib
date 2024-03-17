@@ -2086,6 +2086,67 @@ TA_TEST( ta_check/return_value )
     MustCompileAndThen(common_program_prefix + "TA_TEST(foo) {bool x = TA_CHECK(false)(ta_test::soft); std::exit(int(x));}").Run("");
 }
 
+TA_TEST( ta_check/side_by_side_strings )
+{
+    // Check how long strings are printed side-by-side, and when they're split to different lines.
+
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    const char *b = "blahblah";
+    for (const char *a : {"f", "fo", "foo", "fooo"})
+        TA_CHECK( $[a] == $[b] )(ta_test::soft);
+}
+)")
+    .FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:9:
+Assertion failed:
+
+    TA_CHECK( $[a] == $[b] )
+                │       │
+               "f"  "blahblah"
+
+dir/subdir/file.cpp:9:
+Assertion failed:
+
+    TA_CHECK( $[a] == $[b] )
+                │       │
+               "fo" "blahblah"
+
+dir/subdir/file.cpp:9:
+Assertion failed:
+
+    TA_CHECK( $[a] == $[b] )
+                │       │
+              "foo" "blahblah"
+
+dir/subdir/file.cpp:9:
+Assertion failed:
+
+    TA_CHECK( $[a] == $[b] )
+                │       │
+              "fooo"    │
+                        │
+                    "blahblah"
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         4
+
+)");
+}
+
 TA_TEST( ta_check/misc )
 {
     // Comma in condition.

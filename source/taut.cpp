@@ -2935,7 +2935,7 @@ ta_test::modules::HelpPrinter::HelpPrinter()
         // The case should never fail.
         HelpPrinter &self = dynamic_cast<HelpPrinter &>(this_module);
 
-        self.terminal.Print("This is a test runner based on ta_test.\nAvailable options:\n");
+        self.terminal.Print("This is a test runner using Taut unit test framework.\nAvailable options:\n");
         for (flags::BasicFlag *flag : flags)
             self.terminal.Print("  {:<{}} - {}\n", flag->HelpFlagSpelling(), self.expected_flag_width, flag->help_desc);
 
