@@ -2073,6 +2073,125 @@ TA_TEST( ta_test/none_registered )
     MustCompileAndThen(common_program_prefix).FailWithExactOutput("", "\nNO TESTS ARE REGISTERED\n\n", int(ta_test::ExitCode::no_tests_to_run));
 }
 
+TA_TEST( ta_test/exceptions )
+{
+    // Throwing an exception fails the test.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    throw std::runtime_error("Some message!");
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::runtime_error:
+        "Some message!"
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         0
+
+)");
+
+    // Throwing `InterruptTestException` doesn't fail the test.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    throw ta_test::InterruptTestException{};
+}
+)").RunWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+             Tests    Checks
+PASSED           1         0
+
+)");
+
+    // Throwing an unknown exception.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    throw 42;
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    Unknown exception.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         0
+
+)");
+
+    // Throwing a nested exception.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    try
+    {
+        try
+        {
+            throw std::runtime_error("1");
+        }
+        catch (...)
+        {
+            std::throw_with_nested(std::logic_error("2"));
+        }
+    }
+    catch (...)
+    {
+        std::throw_with_nested(std::domain_error("3"));
+    }
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::_Nested_exception<std::domain_error>:
+        "3"
+    std::_Nested_exception<std::logic_error>:
+        "2"
+    std::runtime_error:
+        "1"
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         0
+
+)");
+}
+
 TA_TEST( ta_check/return_value )
 {
     decltype(auto) x = TA_CHECK( true );
@@ -2169,6 +2288,7 @@ TA_TEST( ta_check/misc )
     };
     lambda( true, 1, 42 );
 }
+
 
 
 int main(int argc, char **argv)

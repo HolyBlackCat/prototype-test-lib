@@ -1230,7 +1230,7 @@ namespace ta_test
             std::string chars_indent_message = "        ";
             std::string chars_indent_type_active;
             std::string chars_indent_message_active;
-            std::string chars_type_suffix = ": ";
+            std::string chars_type_suffix = ":";
 
             // Due to virtual inheritance, this can do double assignment to `BasicPrintingModule` stuff. Annoying, but whatever?
             CFG_TA_API void EnableUnicode(bool enable) override;
