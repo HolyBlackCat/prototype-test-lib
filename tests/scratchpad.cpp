@@ -6,8 +6,9 @@
 
 #include <taut/taut.hpp>
 
-// Overload to accept both regex and exact strings. Is this possible?
-// Move regex out of line (including header!), because of the slow compilation times.
+// Destroy `Trace`.
+// Replace it with `TA_CONTEXT` overload accepting source_location (and make our SourceLoc constructible from it - do not migrate completely,
+//     explain the reason in comments - not flexible enough, can't be constructed from completely custom values)
 
 TA_TEST(foo/test)
 {
@@ -48,8 +49,6 @@ int main(int argc, char **argv)
 //     Optionally no RTTI
 //     Multithreading? Thread inheritance system.
 //         The thread identity object should be just copyable around. Also record source location in copy constructor to identify the thread later.
-//     Experiment with filesystem::path and wstring and wchar_t (on all compilers and on libfmt), and u8string and u16string and u32string and char{16,32,8}_t
-//         If good, don't forget to enable "lazy copy for printing" for them
 //     Add explicit instantiation declarations/definitions for BasicCaughtExceptionInterface (this requires moving derived classes to namespace scope, which is sad)
 //     Flags for tests:
 //         disable by default
@@ -58,6 +57,7 @@ int main(int argc, char **argv)
 // Later:
 //     Make another pass over the source and strictly move everything possible to the .cpp?
 //     Re-sort the defintions again.
+//
 
 // Maybe not?
 //     Allow more characters in bracket-less form: `:`, `.`, `->`?
@@ -70,6 +70,7 @@ int main(int argc, char **argv)
 //         Forward iterator or stronger, the element is also lazy copyable (similar range or `CopyForLazyStringConversion == true`)
 //         Copy everything to a single flat heap buffer (separate pass to calculate the buffer length)
 //             Think about range of ranges (std::filesystem::path)
+//     `inverted` flag for tests. Inverts pass and fail for them.
 // Probably not:
 //     Try to enforce relative paths, and try printing errors on the same line as paths.
 //     A second argument macro that doesn't error out when not printable. `TA_TRY_ARG`?
@@ -123,10 +124,11 @@ int main(int argc, char **argv)
 
 /* Pending tests:
 
-Results printer:
-    A custom message when no tests are registered
-        but exit code 0
+Big color test:
+    A separate run when no tests are registered - there's a custom message.
 
+
+Results printer:
     Checks counter:
         TA_CHECK
             check failure on both false and throw, but NOT on InterruptTestExceptions
@@ -152,7 +154,6 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    local variable capture actually works, and the values are correct
     make sure that two values can't be printed side-by-side
     When doing a oneliner: `TA_CHECK(true), TA_CHECK(false)` - the first one shouldn't extend its scope into the next one.
     ExactString -> control characters should be printed as unicode replacements

@@ -721,7 +721,7 @@ namespace ta_test
     // Flags for `TA_TEST(...)`. Pass them after the name, as an optional parameter.
     enum class TestFlags
     {
-        // Disables this test. It can still be enabled with `--include`.
+        // Disables this test. It can only be enabled with `--force-include`.
         disabled = 1 << 0,
     };
     DETAIL_TA_FLAG_OPERATORS(TestFlags)

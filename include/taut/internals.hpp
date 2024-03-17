@@ -30,23 +30,40 @@ namespace ta_test
         struct SimpleFlag : BasicFlag
         {
             std::string flag;
+            char short_flag = '\0'; // Zero if none.
 
             using Callback = std::function<void(const Runner &runner, BasicModule &this_module)>;
             Callback callback;
 
-            SimpleFlag(std::string flag, std::string help_desc, Callback callback)
-                : BasicFlag(std::move(help_desc)), flag(std::move(flag)), callback(std::move(callback))
+            // `short_flag` can be zero if none.
+            SimpleFlag(std::string flag, char short_flag, std::string help_desc, Callback callback)
+                : BasicFlag(std::move(help_desc)), flag(std::move(flag)), short_flag(short_flag), callback(std::move(callback))
             {}
 
             std::string HelpFlagSpelling() const override
             {
-                return "--" + flag;
+                std::string ret;
+                if (short_flag)
+                {
+                    ret += '-';
+                    ret += short_flag;
+                    ret += ',';
+                }
+                return ret + "--" + flag;
             }
 
             bool ProcessFlag(const Runner &runner, BasicModule &this_module, std::string_view input, std::function<std::optional<std::string_view>()> request_arg) override
             {
                 (void)request_arg;
 
+                // Short form.
+                if (short_flag && input.size() == 2 && input[0] == '-' && input[1] == short_flag)
+                {
+                    callback(runner, this_module);
+                    return true;
+                }
+
+                // Long form.
                 if (!input.starts_with("--"))
                     return false;
                 input.remove_prefix(2);
@@ -184,10 +201,17 @@ namespace ta_test
 
         // --- RUNNING TESTS ---
 
+        enum class TestFilterState
+        {
+            enabled,
+            disabled,
+            disabled_with_flag, // The test is disabled in the source code with the `disabled` flag.
+        };
+
         // Whether the test should run.
-        // This is called once for every test, with `enable` initially set to true (or false if the test has the `disabled` flag).
-        // If it ends up false, the test is skipped.
-        virtual void OnFilterTest(const data::BasicTest &test, bool &enable) noexcept {(void)test; (void)enable;}
+        // This is called once for every test, with `state` initially set to `enabled` (or `disabled_with_flag` is the test has the `disabled` flag).
+        // If `state` ends up as `enabled`, the test will run.
+        virtual void OnFilterTest(const data::BasicTest &test, TestFilterState &state) noexcept {(void)test; (void)state;}
 
         // This is called first, before any tests run.
         virtual void OnPreRunTests(const data::RunTestsInfo &data) noexcept {(void)data;}
@@ -815,7 +839,7 @@ namespace ta_test
             // Characters:
 
             std::string warning_prefix = "WARNING: ";
-            std::string note_prefix = "NOTE: ";
+            std::string note_prefix = ""; // Used to be "NOTE: ", but an empty string looks better to me.
 
             // When printing a path, separates it from the line number.
             std::string filename_linenumber_separator;
@@ -1244,10 +1268,12 @@ namespace ta_test
         {
             flags::StringFlag flag_include;
             flags::StringFlag flag_exclude;
+            flags::StringFlag flag_force_include;
 
             struct Pattern
             {
                 bool exclude = false;
+                bool force = false; // Only for `exclude = false`.
 
                 std::string regex_string;
                 std::regex regex;
@@ -1258,10 +1284,10 @@ namespace ta_test
 
             CFG_TA_API TestSelector();
             std::vector<flags::BasicFlag *> GetFlags() noexcept override;
-            void OnFilterTest(const data::BasicTest &test, bool &enable) noexcept override;
+            void OnFilterTest(const data::BasicTest &test, TestFilterState &state) noexcept override;
             void OnPreRunTests(const data::RunTestsInfo &data) noexcept override;
 
-            CFG_TA_API static flags::StringFlag::Callback GetFlagCallback(bool exclude);
+            CFG_TA_API static flags::StringFlag::Callback GetFlagCallback(bool exclude, bool force);
         };
 
         // Responds to `--generate` to override the generated values.
@@ -1516,8 +1542,6 @@ namespace ta_test
             // Intentionally not trying to figure out the true terminal width, a fixed value looks good enough.
             std::size_t separator_line_width = 100;
 
-            // Optional message at startup when some tests are skipped.
-            output::TextStyle style_skipped_tests = {.color = output::TextColor::light_blue, .bold = true};
             // The prefix before the name of the starting test.
             output::TextStyle style_prefix = {.color = output::TextColor::dark_green};
             // Same, but when reentering a group after a failure.

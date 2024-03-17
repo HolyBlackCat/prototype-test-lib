@@ -1743,6 +1743,13 @@ TA_TEST( output/arg_colors )
 
 }
 
+TA_TEST( misc/help )
+{
+    // Just checking that `--help` runs and doesn't crash. Not checking the output.
+
+    MustCompileAndThen(common_program_prefix).Run("--help");
+}
+
 TA_TEST( ta_test/name_validation )
 {
     MustCompile(common_program_prefix + "TA_TEST( 54/foo/Bar/Ba_z123/42foo ) {}");
@@ -1771,6 +1778,299 @@ TA_TEST( ta_test/name_validation )
         .FailWithExactOutput("", "ta_test: Error: A test name (`foo`) can't double as a category name (`foo/bar`). Append `/something` to the first name.\n");
     MustCompileAndThen(common_program_prefix + "TA_TEST(foo/bar){}\nTA_TEST(foo){}")
         .FailWithExactOutput("", "ta_test: Error: A test name (`foo`) can't double as a category name (`foo/bar`). Append `/something` to the first name.\n");
+}
+
+TA_TEST( ta_test/test_order )
+{
+    // Tests must run in registration order, except groups run together, which requires moving some tests backwards.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST( b/u ) {}
+TA_TEST( a/blah ) {}
+TA_TEST( b/v ) {}
+TA_TEST( b/t ) {}
+)").RunWithExactOutput("", R"(
+Running tests...
+    │  ● b/
+1/4 │  ·   ● u
+2/4 │  ·   ● v
+3/4 │  ·   ● t
+    │  ● a/
+4/4 │  ·   ● blah
+
+             Tests    Checks
+PASSED           4         0
+
+)");
+}
+
+TA_TEST( ta_test/include_exclude )
+{
+    // Tests `--[force-]include` and `--exclude` flags, and minimal flag sanity in general.
+
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(a/foo/bar) {}
+TA_TEST(a/foo/blah) {}
+TA_TEST(a/foo/car, ta_test::disabled) {}
+TA_TEST(a/foo/far, ta_test::disabled) {}
+TA_TEST(a/other) {}
+TA_TEST(b/blah) {}
+)")
+    // Default behavior - skip only disabled tests.
+    .RunWithExactOutput("", R"(Skipping 2 tests, will run 4/6 tests.
+
+Running tests...
+    │  ● a/
+    │  ·   ● foo/
+1/4 │  ·   ·   ● bar
+2/4 │  ·   ·   ● blah
+3/4 │  ·   ● other
+    │  ● b/
+4/4 │  ·   ● blah
+
+             Tests    Checks
+Known            6
+Skipped          2
+PASSED           4         0
+
+)")
+    // Enable all - no change. Note, this doesn't mark the flag as unused, because when `-i` is the first flag, all tests get auto-disabled.
+    .RunWithExactOutput("-i.*", R"(Skipping 2 tests, will run 4/6 tests.
+
+Running tests...
+    │  ● a/
+    │  ·   ● foo/
+1/4 │  ·   ·   ● bar
+2/4 │  ·   ·   ● blah
+3/4 │  ·   ● other
+    │  ● b/
+4/4 │  ·   ● blah
+
+             Tests    Checks
+Known            6
+Skipped          2
+PASSED           4         0
+
+)")
+    // Force-enable all tests.
+    .RunWithExactOutput("-I.*", R"(
+Running tests...
+    │  ● a/
+    │  ·   ● foo/
+1/6 │  ·   ·   ● bar
+2/6 │  ·   ·   ● blah
+3/6 │  ·   ·   ● car
+4/6 │  ·   ·   ● far
+5/6 │  ·   ● other
+    │  ● b/
+6/6 │  ·   ● blah
+
+             Tests    Checks
+PASSED           6         0
+
+)")
+    // Enable only one test.
+    .RunWithExactOutput("-ib/blah", R"(Skipping 5 tests, will run 1/6 tests.
+
+Running tests...
+    │  ● b/
+1/1 │  ·   ● blah
+
+             Tests    Checks
+Known            6
+Skipped          5
+PASSED           1         0
+
+)")
+    // Enable only one test. (force = no difference)
+    .RunWithExactOutput("-Ib/blah", R"(Skipping 5 tests, will run 1/6 tests.
+
+Running tests...
+    │  ● b/
+1/1 │  ·   ● blah
+
+             Tests    Checks
+Known            6
+Skipped          5
+PASSED           1         0
+
+)")
+    // Enable only one test that's disabled by default - fails without `--force-enable`.
+    .FailWithExactOutput("-ia/foo/car", R"(Flag `--include a/foo/car` didn't match any tests.
+)", int(ta_test::ExitCode::bad_command_line_arguments))
+    // Enable only one test that's disabled by default - force.
+    .RunWithExactOutput("-Ia/foo/car", R"(Skipping 5 tests, will run 1/6 tests.
+
+Running tests...
+    │  ● a/
+    │  ·   ● foo/
+1/1 │  ·   ·   ● car
+
+             Tests    Checks
+Known            6
+Skipped          5
+PASSED           1         0
+
+)")
+    // Disable one test.
+    .RunWithExactOutput("-ea/foo/blah", R"(Skipping 3 tests, will run 3/6 tests.
+
+Running tests...
+    │  ● a/
+    │  ·   ● foo/
+1/3 │  ·   ·   ● bar
+2/3 │  ·   ● other
+    │  ● b/
+3/3 │  ·   ● blah
+
+             Tests    Checks
+Known            6
+Skipped          3
+PASSED           3         0
+
+)")
+    // Disable one test that's already disabled by default.
+    .FailWithExactOutput("-ea/foo/car", "Flag `--exclude a/foo/car` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+
+    // Disable all tests. Short flag + no space.
+    .FailWithExactOutput("-e\".*\"", R"(Skipping 6 tests, will run 0/6 tests.
+
+             Tests    Checks
+SKIPPED          6
+
+)", int(ta_test::ExitCode::no_tests_to_run))
+    // Disable all tests. Short flag + space.
+    .FailWithExactOutput("-e \".*\"", R"(Skipping 6 tests, will run 0/6 tests.
+
+             Tests    Checks
+SKIPPED          6
+
+)", int(ta_test::ExitCode::no_tests_to_run))
+    // Disable all tests. Long flag + space.
+    .FailWithExactOutput("--exclude \".*\"", R"(Skipping 6 tests, will run 0/6 tests.
+
+             Tests    Checks
+SKIPPED          6
+
+)", int(ta_test::ExitCode::no_tests_to_run))
+    // Disable all tests. Long flag + equals.
+    .FailWithExactOutput("--exclude=\".*\"", R"(Skipping 6 tests, will run 0/6 tests.
+
+             Tests    Checks
+SKIPPED          6
+
+)", int(ta_test::ExitCode::no_tests_to_run))
+
+    // Bad flag forms:
+    // --- Short + equals.
+    .FailWithExactOutput("-e=\".*\"", "Flag `--exclude =.*` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    // --- Long + no space.
+    .FailWithExactOutput("--exclude\".*\"", "Unknown flag `--exclude.*`, run with `--help` for usage.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+
+    // Empty flags match nothing.
+    .FailWithExactOutput("-i \"\"", "Flag `--include ` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-I \"\"", "Flag `--force-include ` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-e \"\"", "Flag `--exclude ` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+
+    // Unknown test names
+    .FailWithExactOutput("-i meow", "Flag `--include meow` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-I meow", "Flag `--force-include meow` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-e meow", "Flag `--exclude meow` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-i /", "Flag `--include /` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-i /a/foo", "Flag `--include /a/foo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments)) // No leading `/`.
+    .FailWithExactOutput("-i a/fo", "Flag `--include a/fo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments)) // Prefix can only end at `/`.
+    .FailWithExactOutput("-i a/fo/", "Flag `--include a/fo/` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments)) // Prefix can only end at `/`, and a trailing `/` doesn't help.
+    .FailWithExactOutput("-i a/foo/bar/", "Flag `--include a/foo/bar/` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments)) // Only groups can match when regex ends with `/`.
+
+    // Include group.
+    .RunWithExactOutput("-i a", R"(Skipping 3 tests, will run 3/6 tests.
+
+Running tests...
+    │  ● a/
+    │  ·   ● foo/
+1/3 │  ·   ·   ● bar
+2/3 │  ·   ·   ● blah
+3/3 │  ·   ● other
+
+             Tests    Checks
+Known            6
+Skipped          3
+PASSED           3         0
+
+)")
+    // Include group, with slash suffix.
+    .RunWithExactOutput("-i a/", R"(Skipping 3 tests, will run 3/6 tests.
+
+Running tests...
+    │  ● a/
+    │  ·   ● foo/
+1/3 │  ·   ·   ● bar
+2/3 │  ·   ·   ● blah
+3/3 │  ·   ● other
+
+             Tests    Checks
+Known            6
+Skipped          3
+PASSED           3         0
+
+)")
+
+    // Include subgroup.
+    .RunWithExactOutput("-i a/foo", R"(Skipping 4 tests, will run 2/6 tests.
+
+Running tests...
+    │  ● a/
+    │  ·   ● foo/
+1/2 │  ·   ·   ● bar
+2/2 │  ·   ·   ● blah
+
+             Tests    Checks
+Known            6
+Skipped          4
+PASSED           2         0
+
+)")
+    // Include subgroup, with `/` suffix.
+    .RunWithExactOutput("-i a/foo/", R"(Skipping 4 tests, will run 2/6 tests.
+
+Running tests...
+    │  ● a/
+    │  ·   ● foo/
+1/2 │  ·   ·   ● bar
+2/2 │  ·   ·   ● blah
+
+             Tests    Checks
+Known            6
+Skipped          4
+PASSED           2         0
+
+)")
+    // Exclude subgroup (not testing all the variations here, unlikely to break).
+    .RunWithExactOutput("-e a/foo", R"(Skipping 4 tests, will run 2/6 tests.
+
+Running tests...
+    │  ● a/
+1/2 │  ·   ● other
+    │  ● b/
+2/2 │  ·   ● blah
+
+             Tests    Checks
+Known            6
+Skipped          4
+PASSED           2         0
+
+)")
+
+    // Redundant flags
+    .FailWithExactOutput("-ia -ia/foo", "Flag `--include a/foo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-Ia -Ia/foo", "Flag `--force-include a/foo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-ea -ea/foo", "Flag `--exclude a/foo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    ;
+}
+
+TA_TEST( ta_test/none_registered )
+{
+    // What
+    MustCompileAndThen(common_program_prefix).FailWithExactOutput("", "\nNO TESTS ARE REGISTERED\n\n", int(ta_test::ExitCode::no_tests_to_run));
 }
 
 TA_TEST( ta_check/return_value )

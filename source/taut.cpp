@@ -2616,9 +2616,9 @@ int ta_test::Runner::Run()
 
         for (std::size_t i = 0; i < state.tests.size(); i++)
         {
-            bool enable = !bool(state.tests[i]->Flags() & TestFlags::disabled);
-            module_lists.Call<&BasicModule::OnFilterTest>(*state.tests[i], enable);
-            if (enable)
+            BasicModule::TestFilterState filter_state = bool(state.tests[i]->Flags() & TestFlags::disabled) ? BasicModule::TestFilterState::disabled_with_flag : BasicModule::TestFilterState::enabled;
+            module_lists.Call<&BasicModule::OnFilterTest>(*state.tests[i], filter_state);
+            if (filter_state == BasicModule::TestFilterState::enabled)
                 ordered_tests.push_back(i);
         }
         state.SortTestListInExecutionOrder(ordered_tests);
@@ -2923,7 +2923,7 @@ void ta_test::modules::BasicExceptionContentsPrinter::PrintException(
 
 ta_test::modules::HelpPrinter::HelpPrinter()
     : expected_flag_width(17),
-    flag_help("help", "Show usage.", [](const Runner &runner, BasicModule &this_module)
+    flag_help("help", 0, "Show usage.", [](const Runner &runner, BasicModule &this_module)
     {
         std::vector<flags::BasicFlag *> flags;
         for (const auto &m : runner.modules) // Can't use `ModuleLists` here yet.
@@ -2971,44 +2971,69 @@ ta_test::modules::TestSelector::TestSelector()
         "The pattern can be a regex. This flag can be repeated multiple times, and the order with respect to `--exclude` matters. "
         "If the first time this flag appears is before `--exclude`, all tests start disabled by default. "
         "If the pattern contains `//`, then `--include A//B` acts as a shorthand for `--include A --generate A//B`.",
-        GetFlagCallback(false)
+        GetFlagCallback(false, false)
     ),
     flag_exclude("exclude", 'e',
         "Disable tests matching a pattern. Uses the same pattern format as `--include`.",
-        GetFlagCallback(true)
+        GetFlagCallback(true, false)
+    ),
+    flag_force_include("force-include", 'I',
+        "Like `--include`, but can enable tests that were disabled in the source with `disabled` flag.",
+        GetFlagCallback(false, true)
     )
 {}
 
 std::vector<ta_test::flags::BasicFlag *> ta_test::modules::TestSelector::GetFlags() noexcept
 {
-    return {&flag_include, &flag_exclude};
+    return {&flag_include, &flag_exclude, &flag_force_include};
 }
 
-void ta_test::modules::TestSelector::OnFilterTest(const data::BasicTest &test, bool &enable) noexcept
+void ta_test::modules::TestSelector::OnFilterTest(const data::BasicTest &test, TestFilterState &state) noexcept
 {
     if (patterns.empty())
         return;
 
     // Disable by default is the first pattern is `--include`.
-    if (!patterns.front().exclude)
-        enable = false;
+    if (state == TestFilterState::enabled && !patterns.front().exclude)
+        state = TestFilterState::disabled;
 
     for (Pattern &pattern : patterns)
     {
-        if (enable != pattern.exclude)
-            continue; // The test is already enabled/disabled.
+        if (pattern.exclude == (state != TestFilterState::enabled))
+            continue; // Already enabled or disabled.
+
+        if (!pattern.exclude && state == TestFilterState::disabled_with_flag && !pattern.force)
+            continue; // Non-force include can't enable tests that were disabled with the `disabled` flag.
 
         if (ta_test::text::regex::TestNameMatchesRegex(test.Name(), pattern.regex))
         {
             pattern.was_used = true;
-                enable = !pattern.exclude;
+            state = pattern.exclude ? TestFilterState::disabled : TestFilterState::enabled;
         }
     }
 }
 
-ta_test::flags::StringFlag::Callback ta_test::modules::TestSelector::GetFlagCallback(bool exclude)
+void ta_test::modules::TestSelector::OnPreRunTests(const data::RunTestsInfo &data) noexcept
 {
-    return [exclude](const Runner &runner, BasicModule &this_module, std::string_view pattern)
+    (void)data;
+
+    // Make sure all patterns were used.
+    bool fail = false;
+    for (const Pattern &pattern : patterns)
+    {
+        if (!pattern.was_used)
+        {
+            std::fprintf(stderr, "Flag `--%s %s` didn't match any tests.\n", pattern.exclude ? "exclude" : (pattern.force ? "force-include" : "include"), pattern.regex_string.c_str());
+            fail = true;
+        }
+    }
+    if (fail)
+        std::exit(int(ExitCode::no_test_name_match));
+}
+
+ta_test::flags::StringFlag::Callback ta_test::modules::TestSelector::GetFlagCallback(bool exclude, bool force)
+{
+    return [exclude, force](const Runner &runner, BasicModule &this_module, std::string_view pattern)
     {
         TestSelector &self = dynamic_cast<TestSelector &>(this_module); // This cast should never fail.
 
@@ -3030,29 +3055,12 @@ ta_test::flags::StringFlag::Callback ta_test::modules::TestSelector::GetFlagCall
 
         Pattern new_pattern{
             .exclude = exclude,
+            .force = force,
             .regex_string = std::string(pattern),
             .regex = std::regex(new_pattern.regex_string, std::regex_constants::ECMAScript/*the default syntax*/ | std::regex_constants::optimize),
         };
         self.patterns.push_back(std::move(new_pattern));
     };
-}
-
-void ta_test::modules::TestSelector::OnPreRunTests(const data::RunTestsInfo &data) noexcept
-{
-    (void)data;
-
-    // Make sure all patterns were used.
-    bool fail = false;
-    for (const Pattern &pattern : patterns)
-    {
-        if (!pattern.was_used)
-        {
-            std::fprintf(stderr, "Pattern `--%s %s` didn't match any tests.\n", pattern.exclude ? "exclude" : "include", pattern.regex_string.c_str());
-            fail = true;
-        }
-    }
-    if (fail)
-        std::exit(int(ExitCode::no_test_name_match));
 }
 
 // --- modules::GeneratorOverrider ---
@@ -3107,7 +3115,7 @@ ta_test::modules::GeneratorOverrider::GeneratorOverrider()
                 self.HardErrorInFlag(error, new_entry, string, HardErrorKind::user);
         }
     ),
-    flag_local_help("help-generate", CFG_TA_FMT_NAMESPACE::format("Show detailed help about `--{}`.", flag_override.flag),
+    flag_local_help("help-generate", 0, CFG_TA_FMT_NAMESPACE::format("Show detailed help about `--{}`.", flag_override.flag),
         [](const Runner &runner, BasicModule &this_module)
         {
             (void)runner;
@@ -4394,14 +4402,13 @@ void ta_test::modules::ProgressPrinter::OnPreRunTests(const data::RunTestsInfo &
 
         auto cur_style = terminal.MakeStyleGuard();
 
-        terminal.Print(cur_style, "{}Skipping {} test{}, will run {}/{} test{}.\n",
-            style_skipped_tests,
+        PrintNote(cur_style, CFG_TA_FMT_NAMESPACE::format("Skipping {} test{}, will run {}/{} test{}.",
             num_skipped,
             num_skipped != 1 ? "s" : "",
             data.num_tests,
             data.num_tests_with_skipped,
             data.num_tests_with_skipped != 1 ? "s" : ""
-        );
+        ));
     }
 }
 
@@ -4792,7 +4799,7 @@ void ta_test::modules::ResultsPrinter::OnPostRunTests(const data::RunTestsResult
 
     if (num_tests_skipped == 0 && num_tests_passed == 0 && num_tests_failed == 0)
     {
-        terminal.Print(cur_style, "{}{}", style_skipped_primary, chars_no_known_tests);
+        terminal.Print(cur_style, "{}{}\n", style_skipped_primary, chars_no_known_tests);
     }
     else
     {
