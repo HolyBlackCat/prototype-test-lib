@@ -2558,6 +2558,9 @@ TA_TEST( ta_check/misc )
         (TA_CHECK(x), ...);
     };
     lambda( true, 1, 42 );
+
+    // $[...] outside of condition
+    MustNotCompile(common_program_prefix + "\nvoid foo() {void($[42]);}");
 }
 
 
