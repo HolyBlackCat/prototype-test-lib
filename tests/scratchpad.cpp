@@ -177,8 +177,6 @@ TA_CHECK:
     "in here" context for non-nested brackets.
     "in here" context for nested brackets (should show the most nested one)
 
-    What if wrong thread evaluates the $[...]? That should be a hard error.
-
     Multiline user messages.
 
 --- TA_FAIL

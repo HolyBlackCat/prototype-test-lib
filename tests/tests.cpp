@@ -2539,7 +2539,7 @@ FAILED           1         4
 
 TA_TEST( ta_check/misc )
 {
-    // Comma in condition.
+    // Comma in condition = compilation error.
     MustNotCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true, true);}");
 
     // Bad format string.
@@ -2567,6 +2567,10 @@ TA_TEST( ta_check/misc )
     MustNotCompile(common_program_prefix + "\nTA_TEST(blah) {TA_CHECK([=]{return $[42];}());}");
     // $[...] while not capturing.
     MustNotCompile(common_program_prefix + "\nTA_TEST(blah) {TA_CHECK([]{return $[42];}());}");
+
+    // Wrong thread writes an argument.
+    MustCompileAndThen(common_program_prefix + "\n#include <thread>\nTA_TEST(blah) {TA_CHECK((std::thread([&]{(void)$[42];}).join(), true));}")
+        .FailWithExactOutput("", "ta_test: Internal error: `$[...]` is unable to find its parent `TA_CHECK(...)`. Are you using it in a wrong thread?\n");
 }
 
 

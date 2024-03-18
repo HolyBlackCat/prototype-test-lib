@@ -2011,6 +2011,22 @@ ta_test::data::BasicAssertion::DecoVar ta_test::detail::AssertWrapper::GetElemen
 
 [[nodiscard]] ta_test::detail::ArgWrapper ta_test::detail::AssertWrapper::_ta_arg_(int counter)
 {
+    auto &thread_state = ThreadState();
+
+    // Make sure we're in the correct thread (i.e. the parent assertion is in the stack).
+    bool found = false;
+    for (const data::BasicAssertion *cur = thread_state.current_assertion; cur;)
+    {
+        if (cur == this)
+        {
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+        HardError("`$[...]` is unable to find its parent `TA_CHECK(...)`. Are you using it in a wrong thread?");
+
+    // Find the argument index from the counter.
     const auto &counter_to_arg_index = static_cast<const AssertionExprStaticInfoImpl *>(static_info)->counter_to_arg_index;
     auto it = std::partition_point(counter_to_arg_index.begin(), counter_to_arg_index.end(),
         [&](const AssertionExprStaticInfoImpl::CounterIndexPair &pair){return pair.counter < counter;}
@@ -2019,8 +2035,6 @@ ta_test::data::BasicAssertion::DecoVar ta_test::detail::AssertWrapper::GetElemen
         HardError("`TA_CHECK` isn't aware of this `$[...]`.");
 
     ValidateArgIndex(it->index);
-
-    auto &thread_state = ThreadState();
 
     return {*this, thread_state.assertion_argument_buffers[arg_buffers_pos][it->index],thread_state.assertion_argument_metadata[arg_metadata_offset + it->index]};
 }
