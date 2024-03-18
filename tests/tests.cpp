@@ -2561,6 +2561,12 @@ TA_TEST( ta_check/misc )
 
     // $[...] outside of condition
     MustNotCompile(common_program_prefix + "\nvoid foo() {void($[42]);}");
+    // $[...] while capturing by reference.
+    MustCompile(common_program_prefix + "\nTA_TEST(blah) {TA_CHECK([&]{return $[42];}());}");
+    // $[...] while capturing by value.
+    MustNotCompile(common_program_prefix + "\nTA_TEST(blah) {TA_CHECK([=]{return $[42];}());}");
+    // $[...] while not capturing.
+    MustNotCompile(common_program_prefix + "\nTA_TEST(blah) {TA_CHECK([]{return $[42];}());}");
 }
 
 
