@@ -2190,6 +2190,51 @@ FOLLOWING TESTS FAILED:
 FAILED           1         0
 
 )");
+
+    // Throwing a nested exception with an unknown exception in it.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    try
+    {
+        try
+        {
+            throw 42;
+        }
+        catch (...)
+        {
+            std::throw_with_nested(std::logic_error("2"));
+        }
+    }
+    catch (...)
+    {
+        std::throw_with_nested(std::domain_error("3"));
+    }
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::_Nested_exception<std::domain_error>:
+        "3"
+    std::_Nested_exception<std::logic_error>:
+        "2"
+    Unknown exception.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         0
+
+)");
 }
 
 TA_TEST( ta_check/softness )
@@ -2533,6 +2578,354 @@ FOLLOWING TESTS FAILED:
 
              Tests    Checks
 FAILED           1         4
+
+)");
+}
+
+TA_TEST( ta_check/exceptions )
+{
+    // Throwing `ta_test::InterruptTestException` gracefully stops the test.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+TA_TEST(blah)
+{
+    std::cout << "a\n";
+    TA_CHECK( ( throw ta_test::InterruptTestException{}, false ) );
+    std::cout << "b\n";
+}
+)").RunWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+a
+
+             Tests    Checks
+PASSED           1         1
+
+)");
+
+    // Throwing a different exception fails the test.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+TA_TEST(blah)
+{
+    std::cout << "a\n";
+    TA_CHECK( ( throw std::runtime_error("Message!"), false ) );
+    std::cout << "b\n";
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+a
+
+dir/subdir/file.cpp:6:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::runtime_error:
+        "Message!"
+
+dir/subdir/file.cpp:9:
+While checking assertion:
+
+    TA_CHECK( ( throw std::runtime_error("Message!"), false ) )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:6
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // Unknown exception.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+TA_TEST(blah)
+{
+    std::cout << "a\n";
+    TA_CHECK( ( throw 42, false ) );
+    std::cout << "b\n";
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+a
+
+dir/subdir/file.cpp:6:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    Unknown exception.
+
+dir/subdir/file.cpp:9:
+While checking assertion:
+
+    TA_CHECK( ( throw 42, false ) )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:6
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // Nested exception.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+bool foo()
+{
+    try
+    {
+        try
+        {
+            throw std::runtime_error("1");
+        }
+        catch (...)
+        {
+            std::throw_with_nested(std::logic_error("2"));
+        }
+    }
+    catch (...)
+    {
+        std::throw_with_nested(std::domain_error("3"));
+    }
+    return false;
+}
+TA_TEST(blah)
+{
+    std::cout << "a\n";
+    TA_CHECK( foo() );
+    std::cout << "b\n";
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+a
+
+dir/subdir/file.cpp:25:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::_Nested_exception<std::domain_error>:
+        "3"
+    std::_Nested_exception<std::logic_error>:
+        "2"
+    std::runtime_error:
+        "1"
+
+dir/subdir/file.cpp:28:
+While checking assertion:
+
+    TA_CHECK( foo() )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:25
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // Nested exception with an unknown exception in it.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+bool foo()
+{
+    try
+    {
+        try
+        {
+            throw 42;
+        }
+        catch (...)
+        {
+            std::throw_with_nested(std::logic_error("2"));
+        }
+    }
+    catch (...)
+    {
+        std::throw_with_nested(std::domain_error("3"));
+    }
+    return false;
+}
+TA_TEST(blah)
+{
+    std::cout << "a\n";
+    TA_CHECK( foo() );
+    std::cout << "b\n";
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+a
+
+dir/subdir/file.cpp:25:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::_Nested_exception<std::domain_error>:
+        "3"
+    std::_Nested_exception<std::logic_error>:
+        "2"
+    Unknown exception.
+
+dir/subdir/file.cpp:28:
+While checking assertion:
+
+    TA_CHECK( foo() )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:25
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // ---
+
+    // Context for an exception.
+    MustCompileAndThen(common_program_prefix + R"(
+bool foo()
+{
+    throw std::runtime_error("Blah!");
+}
+TA_TEST( blah )
+{
+    TA_CHECK( $[true] && $[foo()] && $[true] );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:9:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::runtime_error:
+        "Blah!"
+
+dir/subdir/file.cpp:11:
+While checking assertion:
+                          in here
+                          ╭─────╮
+    TA_CHECK( $[true] && $[foo()] && $[true] )
+                 │
+                true
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:9
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // Context for an exception (nested).
+    MustCompileAndThen(common_program_prefix + R"(
+bool foo()
+{
+    throw std::runtime_error("Blah!");
+}
+TA_TEST( blah )
+{
+    TA_CHECK( $[$[true] && $[foo()]] && $[true] );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:9:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::runtime_error:
+        "Blah!"
+
+dir/subdir/file.cpp:11:
+While checking assertion:
+                            in here
+                            ╭─────╮
+    TA_CHECK( $[$[true] && $[foo()]] && $[true] )
+                   │
+                  true
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:9
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // ---
+
+    // Context should die when exiting the assertion.
+    MustCompileAndThen(common_program_prefix + R"(
+bool foo()
+{
+    throw std::runtime_error("Blah!");
+}
+TA_TEST( blah )
+{
+    try
+    {
+        TA_CHECK( $[true] && $[foo()] && $[true] );
+    }
+    catch (...) {}
+    TA_CHECK( false );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:9:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::runtime_error:
+        "Blah!"
+
+dir/subdir/file.cpp:13:
+While checking assertion:
+                          in here
+                          ╭─────╮
+    TA_CHECK( $[true] && $[foo()] && $[true] )
+                 │
+                true
+
+dir/subdir/file.cpp:16:
+Assertion failed:
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:9
+
+             Tests    Checks
+FAILED           1         2
 
 )");
 }
