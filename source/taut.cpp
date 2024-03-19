@@ -1845,7 +1845,7 @@ ta_test::detail::AssertWrapper::AssertionStackGuard::AssertionStackGuard(AssertW
             arg_buffers = std::vector<ArgBuffer>(std::max(arg_buffers.size() * 2, self.static_info->args_info.size()));
 
         self.arg_metadata_offset = thread_state.assertion_argument_metadata.size();
-        thread_state.assertion_argument_metadata.resize(std::max(thread_state.assertion_argument_metadata.size() * 2, self.arg_metadata_offset + self.static_info->args_info.size()));
+        thread_state.assertion_argument_metadata.resize(self.arg_metadata_offset + self.static_info->args_info.size());
     }
 }
 

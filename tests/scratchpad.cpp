@@ -6,9 +6,8 @@
 
 #include <taut/taut.hpp>
 
-// Destroy `Trace`.
-// Replace it with `TA_CONTEXT` overload accepting source_location (and make our SourceLoc constructible from it - do not migrate completely,
-//     explain the reason in comments - not flexible enough, can't be constructed from completely custom values)
+// Test invalid regexes in --include.
+// Destroy `Trace`. What to replace it with?
 
 TA_TEST(foo/test)
 {
@@ -154,7 +153,6 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    When doing a oneliner: `TA_CHECK(true), TA_CHECK(false)` - the first one shouldn't extend its scope into the next one.
     ExactString -> control characters should be printed as unicode replacements
     Gracefully fail the test if the lazy message throws?
 
@@ -173,9 +171,6 @@ TA_CHECK:
     TA_CHECK( ($)[42] ), TA_CHECK( ( $ ) [42] ) - should work. $ must be grayed out, but not its enclosing `(`,`)`
 
     Build error if $ is already expanded (nested in another macro)
-
-    "in here" context for non-nested brackets.
-    "in here" context for nested brackets (should show the most nested one)
 
     Multiline user messages.
 

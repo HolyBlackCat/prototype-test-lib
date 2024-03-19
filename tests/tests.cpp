@@ -2582,6 +2582,161 @@ FAILED           1         4
 )");
 }
 
+TA_TEST( ta_check/context )
+{
+    // One assertion failing inside another's `$[...]`.
+    MustCompileAndThen(common_program_prefix + R"(
+bool foo() {TA_CHECK(false)(ta_test::soft); return true;}
+TA_TEST(blah)
+{
+    TA_CHECK( $[true] && $[foo()] && $[true] );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:6:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:5:
+Assertion failed:
+
+    TA_CHECK( false )
+
+dir/subdir/file.cpp:8:
+While checking assertion:
+                          in here
+                          ╭─────╮
+    TA_CHECK( $[true] && $[foo()] && $[true] )
+                 │
+                true
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:6
+
+             Tests    Checks
+Executed         1         2
+Passed           0         1
+FAILED           1         1
+
+)");
+
+    // One assertion failing inside another's `$[...]` (nested);
+    MustCompileAndThen(common_program_prefix + R"(
+bool foo() {TA_CHECK(false)(ta_test::soft); return true;}
+TA_TEST(blah)
+{
+    TA_CHECK( $[$[true] && $[foo()]] && $[true] );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:6:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:5:
+Assertion failed:
+
+    TA_CHECK( false )
+
+dir/subdir/file.cpp:8:
+While checking assertion:
+                            in here
+                            ╭─────╮
+    TA_CHECK( $[$[true] && $[foo()]] && $[true] )
+                   │
+                  true
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:6
+
+             Tests    Checks
+Executed         1         2
+Passed           0         1
+FAILED           1         1
+
+)");
+
+    // One assertion failing inside another, but outside of `$[...]`;
+    MustCompileAndThen(common_program_prefix + R"(
+bool foo() {TA_CHECK(false)(ta_test::soft); return true;}
+TA_TEST(blah)
+{
+    TA_CHECK( $[true] && foo() && $[true] );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:6:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:5:
+Assertion failed:
+
+    TA_CHECK( false )
+
+dir/subdir/file.cpp:8:
+While checking assertion:
+
+    TA_CHECK( $[true] && foo() && $[true] )
+                 │
+                true
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:6
+
+             Tests    Checks
+Executed         1         2
+Passed           0         1
+FAILED           1         1
+
+)");
+
+    // ---
+
+    // Make sure the context DOESN'T extend to the end of full expression.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    TA_CHECK(true), TA_CHECK(false);
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:7:
+Assertion failed:
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+Executed         1         2
+Passed           0         1
+FAILED           1         1
+
+)");
+}
+
 TA_TEST( ta_check/exceptions )
 {
     // Throwing `ta_test::InterruptTestException` gracefully stops the test.
@@ -2865,6 +3020,45 @@ While checking assertion:
     TA_CHECK( $[$[true] && $[foo()]] && $[true] )
                    │
                   true
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:9
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // Context for an exception (not enclosed in $[...]).
+    MustCompileAndThen(common_program_prefix + R"(
+bool foo()
+{
+    throw std::runtime_error("Blah!");
+}
+TA_TEST( blah )
+{
+    TA_CHECK( $[true] && foo() && $[true] );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:9:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Uncaught exception:
+    std::runtime_error:
+        "Blah!"
+
+dir/subdir/file.cpp:11:
+While checking assertion:
+
+    TA_CHECK( $[true] && foo() && $[true] )
+                 │
+                true
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 
