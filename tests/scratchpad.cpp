@@ -153,18 +153,13 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    ExactString -> control characters should be printed as unicode replacements
     Gracefully fail the test if the lazy message throws?
-
-
-    Does `$[...]` has top-level (...) in expansion? I think not. Add a negative test.
+    Multiline user messages
 
     Try passing an rvalue to $[...] that has CopyForLazyStringConversion specialzied to true. It must not be moved by the `$[...]` itself.
 
     Challenge the parsing:
         strings, char literals, raw strings - all containing opening/closing brackets, whole $[...]
-
-    TA_CHECK( ((((((((((((($[(((42)))]))))))))))))) )
 
     TA_CHECK( $ [ 42 ] ) - spaces must work
 

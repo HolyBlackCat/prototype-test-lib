@@ -3129,6 +3129,14 @@ TA_TEST( ta_check/misc )
     // Comma in condition = compilation error.
     MustNotCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true, true);}");
 
+    // $[...] don't have outer (...) in expansion.
+    // This isn't really a big deal, but it's probably better this way, and we shouldn't accidentally enable this.
+    MustCompile   (common_program_prefix + "int foo(int x){return x;} void bar() {TA_CHECK(foo($[42]) == 42);}");
+    MustNotCompile(common_program_prefix + "int foo(int x){return x;} void bar() {TA_CHECK(foo $[42]  == 42);}");
+
+    // A bunch of parentheses.
+    MustCompileAndThen(common_program_prefix + "TA_TEST(blah){ TA_CHECK( ((((((((((((($[(((42)))]))))))))))))) ); }").Run();
+
     // Bad format string.
     MustCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true)(\"foo = {}+{}\", 42, 43);}");
     MustNotCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true)(\"foo = {}+{}\", 42);}");
@@ -3158,6 +3166,34 @@ TA_TEST( ta_check/misc )
     // Wrong thread writes an argument.
     MustCompileAndThen(common_program_prefix + "\n#include <thread>\nTA_TEST(blah) {TA_CHECK((std::thread([&]{(void)$[42];}).join(), true));}")
         .FailWithExactOutput("", "ta_test: Internal error: `$[...]` is unable to find its parent `TA_CHECK(...)`. Are you using it in a wrong thread?\n");
+
+    // Control characters in serialized arguments.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah) {TA_CHECK( (void($[ta_test::string_conv::ExactString{"foo\nbar"}]), false) );}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:5:
+Assertion failed:
+
+    TA_CHECK( (void($[ta_test::string_conv::ExactString{"foo\nbar"}]), false) )
+                     ╰──────────────────────┬──────────────────────╯
+                                         foo␊bar
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         1
+
+)");
 }
 
 
