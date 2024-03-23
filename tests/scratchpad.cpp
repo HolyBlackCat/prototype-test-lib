@@ -93,6 +93,7 @@ int main(int argc, char **argv)
 //     `$[...]` could be useful to provide context for non-printable function calls (including void).
 //     -g messes up repetition counter a bit if a generator throws (while in the after-test generator update block)
 //     deserialize valueless_by_exception variants
+//     don't lose assertion flags and source location if evaluating the message throws.
 
 // Selling points:
 //     * Expression unwrapping
@@ -153,8 +154,7 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    Gracefully fail the test if the lazy message throws?
-    Multiline user messages
+    User message must not be evaluated on success.
 
     Try passing an rvalue to $[...] that has CopyForLazyStringConversion specialzied to true. It must not be moved by the `$[...]` itself.
 
@@ -178,9 +178,11 @@ TA_CHECK:
     Doesn't warn on unused [[nodiscard]] value??? (if possible at all)
     Doesn't warn on nodiscard violation.
     Doesn't warn on `;` at the end.
+    Multiline user message.
+    Don't evaluate the user message on success
     Opening two same context frames deduplicates them.
     When doing a oneliner: `TA_MUST_THROW(...).Check...()`, make sure that the frame guard from the macro doesn't extend into the check.
-    Element index out of range is a test fail, not a hard error.
+    Element index out of range is a test fail, not a hard error. (check also the flags)
     correctly breaks on the call site
     usable without (...) in fold expressions
     Gracefully fail the test if the lazy message throws?

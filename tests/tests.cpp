@@ -3194,6 +3194,63 @@ FOLLOWING TESTS FAILED:
 FAILED           1         1
 
 )");
+
+    // Line break in user message.
+    MustCompileAndThen(common_program_prefix + "TA_TEST(blah) {TA_CHECK(false)(\"foo\\nbar\\ncar\");}")
+        .FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:4:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:4:
+Assertion failed: foo
+                  bar
+                  car
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:4
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // What if the error message throws?
+    // Note that here, if the message throws, we don't receive the custom flags. Not sure how to fix this.
+    MustCompileAndThen(common_program_prefix + "TA_TEST(blah) {TA_CHECK(false)(ta_test::soft, \"x = {}\", (throw 42, 42)); TA_CHECK(false);}")
+        .FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:4:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:4:
+Assertion failed: [uncaught exception while evaluating the message]
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:4
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // The message must not be evaluated on success.
+    MustCompileAndThen(common_program_prefix + "TA_TEST(blah) {TA_CHECK(true)(\"x = {}\", (std::exit(1), 42));}")
+        .Run();
 }
 
 

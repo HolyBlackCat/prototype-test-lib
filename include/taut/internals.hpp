@@ -322,6 +322,100 @@ namespace ta_test
 
     namespace text
     {
+        // Extra character manipulation functions.
+        namespace chars
+        {
+            // Advances `ch` until one of the characters in `sep` is found, or until an unbalanced closing bracket (one of: `)]}`).
+            // Then gives back the trailing whitespace, if any.
+            // But we ignore the contents of "..." and '...' strings, and ignore matching characters inside of `(...)`, `[...]`, or `{...}`.
+            // We also refuse to break on an opening bracket if it's the first non-whitespace chracter.
+            // We don't check the type of brackets, treating them all as equivalent, but if we find an unbalanced closing bracket, we stop immediately.
+            constexpr void TryFindUnprotectedSeparator(const char *&ch, std::string_view sep)
+            {
+                const char *const first_ch = ch;
+                SkipWhitespace(ch);
+                const char *const first_nonwhitespace_ch = ch;
+
+                char quote_ch = '\0';
+                int depth = 0;
+
+                while (*ch)
+                {
+                    if (quote_ch)
+                    {
+                        if (*ch == '\\')
+                        {
+                            ch++;
+                            if (*ch == '\0')
+                                break; // Incomplete escape at the end of string.
+                        }
+                        else if (*ch == quote_ch)
+                        {
+                            quote_ch = '\0';
+                        }
+                    }
+                    else
+                    {
+                        if (depth == 0 && sep.find(*ch) != std::string_view::npos)
+                        {
+                            // Found separator.
+
+                            // Refuse to break if it's the first non-whitespace character and an opening bracket.
+                            if (!(first_nonwhitespace_ch == ch && (*ch == '(' || *ch == '[' || *ch == '{')))
+                                break;
+                        }
+
+                        if (*ch == '"' || *ch == '\'')
+                        {
+                            quote_ch = *ch;
+                        }
+                        else if (*ch == '(' || *ch == '[' || *ch == '{')
+                        {
+                            depth++;
+                        }
+                        else if (*ch == ')' || *ch == ']' || *ch == '}')
+                        {
+                            depth--;
+                            if (depth < 0)
+                                break; // Unbalanced bracket.
+                        }
+                    }
+
+                    ch++;
+                }
+
+                // Unskip trailing whitespace.
+                while (ch > first_ch && IsWhitespace(ch[-1]))
+                    ch--;
+            }
+
+            // A list of separators for `TryFindUnprotectedSeparator` for generator values in `--generate`.
+            inline constexpr std::string_view generator_override_separators = ",&(";
+
+            // Splits the string at a separator.
+            // `func` is `(std::string_view segment, bool final) -> bool`.
+            // If it returns true, the function stops and also returns true.
+            template <typename F>
+            constexpr bool Split(std::string_view str, char separator, F &&func)
+            {
+                auto it = str.begin();
+
+                while (true)
+                {
+                    auto new_it = std::find(it, str.end(), separator);
+
+                    if (func(std::string_view(it, new_it), new_it == str.end()))
+                        return true;
+
+                    if (new_it == str.end())
+                        break;
+                    it = new_it + 1;
+                }
+
+                return false;
+            }
+        }
+
         // Parsing C++ expressions.
         namespace expr
         {
@@ -1720,24 +1814,6 @@ namespace ta_test
                 CFG_TA_API GeneratorValueShortener(std::string_view value, std::string_view ellipsis, std::size_t max_prefix, std::size_t max_suffix);
             };
 
-            // Splits `name` at every `/`, and calls `func` for every segment.
-            // `func` is `(std::string_view segment, bool is_last_segment) -> void`.
-            static void SplitNameToSegments(std::string_view name, auto &&func)
-            {
-                auto it = name.begin();
-
-                while (true)
-                {
-                    auto new_it = std::find(it, name.end(), '/');
-
-                    func(std::string_view(it, new_it), new_it == name.end());
-
-                    if (new_it == name.end())
-                        break;
-                    it = new_it + 1;
-                }
-            }
-
             // This is used to convert a sequence of test names to what looks like a tree.
             // `stack` must start empty before calling this the first time, and is left in an unspecified state after the last call.
             // `push_segment` is called every time we're entering a new tree node.
@@ -1748,7 +1824,7 @@ namespace ta_test
             {
                 std::size_t segment_index = 0;
 
-                SplitNameToSegments(name, [&](std::string_view segment, bool is_last_segment)
+                text::chars::Split(name, '/', [&](std::string_view segment, bool is_last_segment)
                 {
                     // Pop the tail off the stack.
                     if (segment_index < stack.size() && stack[segment_index] != segment)
@@ -1763,6 +1839,8 @@ namespace ta_test
                     }
 
                     segment_index++;
+
+                    return false;
                 });
             }
 

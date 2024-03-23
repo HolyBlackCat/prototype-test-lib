@@ -1923,8 +1923,8 @@ bool ta_test::detail::AssertWrapper::Evaluator::operator~()
         self.condition_func(self, self.condition_data);
     }
 
-    // Evaluate the message and other stuff if the condition is false.
-    if (self.extras_func)
+    // Evaluate the message and other stuff if the condition is false or on an exception.
+    if (self.extras_func && (!self.condition_value_known || !self.condition_value))
     {
         try
         {
@@ -1932,7 +1932,7 @@ bool ta_test::detail::AssertWrapper::Evaluator::operator~()
         }
         catch (...)
         {
-            self.user_message = "[uncaught exception while evaluating the user message]";
+            self.user_message = "[uncaught exception while evaluating the message]";
         }
     }
 
@@ -2452,7 +2452,7 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
         }
         catch (...)
         {
-            self.user_message = "[uncaught exception while evaluating the user message]";
+            self.user_message = "[uncaught exception while evaluating the message]";
         }
     }
 
@@ -4447,13 +4447,15 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const data::RunTestsResul
 
             std::size_t cur_prefix_width = prefix_width;
 
-            SplitNameToSegments(test_name, [&](std::string_view segment, bool is_last_segment)
+            text::chars::Split(test_name, '/', [&](std::string_view segment, bool is_last_segment)
             {
                 std::size_t this_width = cur_prefix_width + (is_last_segment ? 0 : 1/*for the slash*/) + segment.size();
                 if (this_width > max_test_name_width)
                     max_test_name_width = this_width;
 
                 cur_prefix_width += indentation_width;
+
+                return false;
             });
         }
 
@@ -4945,7 +4947,15 @@ void ta_test::modules::AssertionPrinter::PrintAssertionFrameLow(output::Terminal
         }
 
         if (auto message = data.UserMessage())
-            canvas.DrawString(line_counter, column + 1, *message, {.style = common_data.style_user_message, .important = true});
+        {
+            text::chars::Split(*message, '\n', [&](std::string_view segment, bool last)
+            {
+                canvas.DrawString(line_counter, column + 1, segment, {.style = common_data.style_user_message, .important = true});
+                if (!last)
+                    line_counter++;
+                return false;
+            });
+        }
 
         line_counter++;
     }
