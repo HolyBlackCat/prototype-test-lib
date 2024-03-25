@@ -3296,6 +3296,78 @@ TA_TEST(blah) {TA_CHECK(foo($[std::string("1234567890123456789012345678901234567
     .Run();
 }
 
+TA_TEST( ta_check/laziness )
+{
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+
+struct NonLazyToString
+{
+    int x = 42;
+    // A non-trivial destructor to disable the lazy behavior.
+    ~NonLazyToString() {}
+};
+struct LazyToString
+{
+    int x = 43;
+};
+
+template <typename T>
+requires std::is_same_v<T, NonLazyToString> || std::is_same_v<T, LazyToString>
+struct CFG_TA_FMT_NAMESPACE::formatter<T, char>
+{
+    constexpr auto parse(CFG_TA_FMT_NAMESPACE::basic_format_parse_context<char> &parse_ctx)
+    {
+        return parse_ctx.begin();
+    }
+
+    template <typename OutputIt>
+    constexpr auto format(const T &value, CFG_TA_FMT_NAMESPACE::basic_format_context<OutputIt, char> &format_ctx) const
+    {
+        std::cout << "Serializing x=" << value.x << '\n';
+        return CFG_TA_FMT_NAMESPACE::format_to(format_ctx.out(), "{}", value.x);
+    }
+};
+
+TA_TEST(foo)
+{
+    std::cout << "---\n";
+    TA_CHECK( $[NonLazyToString{1}].x + $[LazyToString{10}].x > 0 );
+    std::cout << "---\n";
+    TA_CHECK( $[NonLazyToString{2}].x + $[LazyToString{20}].x < 0 );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● foo
+---
+Serializing x=1
+---
+Serializing x=2
+
+dir/subdir/file.cpp:35:
+TEST FAILED: foo ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Serializing x=20
+dir/subdir/file.cpp:40:
+Assertion failed:
+
+    TA_CHECK( $[NonLazyToString{2}].x + $[LazyToString{20}].x < 0 )
+               ╰────────┬─────────╯      ╰───────┬────────╯
+                        2                        20
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● foo      │ dir/subdir/file.cpp:35
+
+             Tests    Checks
+Executed         1         2
+Passed           0         1
+FAILED           1         1
+
+)");
+}
 
 
 int main(int argc, char **argv)

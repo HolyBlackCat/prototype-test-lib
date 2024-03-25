@@ -109,7 +109,7 @@ int main(int argc, char **argv)
 //         * First-class nested exceptions support out of the box
 //             * Also rich exception analysis: Can check derived type and exact match (check what gtest and catch2 can do)
 //         * True lazy message evaluation
-//             * Point out that you can't do proper lazyness with <<, because operands are still evaluated.
+//             * Point out that you can't do proper laziness with <<, because operands are still evaluated.
 //         * No comma weirdness in macros
 //         * Strong assertions throw rather than using `return`.
 //         * hard/soft enum is passed to assertions at runtime.
@@ -154,8 +154,6 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    Check how lazy objects are copied
-
     Challenge the parsing:
         strings, char literals, raw strings - all containing opening/closing brackets, whole $[...]
 
