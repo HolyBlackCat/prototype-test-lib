@@ -1698,12 +1698,12 @@ namespace ta_test
         template <typename ...P>
         struct DefaultMaybeLazyToString<std::basic_string<P...>>
         {
-            std::string operator()(const std::basic_string<P...> &source) const {return source;}
+            std::basic_string<P...> operator()(const std::basic_string<P...> &source) const {return source;}
         };
         template <typename ...P>
         struct DefaultMaybeLazyToString<std::basic_string_view<P...>>
         {
-            std::string operator()(const std::basic_string_view<P...> &source) const {return std::basic_string<P...>(source);}
+            std::basic_string<P...> operator()(const std::basic_string_view<P...> &source) const {return std::basic_string<P...>(source);}
         };
 
 
@@ -3274,11 +3274,14 @@ namespace ta_test
                 // If we can copy the object itself (to then convert to string lazily), do it.
                 if constexpr (FitsIntoArgStorage<type> && string_conv::SupportsLazyToString<type>)
                 {
-                    target_metadata->StoreValue(*target_buffer, std::as_const(arg));
+                    using traits = string_conv::MaybeLazyToString<type>;
+
+                    target_metadata->StoreValue(*target_buffer, traits{}(std::as_const(arg)));
                     target_metadata->to_string_func = [](ArgMetadata &self, ArgBuffer &buffer) -> const std::string &
                     {
                         // Convert to a string.
-                        std::string string = string_conv::ToString(*std::launder(reinterpret_cast<type *>(buffer.buffer)));
+                        using proxy_type = std::remove_cvref_t<decltype(traits{}(std::as_const(arg)))>;
+                        std::string string = string_conv::ToString(*std::launder(reinterpret_cast<proxy_type *>(buffer.buffer)));
 
                         // Store the string as the new value.
                         auto &ret = self.StoreValue(buffer, std::move(string));
@@ -3323,7 +3326,7 @@ namespace ta_test
             // This is called to get the optional user message, flags, etc (null if none of that).
             void (*extras_func)(AssertWrapper &self, const void *data) = nullptr;
             const void *extras_data = nullptr;
-            // The user message (if any) is written here on failure.
+            // The user message (if any) is written here on failure or when
             std::optional<std::string> user_message;
 
             // This is only set on failure.
@@ -3356,10 +3359,13 @@ namespace ta_test
             // This can be overridden on failure, but not necessarily. Otherwise (and by defualt) points to the actual location.
             data::SourceLoc source_loc;
 
-          protected:
             // This is called to evaluate the user condition.
             void (*condition_func)(AssertWrapper &self, const void *data) = nullptr;
             const void *condition_data = nullptr;
+
+            // Evaluates the user message and other extra parameters, if any.
+            // Repeated calls hae no effect.
+            CFG_TA_API void EvaluateExtras();
 
           public:
             // Note the weird variable name, it helps with our macro syntax that adds optional messages.

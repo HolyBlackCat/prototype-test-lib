@@ -154,9 +154,7 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    User message must not be evaluated on success.
-
-    Try passing an rvalue to $[...] that has CopyForLazyStringConversion specialzied to true. It must not be moved by the `$[...]` itself.
+    Check how lazy objects are copied
 
     Challenge the parsing:
         strings, char literals, raw strings - all containing opening/closing brackets, whole $[...]
@@ -165,9 +163,7 @@ TA_CHECK:
 
     TA_CHECK( ($)[42] ), TA_CHECK( ( $ ) [42] ) - should work. $ must be grayed out, but not its enclosing `(`,`)`
 
-    Build error if $ is already expanded (nested in another macro)
-
-    Multiline user messages.
+    Runtime error if $ is already expanded (nested in another macro)
 
 --- TA_FAIL
     With and without the message.
@@ -179,6 +175,7 @@ TA_CHECK:
     Doesn't warn on nodiscard violation.
     Doesn't warn on `;` at the end.
     Multiline user message.
+    Outer TA_MUST_THROW must still show the message.
     Don't evaluate the user message on success
     Opening two same context frames deduplicates them.
     When doing a oneliner: `TA_MUST_THROW(...).Check...()`, make sure that the frame guard from the macro doesn't extend into the check.

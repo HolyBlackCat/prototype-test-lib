@@ -2586,10 +2586,10 @@ TA_TEST( ta_check/context )
 {
     // One assertion failing inside another's `$[...]`.
     MustCompileAndThen(common_program_prefix + R"(
-bool foo() {TA_CHECK(false)(ta_test::soft); return true;}
+bool foo() {TA_CHECK(false)(ta_test::soft, "inner"); return true;}
 TA_TEST(blah)
 {
-    TA_CHECK( $[true] && $[foo()] && $[true] );
+    TA_CHECK( $[true] && $[foo()] && $[true] )("outer");
 }
 )").FailWithExactOutput("", R"(
 Running tests...
@@ -2599,12 +2599,12 @@ dir/subdir/file.cpp:6:
 TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 dir/subdir/file.cpp:5:
-Assertion failed:
+Assertion failed: inner
 
     TA_CHECK( false )
 
 dir/subdir/file.cpp:8:
-While checking assertion:
+While checking assertion: outer
                           in here
                           ╭─────╮
     TA_CHECK( $[true] && $[foo()] && $[true] )
@@ -2626,10 +2626,10 @@ FAILED           1         1
 
     // One assertion failing inside another's `$[...]` (nested);
     MustCompileAndThen(common_program_prefix + R"(
-bool foo() {TA_CHECK(false)(ta_test::soft); return true;}
+bool foo() {TA_CHECK(false)(ta_test::soft, "inner"); return true;}
 TA_TEST(blah)
 {
-    TA_CHECK( $[$[true] && $[foo()]] && $[true] );
+    TA_CHECK( $[$[true] && $[foo()]] && $[true] )("outer");
 }
 )").FailWithExactOutput("", R"(
 Running tests...
@@ -2639,12 +2639,12 @@ dir/subdir/file.cpp:6:
 TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 dir/subdir/file.cpp:5:
-Assertion failed:
+Assertion failed: inner
 
     TA_CHECK( false )
 
 dir/subdir/file.cpp:8:
-While checking assertion:
+While checking assertion: outer
                             in here
                             ╭─────╮
     TA_CHECK( $[$[true] && $[foo()]] && $[true] )
@@ -2666,10 +2666,10 @@ FAILED           1         1
 
     // One assertion failing inside another, but outside of `$[...]`;
     MustCompileAndThen(common_program_prefix + R"(
-bool foo() {TA_CHECK(false)(ta_test::soft); return true;}
+bool foo() {TA_CHECK(false)(ta_test::soft, "inner"); return true;}
 TA_TEST(blah)
 {
-    TA_CHECK( $[true] && foo() && $[true] );
+    TA_CHECK( $[true] && foo() && $[true] )("outer");
 }
 )").FailWithExactOutput("", R"(
 Running tests...
@@ -2679,12 +2679,12 @@ dir/subdir/file.cpp:6:
 TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 dir/subdir/file.cpp:5:
-Assertion failed:
+Assertion failed: inner
 
     TA_CHECK( false )
 
 dir/subdir/file.cpp:8:
-While checking assertion:
+While checking assertion: outer
 
     TA_CHECK( $[true] && foo() && $[true] )
                  │
@@ -2764,7 +2764,7 @@ PASSED           1         1
 TA_TEST(blah)
 {
     std::cout << "a\n";
-    TA_CHECK( ( throw std::runtime_error("Message!"), false ) );
+    TA_CHECK( ( throw std::runtime_error("Message!"), false ) )("message");
     std::cout << "b\n";
 }
 )").FailWithExactOutput("", R"(
@@ -2780,7 +2780,7 @@ Uncaught exception:
         "Message!"
 
 dir/subdir/file.cpp:9:
-While checking assertion:
+While checking assertion: message
 
     TA_CHECK( ( throw std::runtime_error("Message!"), false ) )
 
@@ -3126,6 +3126,41 @@ FAILED           1         2
 
 TA_TEST( ta_check/misc )
 {
+    // Deep argument nesting.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    TA_CHECK( $[$[1] + $[$[10] + $[100]]] == $[$[1000]] );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:7:
+Assertion failed:
+
+    TA_CHECK( $[$[1] + $[$[10] + $[100]]] == $[$[1000]] )
+               │  │     │  │        │  ││     │   │   │
+               │  1     │  10      100 ││     │  1000 │
+               │        ╰──────┬───────╯│     ╰───┬───╯
+               │              110       │        1000
+               ╰───────────┬────────────╯
+                          111
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
     // Comma in condition = compilation error.
     MustNotCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true, true);}");
 
@@ -3251,6 +3286,14 @@ FAILED           1         1
     // The message must not be evaluated on success.
     MustCompileAndThen(common_program_prefix + "TA_TEST(blah) {TA_CHECK(true)(\"x = {}\", (std::exit(1), 42));}")
         .Run();
+
+    // Arguments are not moved into the `$[...]`, but their value category is preserved.
+    MustCompileAndThen(common_program_prefix + R"(
+bool foo(std::string &&x) {return !x.empty();}
+// Long string to avoid SSO. `std::string` because we copy those into the `$[...]`.
+TA_TEST(blah) {TA_CHECK(foo($[std::string("1234567890123456789012345678901234567890123456789012345678901234567890")]));}
+)")
+    .Run();
 }
 
 

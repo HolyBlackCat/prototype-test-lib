@@ -1924,17 +1924,8 @@ bool ta_test::detail::AssertWrapper::Evaluator::operator~()
     }
 
     // Evaluate the message and other stuff if the condition is false or on an exception.
-    if (self.extras_func && (!self.condition_value_known || !self.condition_value))
-    {
-        try
-        {
-            self.extras_func(self, self.extras_data);
-        }
-        catch (...)
-        {
-            self.user_message = "[uncaught exception while evaluating the message]";
-        }
-    }
+    if (!self.condition_value_known || !self.condition_value)
+        self.EvaluateExtras();
 
     // Fail if the condition is false.
     if (self.condition_value_known && !self.condition_value)
@@ -1967,6 +1958,23 @@ bool ta_test::detail::AssertWrapper::Evaluator::operator~()
     return self.condition_value_known && self.condition_value;
 }
 
+void ta_test::detail::AssertWrapper::EvaluateExtras()
+{
+    if (extras_func)
+    {
+        try
+        {
+            extras_func(*this, extras_data);
+        }
+        catch (...)
+        {
+            user_message = "[uncaught exception while evaluating the message]";
+        }
+
+        extras_func = nullptr;
+    }
+}
+
 ta_test::detail::AssertWrapper::AssertWrapper(std::string_view name, data::SourceLoc loc, void (*breakpoint_func)())
 {
     macro_name = name;
@@ -1981,6 +1989,8 @@ const ta_test::data::SourceLoc &ta_test::detail::AssertWrapper::SourceLocation()
 
 std::optional<std::string_view> ta_test::detail::AssertWrapper::UserMessage() const
 {
+    const_cast<AssertWrapper &>(*this).EvaluateExtras();
+
     if (user_message)
         return *user_message;
     else
