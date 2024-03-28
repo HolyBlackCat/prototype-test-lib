@@ -244,6 +244,14 @@ struct CodeRunner
             std::cout << "Running executable: " << command << '\n';
         int status = std::system(command.c_str());
 
+        #ifndef _WIN32
+        // Remove junk from the status, keep only the exit code.
+        if (WIFEXITED(status))
+            status = WEXITSTATUS(status);
+        else
+            status = -1;
+        #endif
+
         if (output)
             *output = ReadFile(output_file);
 
@@ -275,7 +283,7 @@ struct CodeRunner
     {
         std::string output;
         if (error_code)
-            TA_CHECK( $[RunLow(flags, &output)] != $[*error_code] );
+            TA_CHECK( $[RunLow(flags, &output)] == $[*error_code] );
         else
             TA_CHECK( RunLow(flags, &output) != 0 );
         CheckStringEquality(output, expected_output);
@@ -1896,7 +1904,7 @@ PASSED           1         0
 )")
     // Enable only one test that's disabled by default - fails without `--force-enable`.
     .FailWithExactOutput("-ia/foo/car", R"(Flag `--include a/foo/car` didn't match any tests.
-)", int(ta_test::ExitCode::bad_command_line_arguments))
+)", int(ta_test::ExitCode::no_test_name_match))
     // Enable only one test that's disabled by default - force.
     .RunWithExactOutput("-Ia/foo/car", R"(Skipping 5 tests, will run 1/6 tests.
 
@@ -1929,7 +1937,7 @@ PASSED           3         0
 
 )")
     // Disable one test that's already disabled by default.
-    .FailWithExactOutput("-ea/foo/car", "Flag `--exclude a/foo/car` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-ea/foo/car", "Flag `--exclude a/foo/car` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
 
     // Disable all tests. Short flag + no space.
     .FailWithExactOutput("-e\".*\"", R"(Skipping 6 tests, will run 0/6 tests.
@@ -1962,24 +1970,24 @@ SKIPPED          6
 
     // Bad flag forms:
     // --- Short + equals.
-    .FailWithExactOutput("-e=\".*\"", "Flag `--exclude =.*` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-e=\".*\"", "Flag `--exclude =.*` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
     // --- Long + no space.
     .FailWithExactOutput("--exclude\".*\"", "Unknown flag `--exclude.*`, run with `--help` for usage.\n", int(ta_test::ExitCode::bad_command_line_arguments))
 
     // Empty flags match nothing.
-    .FailWithExactOutput("-i \"\"", "Flag `--include ` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
-    .FailWithExactOutput("-I \"\"", "Flag `--force-include ` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
-    .FailWithExactOutput("-e \"\"", "Flag `--exclude ` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-i \"\"", "Flag `--include ` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
+    .FailWithExactOutput("-I \"\"", "Flag `--force-include ` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
+    .FailWithExactOutput("-e \"\"", "Flag `--exclude ` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
 
     // Unknown test names
-    .FailWithExactOutput("-i meow", "Flag `--include meow` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
-    .FailWithExactOutput("-I meow", "Flag `--force-include meow` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
-    .FailWithExactOutput("-e meow", "Flag `--exclude meow` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
-    .FailWithExactOutput("-i /", "Flag `--include /` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
-    .FailWithExactOutput("-i /a/foo", "Flag `--include /a/foo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments)) // No leading `/`.
-    .FailWithExactOutput("-i a/fo", "Flag `--include a/fo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments)) // Prefix can only end at `/`.
-    .FailWithExactOutput("-i a/fo/", "Flag `--include a/fo/` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments)) // Prefix can only end at `/`, and a trailing `/` doesn't help.
-    .FailWithExactOutput("-i a/foo/bar/", "Flag `--include a/foo/bar/` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments)) // Only groups can match when regex ends with `/`.
+    .FailWithExactOutput("-i meow", "Flag `--include meow` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
+    .FailWithExactOutput("-I meow", "Flag `--force-include meow` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
+    .FailWithExactOutput("-e meow", "Flag `--exclude meow` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
+    .FailWithExactOutput("-i /", "Flag `--include /` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
+    .FailWithExactOutput("-i /a/foo", "Flag `--include /a/foo` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match)) // No leading `/`.
+    .FailWithExactOutput("-i a/fo", "Flag `--include a/fo` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match)) // Prefix can only end at `/`.
+    .FailWithExactOutput("-i a/fo/", "Flag `--include a/fo/` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match)) // Prefix can only end at `/`, and a trailing `/` doesn't help.
+    .FailWithExactOutput("-i a/foo/bar/", "Flag `--include a/foo/bar/` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match)) // Only groups can match when regex ends with `/`.
 
     // Include group.
     .RunWithExactOutput("-i a", R"(Skipping 3 tests, will run 3/6 tests.
@@ -2061,9 +2069,9 @@ PASSED           2         0
 )")
 
     // Redundant flags
-    .FailWithExactOutput("-ia -ia/foo", "Flag `--include a/foo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
-    .FailWithExactOutput("-Ia -Ia/foo", "Flag `--force-include a/foo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
-    .FailWithExactOutput("-ea -ea/foo", "Flag `--exclude a/foo` didn't match any tests.\n", int(ta_test::ExitCode::bad_command_line_arguments))
+    .FailWithExactOutput("-ia -ia/foo", "Flag `--include a/foo` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
+    .FailWithExactOutput("-Ia -Ia/foo", "Flag `--force-include a/foo` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
+    .FailWithExactOutput("-ea -ea/foo", "Flag `--exclude a/foo` didn't match any tests.\n", int(ta_test::ExitCode::no_test_name_match))
     ;
 }
 
@@ -3126,40 +3134,17 @@ FAILED           1         2
 
 TA_TEST( ta_check/misc )
 {
-    // Deep argument nesting.
+    // Uncalled `$` = silent lack of error.
     MustCompileAndThen(common_program_prefix + R"(
-TA_TEST(blah)
+TA_TEST( blah )
 {
-    TA_CHECK( $[$[1] + $[$[10] + $[100]]] == $[$[1000]] );
+    TA_CHECK( ( void($), $[42], void($), $[0] ) );
 }
-)").FailWithExactOutput("", R"(
-Running tests...
-1/1 │  ● blah
+)").FailWithExactOutput("", "ta_test: Error: `$` not followed by `[...]`.\n");
 
-dir/subdir/file.cpp:5:
-TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-dir/subdir/file.cpp:7:
-Assertion failed:
-
-    TA_CHECK( $[$[1] + $[$[10] + $[100]]] == $[$[1000]] )
-               │  │     │  │        │  ││     │   │   │
-               │  1     │  10      100 ││     │  1000 │
-               │        ╰──────┬───────╯│     ╰───┬───╯
-               │              110       │        1000
-               ╰───────────┬────────────╯
-                          111
-
-────────────────────────────────────────────────────────────────────────────────────────────────────
-
-FOLLOWING TESTS FAILED:
-
-● blah      │ dir/subdir/file.cpp:5
-
-             Tests    Checks
-FAILED           1         1
-
-)");
+    // Already expanded argument = runtime error.
+    MustCompileAndThen(common_program_prefix + "#define FOO(...) TA_CHECK(__VA_ARGS__)\nTA_TEST(blah) {FOO($[42] == 42);}")
+        .FailWithExactOutput("", "ta_test: Error: Invalid assertion macro usage. When passing `$[...]`, the `TA_CHECK` macro must not be wrapped in another function-like macro. Wrap `DETAIL_TA_CHECK` directly instead.\n");
 
     // Comma in condition = compilation error.
     MustNotCompile(common_program_prefix + "TA_TEST(foo) {TA_CHECK(true, true);}");
@@ -3369,6 +3354,89 @@ FAILED           1         1
 )");
 }
 
+TA_TEST( ta_check/parsing_challenges )
+{
+    // Deep argument nesting.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    TA_CHECK( $[$[1] + $[$[10] + $[100]]] == $[$[1000]] );
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:7:
+Assertion failed:
+
+    TA_CHECK( $[$[1] + $[$[10] + $[100]]] == $[$[1000]] )
+               │  │     │  │        │  ││     │   │   │
+               │  1     │  10      100 ││     │  1000 │
+               │        ╰──────┬───────╯│     ╰───┬───╯
+               │              110       │        1000
+               ╰───────────┬────────────╯
+                          111
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         1
+
+)");
+
+    // Ignore arguments in strings.
+    // We're not testing `_ta_assert._ta_arg_(1)[1]` in strings, because those
+    //   trip our double macro expansion checks (which is ok, the simple check is good for runtime performance).
+    MustCompileAndThen(common_program_prefix + R"blah(
+TA_TEST(blah)
+{
+    TA_CHECK( " \" $[42]" && R"foo( )" $[42] )foo" && $[']'] && $[false] );
+}
+)blah").FailWithExactOutput("", R"blah(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:7:
+Assertion failed:
+
+    TA_CHECK( " \" $[42]" && R"foo( )" $[42] )foo" && $[']'] && $[false] )
+                                                       ╰─┬─╯        │
+                                                        ']'       false
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         1
+
+)blah");
+
+    // Wrapping `$` in `(...)`.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    TA_CHECK( $ [ 42 ] == 0 )(ta_test::soft);
+    TA_CHECK( ($)[42] == 0 )(ta_test::soft);
+    TA_CHECK( ( $ ) [ 42 ] == 0 )(ta_test::soft);
+    TA_CHECK( (((($)) ))[ 42] == 0 )(ta_test::soft);
+}
+)").FailWithExactOutput("--color", ReadFile("test_output/parenthesized_dollar.txt"));
+}
+
+// #error you have one failing assertion (in ta_test/include_exclude - already active right now)
 
 int main(int argc, char **argv)
 {

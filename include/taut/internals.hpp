@@ -205,11 +205,11 @@ namespace ta_test
         {
             enabled,
             disabled,
-            disabled_with_flag, // The test is disabled in the source code with the `disabled` flag.
+            disabled_in_source, // The test is disabled in the source code with the `disabled` flag.
         };
 
         // Whether the test should run.
-        // This is called once for every test, with `state` initially set to `enabled` (or `disabled_with_flag` is the test has the `disabled` flag).
+        // This is called once for every test, with `state` initially set to `enabled` (or `disabled_in_source` is the test has the `disabled` flag).
         // If `state` ends up as `enabled`, the test will run.
         virtual void OnFilterTest(const data::BasicTest &test, TestFilterState &state) noexcept {(void)test; (void)state;}
 

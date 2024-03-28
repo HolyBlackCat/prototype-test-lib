@@ -701,8 +701,8 @@ namespace ta_test
     enum class ExitCode
     {
         ok = 0,
+        no_tests_to_run = 0, // There are no tests to run. It's moot if this should be an error, currently it's not.
         test_failed = 1, // One or more tests failed.
-        no_tests_to_run = 2, // There are no tests to run. It's moot if this should be an error, but I believe it should.
         bad_command_line_arguments = 3, // A generic issue with command line arguments.
         no_test_name_match = 4, // `--include` or `--exclude` didn't match any tests.
     };

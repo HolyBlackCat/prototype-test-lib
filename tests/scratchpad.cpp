@@ -154,14 +154,7 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 TA_CHECK:
-    Challenge the parsing:
-        strings, char literals, raw strings - all containing opening/closing brackets, whole $[...]
-
-    TA_CHECK( $ [ 42 ] ) - spaces must work
-
-    TA_CHECK( ($)[42] ), TA_CHECK( ( $ ) [42] ) - should work. $ must be grayed out, but not its enclosing `(`,`)`
-
-    Runtime error if $ is already expanded (nested in another macro)
+    Runtime error if $ is already expanded (nested in another macro) - did we already do this?
 
 --- TA_FAIL
     With and without the message.

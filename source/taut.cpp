@@ -1687,7 +1687,7 @@ ta_test::detail::AssertionExprStaticInfoImpl::AssertionExprStaticInfoImpl(std::s
     {
         HardError(
             "Invalid assertion macro usage. When passing `$[...]`, "
-            "the assertion macro must not be wrapped in another macro. Wrap `DETAIL_TA_CHECK(...)` directly instead.",
+            "the `TA_CHECK` macro must not be wrapped in another function-like macro. Wrap `DETAIL_TA_CHECK` directly instead.",
             HardErrorKind::user
         );
     }
@@ -1719,7 +1719,7 @@ ta_test::detail::AssertionExprStaticInfoImpl::AssertionExprStaticInfoImpl(std::s
             return;
 
         if (pos >= num_args)
-            HardError("More `$[...]`s than expected.");
+            HardError("`$` not followed by `[...]`.", HardErrorKind::user);
 
         ArgInfo &new_info = args_info[pos];
 
@@ -2640,7 +2640,7 @@ int ta_test::Runner::Run()
 
         for (std::size_t i = 0; i < state.tests.size(); i++)
         {
-            BasicModule::TestFilterState filter_state = bool(state.tests[i]->Flags() & TestFlags::disabled) ? BasicModule::TestFilterState::disabled_with_flag : BasicModule::TestFilterState::enabled;
+            BasicModule::TestFilterState filter_state = bool(state.tests[i]->Flags() & TestFlags::disabled) ? BasicModule::TestFilterState::disabled_in_source : BasicModule::TestFilterState::enabled;
             module_lists.Call<&BasicModule::OnFilterTest>(*state.tests[i], filter_state);
             if (filter_state == BasicModule::TestFilterState::enabled)
                 ordered_tests.push_back(i);
@@ -3026,7 +3026,7 @@ void ta_test::modules::TestSelector::OnFilterTest(const data::BasicTest &test, T
         if (pattern.exclude == (state != TestFilterState::enabled))
             continue; // Already enabled or disabled.
 
-        if (!pattern.exclude && state == TestFilterState::disabled_with_flag && !pattern.force)
+        if (!pattern.exclude && state == TestFilterState::disabled_in_source && !pattern.force)
             continue; // Non-force include can't enable tests that were disabled with the `disabled` flag.
 
         if (ta_test::text::regex::TestNameMatchesRegex(test.Name(), pattern.regex))
