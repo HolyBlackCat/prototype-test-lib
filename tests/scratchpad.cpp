@@ -153,12 +153,6 @@ Big-ass test
 TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
-TA_CHECK:
-    Runtime error if $ is already expanded (nested in another macro) - did we already do this?
-
---- TA_FAIL
-    With and without the message.
-
 --- TA_MUST_THROW:
     local variable capture actually works, and the values are correct
     Doesn't warn on unused value.
