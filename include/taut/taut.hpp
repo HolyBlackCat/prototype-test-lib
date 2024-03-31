@@ -4588,7 +4588,7 @@ namespace ta_test
         class MustThrowWrapper
         {
             // `final` removes the Clang warning about a non-virtual destructor.
-            struct Info final : data::MustThrowDynamicInfo
+            struct CFG_TA_API_CLASS Info final : data::MustThrowDynamicInfo
             {
                 MustThrowWrapper &self;
 
@@ -4614,8 +4614,8 @@ namespace ta_test
             // Call to trigger a breakpoint at the macro call site.
             void (*break_func)() = nullptr;
 
-            // This is called to get the optional user message (null if no message).
-            std::string (*extras_func)(MustThrowWrapper &self, const void *data) = nullptr;
+            // This is called to get the optional user message and flags (null if have none).
+            void (*extras_func)(MustThrowWrapper &self, const void *data) = nullptr;
             const void *extras_data = nullptr;
             // The user message.
             std::optional<std::string> user_message;
@@ -4699,7 +4699,7 @@ namespace ta_test
             {
                 static const data::MustThrowStaticInfo info = []{
                     data::MustThrowStaticInfo ret;
-                    ret.loc = {.file = File.view(), .line = Line};
+                    ret.loc = {File.view(), Line};
                     ret.macro_name = MacroName.view();
                     ret.expr = Expr.view();
                     return ret;
@@ -4716,7 +4716,6 @@ namespace ta_test
             {
                 extras_func = [](MustThrowWrapper &self, const void *data)
                 {
-                    std::string ret;
                     (*static_cast<const F *>(data))(meta::Overload{
                         [&]<typename ...P>(AssertFlags flags)
                         {
@@ -4724,15 +4723,14 @@ namespace ta_test
                         },
                         [&]<typename ...P>(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
                         {
-                            ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                            self.user_message = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
                         },
                         [&]<typename ...P>(AssertFlags flags, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
                         {
                             self.flags = flags; // Do this first, in case message formatting throws.
-                            ret = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
+                            self.user_message = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
                         },
                     });
-                    return ret;
                 };
                 extras_data = &func;
                 return DETAIL_TA_ADD_EXTRAS;

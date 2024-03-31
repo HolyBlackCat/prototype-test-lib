@@ -6,7 +6,6 @@
 
 #include <taut/taut.hpp>
 
-// Test invalid regexes in --include.
 // Destroy `Trace`. What to replace it with?
 
 TA_TEST(foo/test)
@@ -25,9 +24,9 @@ int main(int argc, char **argv)
 
 // Add a flag to change the output stream. How do I name it?
 
-// Investigate forceinline + artificial for things that must not be debugged.
+// Support namespaces as test groups?
 
-// SourceLoc must be constructible from source_location
+// Investigate forceinline + artificial for things that must not be debugged.
 
 // Support all three big compilers!
 //     Check that on Windows, tests find libfmt from vcpkg (on MSVC)
@@ -158,7 +157,6 @@ TA_TEST
     Doesn't warn on unused value.
     Doesn't warn on unused [[nodiscard]] value??? (if possible at all)
     Doesn't warn on nodiscard violation.
-    Doesn't warn on `;` at the end.
     Multiline user message.
     Outer TA_MUST_THROW must still show the message.
     Don't evaluate the user message on success
@@ -175,9 +173,6 @@ TA_TEST
         We must check all this due to the weird way TA_MUST_THROW is written.
         Make sure the stacks are printed correctly, including the function argments.
 
-    Hard and soft flags
-        also check how they are printed on failures.
-
     Checking unknown exceptions. All functions must fail.
 
     Specifying wrong index for ANY function (or MakeContextGuard()) fails the test
@@ -189,8 +184,6 @@ TA_TEST
         MakeContextGuard for it should be a no-op
 
     Moved-from CaughtException should fail all checks.
-
-    Multiline user messages.
 
 --- TA_LOG
     \n suffix is silently stripped, but at most once.

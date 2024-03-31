@@ -2335,18 +2335,18 @@ FAILED           2         4
 TA_TEST( ta_check/overloads )
 {
     MustCompileAndThen(common_program_prefix + R"(
-TA_TEST(1) {TA_CHECK(false)("Msg!");}     // message
-TA_TEST(2) {TA_CHECK(false)("x={}", 42);} // message with formatting
-TA_TEST(3) {TA_CHECK(false)(ta_test::hard);}             // flags
-TA_TEST(4) {TA_CHECK(false)(ta_test::hard, "Msg!");}     // flags, message
-TA_TEST(5) {TA_CHECK(false)(ta_test::hard, "x={}", 42);} // flags, message with formatting
-TA_TEST(6) {TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42));}             // flags, location
-TA_TEST(7) {TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "Msg!");}     // flags, location, message
-TA_TEST(8) {TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "x={}", 42);} // flags, location, message with formatting
+TA_TEST(1) {            TA_CHECK(false)("Msg!");}     // message
+TA_TEST(2) {int x = 42; TA_CHECK(false)("x={}", x);} // message with formatting
+TA_TEST(3) {            TA_CHECK(false)(ta_test::hard);}             // flags
+TA_TEST(4) {            TA_CHECK(false)(ta_test::hard, "Msg!");}     // flags, message
+TA_TEST(5) {int x = 42; TA_CHECK(false)(ta_test::hard, "x={}", x);} // flags, message with formatting
+TA_TEST(6) {            TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42));}             // flags, location
+TA_TEST(7) {            TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "Msg!");}     // flags, location, message
+TA_TEST(8) {int x = 42; TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "x={}", x);} // flags, location, message with formatting
 #if __cpp_lib_source_location
-TA_TEST(9) {TA_CHECK(false)(ta_test::hard, std::source_location::current());}              // flags, location
-TA_TEST(10) {TA_CHECK(false)(ta_test::hard, std::source_location::current(), "Msg!");}     // flags, location, message
-TA_TEST(11) {TA_CHECK(false)(ta_test::hard, std::source_location::current(), "x={}", 42);} // flags, location, message with formatting
+TA_TEST(9) {             TA_CHECK(false)(ta_test::hard, std::source_location::current());}              // flags, location
+TA_TEST(10) {            TA_CHECK(false)(ta_test::hard, std::source_location::current(), "Msg!");}     // flags, location, message
+TA_TEST(11) {int x = 42; TA_CHECK(false)(ta_test::hard, std::source_location::current(), "x={}", x);} // flags, location, message with formatting
 #endif
 )")
     .FailWithExactOutput("", R"(
@@ -3497,18 +3497,18 @@ FAILED           2         3
 TA_TEST( ta_fail/overloads )
 {
     MustCompileAndThen(common_program_prefix + R"(
-TA_TEST(1) {TA_FAIL("Msg!");}     // message
-TA_TEST(2) {TA_FAIL("x={}", 42);} // message with formatting
-TA_TEST(3) {TA_FAIL(ta_test::hard);}             // flags
-TA_TEST(4) {TA_FAIL(ta_test::hard, "Msg!");}     // flags, message
-TA_TEST(5) {TA_FAIL(ta_test::hard, "x={}", 42);} // flags, message with formatting
-TA_TEST(6) {TA_FAIL(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42));}             // flags, location
-TA_TEST(7) {TA_FAIL(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "Msg!");}     // flags, location, message
-TA_TEST(8) {TA_FAIL(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "x={}", 42);} // flags, location, message with formatting
+TA_TEST(1) {            TA_FAIL("Msg!");}     // message
+TA_TEST(2) {int x = 42; TA_FAIL("x={}", x);} // message with formatting
+TA_TEST(3) {            TA_FAIL(ta_test::hard);}             // flags
+TA_TEST(4) {            TA_FAIL(ta_test::hard, "Msg!");}     // flags, message
+TA_TEST(5) {int x = 42; TA_FAIL(ta_test::hard, "x={}", x);} // flags, message with formatting
+TA_TEST(6) {            TA_FAIL(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42));}             // flags, location
+TA_TEST(7) {            TA_FAIL(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "Msg!");}     // flags, location, message
+TA_TEST(8) {int x = 42; TA_FAIL(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "x={}", x);} // flags, location, message with formatting
 #if __cpp_lib_source_location
-TA_TEST(9) {TA_FAIL(ta_test::hard, std::source_location::current());}              // flags, location
-TA_TEST(10) {TA_FAIL(ta_test::hard, std::source_location::current(), "Msg!");}     // flags, location, message
-TA_TEST(11) {TA_FAIL(ta_test::hard, std::source_location::current(), "x={}", 42);} // flags, location, message with formatting
+TA_TEST(9) {             TA_FAIL(ta_test::hard, std::source_location::current());}              // flags, location
+TA_TEST(10) {            TA_FAIL(ta_test::hard, std::source_location::current(), "Msg!");}     // flags, location, message
+TA_TEST(11) {int x = 42; TA_FAIL(ta_test::hard, std::source_location::current(), "x={}", x);} // flags, location, message with formatting
 #endif
 )").FailWithExactOutput("", R"(
 Running tests...
@@ -3650,6 +3650,158 @@ FOLLOWING TESTS FAILED:
 FAILED          11        11
 
 )");
+
+    // No parameters in second `(...)` = build error.
+    MustNotCompile(common_program_prefix + "\nTA_TEST(1) {TA_FAIL();}");
+}
+
+TA_TEST( ta_must_throw/basic )
+{
+    // No exception.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+TA_TEST(blah)
+{
+    std::cout << "1\n";
+    TA_MUST_THROW( 42 );
+    std::cout << "2\n";
+}
+TA_TEST(bleh)
+{
+    std::cout << "3\n";
+    TA_MUST_THROW( 42 )(ta_test::soft);
+    std::cout << "4\n";
+    TA_MUST_THROW( 42 )(ta_test::hard);
+    std::cout << "5\n";
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/2 │  ● blah
+1
+
+dir/subdir/file.cpp:6:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:9:
+Expected exception:
+
+    TA_MUST_THROW( 42 )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+2/2 [1] │  ● bleh
+3
+
+dir/subdir/file.cpp:12:
+TEST FAILED: bleh ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:15:
+Expected exception:
+
+    TA_MUST_THROW( 42 )
+
+4
+dir/subdir/file.cpp:17:
+Expected exception:
+
+    TA_MUST_THROW( 42 )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:6
+● bleh      │ dir/subdir/file.cpp:12
+
+             Tests    Checks
+FAILED           2         3
+
+)");
+
+    // Successfully catching an exception.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    TA_MUST_THROW( throw 42 );
+}
+TA_TEST(bleh)
+{
+    TA_MUST_THROW( throw 42; );
+}
+TA_TEST(bluh)
+{
+    TA_MUST_THROW( int x = 42; throw x; );
+}
+)").RunWithExactOutput("", R"(
+Running tests...
+1/3 │  ● blah
+2/3 │  ● bleh
+3/3 │  ● bluh
+
+             Tests    Checks
+PASSED           3         3
+
+)");
+}
+
+TA_TEST( ta_must_throw/overloads )
+{
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    int x = 42;
+    TA_MUST_THROW( 42 )(ta_test::soft);
+    TA_MUST_THROW( 42 )(ta_test::soft, "Msg!");
+    TA_MUST_THROW( 42 )(ta_test::soft, "x={}", x);
+    try { TA_MUST_THROW( 42 )("Msg!"); } catch (...) {}
+    try { TA_MUST_THROW( 42 )("x={}", x); } catch (...) {}
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:8:
+Expected exception:
+
+    TA_MUST_THROW( 42 )
+
+dir/subdir/file.cpp:9:
+Expected exception: Msg!
+
+    TA_MUST_THROW( 42 )
+
+dir/subdir/file.cpp:10:
+Expected exception: x=42
+
+    TA_MUST_THROW( 42 )
+
+dir/subdir/file.cpp:11:
+Expected exception: Msg!
+
+    TA_MUST_THROW( 42 )
+
+dir/subdir/file.cpp:12:
+Expected exception: x=42
+
+    TA_MUST_THROW( 42 )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         5
+
+)");
+
+    // No parameters in second `(...)` = build error.
+    MustNotCompile(common_program_prefix + "\nTA_TEST(1) {TA_MUST_THROW(throw 42)();}");
 }
 
 // #error you have one failing assertion (in ta_test/include_exclude - already active right now)
