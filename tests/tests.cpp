@@ -3804,7 +3804,18 @@ FAILED           1         5
     MustNotCompile(common_program_prefix + "\nTA_TEST(1) {TA_MUST_THROW(throw 42)();}");
 }
 
-// #error you have one failing assertion (in ta_test/include_exclude - already active right now)
+TA_TEST( ta_must_throw/nodiscard )
+{
+    // Make sure there's no `[[nodiscard]]` warning in `TA_MUST_THROW`. (`MustCompile` builds with `-Werror`.)
+    MustCompile(common_program_prefix + R"(
+[[nodiscard]] bool foo() {return true;}
+TA_TEST(blah)
+{
+    TA_MUST_THROW(foo());
+    TA_MUST_THROW(foo(); foo(););
+}
+)");
+}
 
 int main(int argc, char **argv)
 {

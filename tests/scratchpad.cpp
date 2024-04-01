@@ -155,8 +155,6 @@ TA_TEST
 --- TA_MUST_THROW:
     local variable capture actually works, and the values are correct
     Doesn't warn on unused value.
-    Doesn't warn on unused [[nodiscard]] value??? (if possible at all)
-    Doesn't warn on nodiscard violation.
     Multiline user message.
     Outer TA_MUST_THROW must still show the message.
     Don't evaluate the user message on success
