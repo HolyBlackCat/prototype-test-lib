@@ -3337,6 +3337,7 @@ bool ta_test::modules::GeneratorOverrider::OnRegisterGeneratorOverride(const dat
                 test_state->active_flags.push_back({
                     .entry = &entry,
                     .remaining_program = entry.seq.entries,
+                    .elems = {},
                 });
             }
         }
@@ -5304,10 +5305,28 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
     {
         if (auto message = dynamic_info->UserMessage())
         {
-            terminal.Print(cur_style, " {}{}",
-                common_data.style_user_message,
-                *message
-            );
+            std::size_t gap = 0;
+            bool first = true;
+            text::chars::Split(*message, '\n', [&](std::string_view segment, bool last)
+            {
+                if (first)
+                {
+                    first = false;
+
+                    if (!last)
+                        gap = text::chars::NumUtf8Chars(*error_message) + 1;
+
+                    terminal.Print(cur_style, " {}{}",
+                        common_data.style_user_message,
+                        segment
+                    );
+                }
+                else
+                {
+                    terminal.Print(cur_style, "\n{:{}}{}", "", gap, segment);
+                }
+                return false;
+            });
         }
     }
     terminal.Print("\n\n");

@@ -153,9 +153,6 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 --- TA_MUST_THROW:
-    local variable capture actually works, and the values are correct
-    Doesn't warn on unused value.
-    Multiline user message.
     Outer TA_MUST_THROW must still show the message.
     Don't evaluate the user message on success
     Opening two same context frames deduplicates them.

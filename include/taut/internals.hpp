@@ -393,7 +393,7 @@ namespace ta_test
             inline constexpr std::string_view generator_override_separators = ",&(";
 
             // Splits the string at a separator.
-            // `func` is `(std::string_view segment, bool final) -> bool`.
+            // `func` is `(std::string_view segment, bool last) -> bool`.
             // If it returns true, the function stops and also returns true.
             template <typename F>
             constexpr bool Split(std::string_view str, char separator, F &&func)

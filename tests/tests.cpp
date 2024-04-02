@@ -3723,7 +3723,8 @@ FAILED           2         3
     MustCompileAndThen(common_program_prefix + R"(
 TA_TEST(blah)
 {
-    TA_MUST_THROW( throw 42 );
+    int x = 42;
+    TA_MUST_THROW( throw x );
 }
 TA_TEST(bleh)
 {
@@ -3814,6 +3815,37 @@ TA_TEST(blah)
     TA_MUST_THROW(foo());
     TA_MUST_THROW(foo(); foo(););
 }
+)");
+}
+
+TA_TEST( ta_must_throw/context )
+{
+    // A multiline user message.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah) {TA_MUST_THROW(42)("foo\nbar\ncarrrr");}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:5:
+Expected exception: foo
+                    bar
+                    carrrr
+
+    TA_MUST_THROW( 42 )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         1
+
 )");
 }
 
