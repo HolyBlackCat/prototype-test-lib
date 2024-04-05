@@ -2745,6 +2745,103 @@ FAILED           1         1
 )");
 }
 
+TA_TEST( ta_check/nesting )
+{
+    // Failing hard assertion inside a hard assertion.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+bool foo()
+{
+    TA_CHECK( false );
+    std::cout << "### 2\n";
+    return true;
+}
+TA_TEST(blah)
+{
+    std::cout << "### 1\n";
+    TA_CHECK( foo() ); // This is not a hard error.
+    std::cout << "### 3\n";
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+### 1
+
+dir/subdir/file.cpp:12:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:8:
+Assertion failed:
+
+    TA_CHECK( false )
+
+dir/subdir/file.cpp:15:
+While checking assertion:
+
+    TA_CHECK( foo() )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:12
+
+             Tests    Checks
+Executed         1         2
+Passed           0         1
+FAILED           1         1
+
+)");
+
+    // Failing soft assertion inside a hard assertion.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+bool foo()
+{
+    TA_CHECK( false )(ta_test::soft);
+    std::cout << "### 2\n";
+    return true;
+}
+TA_TEST(blah)
+{
+    std::cout << "### 1\n";
+    TA_CHECK( foo() ); // This is not a hard error.
+    std::cout << "### 3\n";
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+### 1
+
+dir/subdir/file.cpp:12:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:8:
+Assertion failed:
+
+    TA_CHECK( false )
+
+dir/subdir/file.cpp:15:
+While checking assertion:
+
+    TA_CHECK( foo() )
+
+### 2
+### 3
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:12
+
+             Tests    Checks
+Executed         1         2
+Passed           0         1
+FAILED           1         1
+
+)");
+}
+
 TA_TEST( ta_check/exceptions )
 {
     // Throwing `ta_test::InterruptTestException` gracefully stops the test.
@@ -3744,6 +3841,34 @@ Running tests...
 PASSED           3         3
 
 )");
+
+    // A multiline user message.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah) {TA_MUST_THROW(42)("foo\nbar\ncarrrr");}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:5:
+Expected exception: foo
+                    bar
+                    carrrr
+
+    TA_MUST_THROW( 42 )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         1
+
+)");
 }
 
 TA_TEST( ta_must_throw/overloads )
@@ -3818,36 +3943,135 @@ TA_TEST(blah)
 )");
 }
 
-TA_TEST( ta_must_throw/context )
+TA_TEST( ta_must_throw/nesting )
 {
-    // A multiline user message.
+    // Soft assertion fails in `TA_MUST_THROW`.
     MustCompileAndThen(common_program_prefix + R"(
-TA_TEST(blah) {TA_MUST_THROW(42)("foo\nbar\ncarrrr");}
+#include <iostream>
+void foo()
+{
+    std::cout << "### 2\n";
+    TA_CHECK(false)(ta_test::soft);
+    std::cout << "### 3\n";
+    throw 42;
+}
+TA_TEST(blah)
+{
+    std::cout << "### 1\n";
+    TA_MUST_THROW( foo() );
+    std::cout << "### 4\n";
+}
 )").FailWithExactOutput("", R"(
 Running tests...
 1/1 │  ● blah
+### 1
+### 2
 
-dir/subdir/file.cpp:5:
+dir/subdir/file.cpp:13:
 TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-dir/subdir/file.cpp:5:
-Expected exception: foo
-                    bar
-                    carrrr
+dir/subdir/file.cpp:9:
+Assertion failed:
 
-    TA_MUST_THROW( 42 )
+    TA_CHECK( false )
 
+dir/subdir/file.cpp:16:
+While expecting exception here:
+
+    TA_MUST_THROW( foo() )
+
+### 3
+### 4
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 FOLLOWING TESTS FAILED:
 
-● blah      │ dir/subdir/file.cpp:5
+● blah      │ dir/subdir/file.cpp:13
 
              Tests    Checks
+Executed         1         2
+Passed           0         1
+FAILED           1         1
+
+)");
+
+    // Hard assertion fails in `TA_MUST_THROW`.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+void foo()
+{
+    std::cout << "### 2\n";
+    TA_CHECK(false);
+    std::cout << "### 3\n";
+}
+TA_TEST(blah)
+{
+    std::cout << "### 1\n";
+    TA_MUST_THROW( foo() );
+    std::cout << "### 3\n";
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+### 1
+### 2
+
+dir/subdir/file.cpp:12:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:9:
+Assertion failed:
+
+    TA_CHECK( false )
+
+dir/subdir/file.cpp:15:
+While expecting exception here:
+
+    TA_MUST_THROW( foo() )
+
+### 3
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:12
+
+             Tests    Checks
+Executed         1         2
+Passed           0         1
 FAILED           1         1
 
 )");
 }
+
+#if 0
+TA_TEST( ta_must_throw/checks )
+{
+    std::string program = "\n" + common_program_prefix + R"(
+#include <iostream>
+TA_TEST(wrong_message/1)      { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessage("fo"); std::cout << "###\n"; }
+TA_TEST(wrong_message/2)      { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessage("fo."); std::cout << "###\n"; } // A regex would match.
+TA_TEST(wrong_message/3)      { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessage(0, "fo."); std::cout << "###\n"; } // A regex would match.
+TA_TEST(right_message)        { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessage("foo"); }
+TA_TEST(wrong_regex)          { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessageRegex("f."); std::cout << "###\n"; }
+TA_TEST(right_regex/1)        { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessageRegex("f.."); }
+TA_TEST(right_regex/2)        { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessageRegex(0, "f.."); }
+TA_TEST(right_exact_type/1)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckExactType<std::runtime_error>(); }
+TA_TEST(right_exact_type/2)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckExactType<std::runtime_error>(0); }
+TA_TEST(wrong_exact_type/1)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckExactType<std::exception>(); std::cout << "###\n"; }
+TA_TEST(wrong_exact_type/2)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckExactType<int>(); std::cout << "###\n"; }
+TA_TEST(right_derived_type/1) { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::runtime_error>(); }
+TA_TEST(right_derived_type/2) { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::runtime_error>(0); }
+TA_TEST(right_derived_type/3) { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::exception>(); }
+TA_TEST(right_derived_type/4) { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::exception>(0); }
+TA_TEST(wrong_derived_type)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::logic_error>(); std::cout << "###\n"; }
+TA_TEST(right_low_check)      { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckElemLow(0, [&](const ta_test::SingleException &) {return true;}, [&]{return "foo";}); }
+)";
+    MustCompileAndThen("#define FOO(x) x" + program).FailWithExactOutput("", "f");
+
+    #error this is blocked by the new scoping mechanism
+}
+#endif
 
 int main(int argc, char **argv)
 {
