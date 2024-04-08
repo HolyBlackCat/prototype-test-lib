@@ -1356,8 +1356,7 @@ namespace ta_test
 
         // Strings and characters.
         // `char`-based ones are supposed to be supported, but not all standard libraries have them yet. The other ones seem to not be supported at all.
-        // We just use our own formatter for everything, because it doesn't escape printable unicode characters.
-        //   Otherwise it should be mostly equivalent to the standard one.
+        // We just use our own formatter for everything, just for simplicity. They should be mostly equivalent to the standard one.
         // If you decide to replace all those with `DefaultFallbackToStringTraits`, be aware that the range formatter will try to pick up strings instead,
         //   probably should disable that somehow.
         // Also libstdc++ 13 has a broken non-SFINAE-friendly `formatter<const char *>::set_debug_string()`, which causes issues,
