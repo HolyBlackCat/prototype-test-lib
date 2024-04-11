@@ -188,7 +188,7 @@ TA_TEST
 --- TA_CONTEXT
     \n suffix is silently stripped, but at most once (check both lazy and non-lazy versions)
     Don't break if an argument in the non-lazy version throws.
-    What happens if the lazy version throws? We should probably gracefully stop the test.
+    What happens if the lazy version throws? We should probably gracefully stop the test. (or just print a placeholder?)
     Usable in fold expressions without parentheses.
     Error if it outlives the test.
     Lazy version should always re-evaluate to print the up-to-date variable values.

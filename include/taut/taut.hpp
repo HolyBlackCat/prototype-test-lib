@@ -313,7 +313,7 @@
 // Where:
 // * `message...` is a string literal, possibly followed by format arguments (as for `std::format`).
 // * `flags` is an instance of `ta_test::AssertFlags`. In particular, passing `ta_test::soft` disables throwing on failure.
-// * `source_loc` should rarely be used. It's an instance of `data::SourceLoc`,
+// * `source_loc` should rarely be used. It's an instance of `SourceLoc`,
 //     which lets you override the filename and line number that will be displayed in the error message.
 // More examples:
 //     TA_CHECK( $[x] == 42 )("Checking stuff!"); // Add a custom message.
@@ -362,15 +362,18 @@
 //     TA_LOG("Hello!");
 //     TA_LOG("x = {}", 42);
 // The trailing `\n`, if any, is ignored.
+// Can also accept `std::source_location` (or `ta_test::SourceLoc`) directly.
 #define TA_LOG DETAIL_TA_LOG
 // Creates a scoped log message. It's printed only if this line is in scope on test failure.
 // Unlike `TA_LOG()`, the message can be printed multiple times, if there are multiple failures in this scope.
 // The trailing `\n`, if any, is ignored.
+// Can also accept `std::source_location` (or `ta_test::SourceLoc`) directly. Then also prints the current function name (not the one in `source_location`).
 // The code calls this a "scoped log", and "context" means something else in the code.
 #define TA_CONTEXT DETAIL_TA_CONTEXT
 // Like `TA_CONTEXT`, but only evaluates the message when needed.
 // This means you need to make sure none of your variables dangle, and that they have sane values for the entire lifetime of this context.
 // Can evaluate the message more than once. You can utilize this to display the current variable values.
+// This version doesn't accept `std::source_location` (or `ta_test::SourceLoc`).
 #define TA_CONTEXT_LAZY DETAIL_TA_CONTEXT_LAZY
 
 // Repeats the test for all values in the range, which is either a braced list or a C++20 range.
@@ -528,9 +531,9 @@
     .DETAIL_TA_ADD_EXTRAS
 
 #define DETAIL_TA_LOG(...) \
-    ::ta_test::detail::AddLogEntry(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
+    ::ta_test::detail::AddLogEntry(__VA_ARGS__)
 #define DETAIL_TA_CONTEXT(...) \
-    ::ta_test::detail::ScopedLogGuard DETAIL_TA_CAT(_ta_context,__COUNTER__)(CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__))
+    ::ta_test::detail::ScopedLogGuard DETAIL_TA_CAT(_ta_context,__COUNTER__)(CFG_TA_THIS_FUNC_NAME, __VA_ARGS__)
 #define DETAIL_TA_CONTEXT_LAZY(...) \
     ::ta_test::detail::ScopedLogGuardLazy DETAIL_TA_CAT(_ta_context,__COUNTER__)([&]{return CFG_TA_FMT_NAMESPACE::format(__VA_ARGS__);})
 
@@ -763,7 +766,7 @@ namespace ta_test
 
     // Arguments of `TA_GENERATE_FUNC(...)` are passed to the constructor of this class.
     // You can pass an instance of this directly to `TA_GENERATE_FUNC(...)` too.
-    // You're expected to use CTAD with this. We go to lengths to ensure zero moves for the functor, which is we need.
+    // You're expected to use CTAD with this. We go to lengths to ensure zero moves for the functor, which we need e.g. for ranges.
     template <std::invocable<bool &> F, bool HasFlags>
     struct GenerateFuncParam
     {
@@ -790,6 +793,33 @@ namespace ta_test
     // Pass this to `TA_GENERATE_PARAM(...)` to expand the argument list from a single type.
     // See comments on that macro for details.
     inline constexpr ExpandTag expand;
+
+    // A simple source location.
+    // Not using `std::source_location` to allow custom arguments, and just in cast it's not available.
+    struct SourceLoc
+    {
+        std::string_view file;
+        int line = 0;
+
+        constexpr SourceLoc() {}
+        constexpr SourceLoc(std::string_view file, int line) : file(file), line(line) {}
+        #if __cpp_lib_source_location
+        SourceLoc(std::source_location loc) : file(loc.file_name()), line(int(loc.line())) {}
+        #endif
+
+        friend auto operator<=>(const SourceLoc &, const SourceLoc &) = default;
+    };
+    // A source location with a value of `__COUNTER__`.
+    struct SourceLocWithCounter : SourceLoc
+    {
+        int counter = 0;
+
+        constexpr SourceLocWithCounter() {}
+        constexpr SourceLocWithCounter(std::string_view file, int line, int counter) : SourceLoc(file, line), counter(counter) {}
+        constexpr SourceLocWithCounter(SourceLoc loc, int counter) : SourceLoc(loc), counter(counter) {}
+
+        friend auto operator<=>(const SourceLocWithCounter &, const SourceLocWithCounter &) = default;
+    };
 
     // Metaprogramming helpers.
     namespace meta
@@ -873,7 +903,7 @@ namespace ta_test
 
     namespace text
     {
-        // Character classification functions.
+        // Character manipulation.
         namespace chars
         {
             [[nodiscard]] constexpr bool IsWhitespace(char ch)
@@ -2328,11 +2358,9 @@ namespace ta_test
 
         // --- LOGS ---
 
-        // A single entry in the log, either scoped or unscoped.
-        class LogEntry
+        // A single text message in the log (either scoped or unscoped).
+        class LogMessage
         {
-            std::size_t incremental_id = 0;
-
             std::string message;
 
             std::string (*message_refresh_func)(const void *data) = nullptr;
@@ -2347,28 +2375,24 @@ namespace ta_test
           public:
             // The constructors are primarily for internal use.
 
-            LogEntry() {}
+            LogMessage() {}
 
             // A fixed message.
-            LogEntry(std::size_t incremental_id, std::string &&message)
-                : incremental_id(incremental_id), message(std::move(message))
+            LogMessage(std::string &&message)
+                : message(std::move(message))
             {
                 FixMessage();
             }
             // A generated message. Doesn't own the function.
             template <typename F>
-            LogEntry(std::size_t incremental_id, const F &generate_message)
+            LogMessage(const F &generate_message)
             requires requires{generate_message();}
-                : incremental_id(incremental_id),
-                message_refresh_func([](const void *data)
+                : message_refresh_func([](const void *data)
                 {
                     return (*static_cast<const F *>(data))();
                 }),
                 message_refresh_data(&generate_message)
             {}
-
-            // The incremental ID of the log entry.
-            [[nodiscard]] std::size_t IncrementalId() const {return incremental_id;}
 
             // This will be called automatically, you don't need to touch it (and can't, since it's non-const).
             // Regenerates the message using the stored function, if any.
@@ -2387,6 +2411,27 @@ namespace ta_test
             {
                 return message;
             }
+        };
+
+        // A single logged source location (unscoped).
+        struct LogSourceLocReached
+        {
+            SourceLoc loc;
+        };
+
+        // A single logged source location (scoped).
+        struct LogSourceLocContext
+        {
+            SourceLoc loc;
+            // The function name where the `TA_CONTEXT` call appears, regardless of what source location was passed to it.
+            std::string_view callee;
+        };
+
+        // A single log entry.
+        struct LogEntry
+        {
+            std::size_t incremental_id = 0;
+            std::variant<LogMessage, LogSourceLocReached, LogSourceLocContext> var;
         };
 
         // The current scoped log. The unscoped log sits in the `BasicModule::RunSingleTestResults`.
@@ -2422,32 +2467,6 @@ namespace ta_test
     // Various runtime data types. Should only be useful if you're writing custom modules.
     namespace data
     {
-        // A simple source location.
-        struct SourceLoc
-        {
-            std::string_view file;
-            int line = 0;
-
-            constexpr SourceLoc() {}
-            constexpr SourceLoc(std::string_view file, int line) : file(file), line(line) {}
-            #if __cpp_lib_source_location
-            SourceLoc(std::source_location loc) : file(loc.file_name()), line(int(loc.line())) {}
-            #endif
-
-            friend auto operator<=>(const SourceLoc &, const SourceLoc &) = default;
-        };
-        // A source location with a value of `__COUNTER__`.
-        struct SourceLocWithCounter : SourceLoc
-        {
-            int counter = 0;
-
-            constexpr SourceLocWithCounter() {}
-            constexpr SourceLocWithCounter(std::string_view file, int line, int counter) : SourceLoc(file, line), counter(counter) {}
-            constexpr SourceLocWithCounter(SourceLoc loc, int counter) : SourceLoc(loc), counter(counter) {}
-
-            friend auto operator<=>(const SourceLocWithCounter &, const SourceLocWithCounter &) = default;
-        };
-
         // A compile-time description of a single `TA_TEST(...)`.
         struct BasicTest
         {
@@ -2599,7 +2618,7 @@ namespace ta_test
         struct MustThrowStaticInfo
         {
             // The source location of `TA_MUST_THROW(...)`.
-            data::SourceLoc loc;
+            SourceLoc loc;
             // The macro name used, e.g. `TA_MUST_THROW`.
             std::string_view macro_name;
             // The spelling of the macro argument.
@@ -2647,7 +2666,7 @@ namespace ta_test
             // `state` can be null.
             // `active_elem` is either -1 or an index into `state->elems`.
             // `flags` affect how we check the correctness of `active_elem` (on soft failure a null instance is constructed).
-            CFG_TA_API CaughtExceptionContext(std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, data::SourceLoc source_loc);
+            CFG_TA_API CaughtExceptionContext(std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, SourceLoc source_loc);
         };
 
         // Describes a generator created with `TA_GENERATE(...)`.
@@ -2662,7 +2681,7 @@ namespace ta_test
             virtual ~BasicGenerator() = default;
 
             // The source location.
-            [[nodiscard]] virtual const data::SourceLocWithCounter &SourceLocation() const = 0;
+            [[nodiscard]] virtual const SourceLocWithCounter &SourceLocation() const = 0;
             // The identifier passed to `TA_GENERATE(...)`.
             [[nodiscard]] virtual std::string_view Name() const = 0;
 
@@ -3114,7 +3133,7 @@ namespace ta_test
     class BasicTrace : public context::BasicFrame, public context::FrameGuard
     {
         bool accept_args = false;
-        data::SourceLoc loc;
+        SourceLoc loc;
         std::string_view func;
         struct Args
         {
@@ -3164,7 +3183,7 @@ namespace ta_test
 
         // `operator bool` is inherited. It returns false when constructed from `.Hide()` or `.ExtractArgs()`.
 
-        [[nodiscard]] const data::SourceLoc &GetSourceLocation() const {return loc;}
+        [[nodiscard]] const SourceLoc &GetSourceLocation() const {return loc;}
         [[nodiscard]] const std::vector<std::string> &GetFuncArgs() const {return GetArgs().func_args;}
         [[nodiscard]] const std::vector<std::string> &GetTemplateArgs() const {return GetArgs().template_args;}
         [[nodiscard]] std::string_view GetFuncName() const {return func;}
@@ -3356,7 +3375,7 @@ namespace ta_test
             void (*break_func)() = nullptr;
 
             // This can be overridden on failure, but not necessarily. Otherwise (and by defualt) points to the actual location.
-            data::SourceLoc source_loc;
+            SourceLoc source_loc;
 
             // This is called to evaluate the user condition.
             void (*condition_func)(AssertWrapper &self, const void *data) = nullptr;
@@ -3370,10 +3389,10 @@ namespace ta_test
             // Note the weird variable name, it helps with our macro syntax that adds optional messages.
             Evaluator DETAIL_TA_ADD_EXTRAS{*this};
 
-            CFG_TA_API AssertWrapper(std::string_view name, data::SourceLoc loc, void (*breakpoint_func)());
+            CFG_TA_API AssertWrapper(std::string_view name, SourceLoc loc, void (*breakpoint_func)());
 
             template <typename F>
-            AssertWrapper(std::string_view name, data::SourceLoc loc, std::string_view raw_expr, std::string_view expanded_expr, const F &func, void (*breakpoint_func)())
+            AssertWrapper(std::string_view name, SourceLoc loc, std::string_view raw_expr, std::string_view expanded_expr, const F &func, void (*breakpoint_func)())
                 : AssertWrapper(name, loc, breakpoint_func)
             {
                 condition_func = [](AssertWrapper &self, const void *data)
@@ -3406,7 +3425,7 @@ namespace ta_test
                         {
                             self.flags = flags;
                         },
-                        [&]<typename ...P>(AssertFlags flags, data::SourceLoc loc)
+                        [&]<typename ...P>(AssertFlags flags, SourceLoc loc)
                         {
                             self.flags = flags;
                             self.source_loc = loc;
@@ -3420,7 +3439,7 @@ namespace ta_test
                             self.flags = flags; // Do this first, in case formatting throws.
                             self.user_message = CFG_TA_FMT_NAMESPACE::format(std::move(format), std::forward<P>(args)...);
                         },
-                        [&]<typename ...P>(AssertFlags flags, data::SourceLoc loc, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+                        [&]<typename ...P>(AssertFlags flags, SourceLoc loc, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
                         {
                             self.flags = flags; // Do this first, in case formatting throws.
                             self.source_loc = loc; // Same.
@@ -3432,7 +3451,7 @@ namespace ta_test
                 return DETAIL_TA_ADD_EXTRAS;
             }
 
-            CFG_TA_API const data::SourceLoc &SourceLocation() const override;
+            CFG_TA_API const SourceLoc &SourceLocation() const override;
             CFG_TA_API std::optional<std::string_view> UserMessage() const override;
 
             CFG_TA_API DecoVar GetElement(int index) const override;
@@ -3534,7 +3553,7 @@ namespace ta_test
             {
                 return FlagsValue;
             }
-            data::SourceLoc SourceLocation() const override
+            SourceLoc SourceLocation() const override
             {
                 return {LocFile.view(), LocLine};
             }
@@ -3555,17 +3574,27 @@ namespace ta_test
         template <typename T>
         inline const auto register_test_helper = []{RegisterTest(&test_singleton<T>); return nullptr;}();
 
+
         // --- LOGS ---
 
+        // Generate the next incremental log message id.
         [[nodiscard]] CFG_TA_API std::size_t GenerateLogId();
-        CFG_TA_API void AddLogEntry(std::string &&message);
+
+        CFG_TA_API void AddLogEntryLow(std::string &&message);
+        // `TA_CONTEXT` expands to this.
+        template <typename ...P>
+        void AddLogEntry(CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+        {
+            AddLogEntryLow(CFG_TA_FMT_NAMESPACE::format(format, std::forward<P>(args)...));
+        }
+        CFG_TA_API void AddLogEntry(const SourceLoc &loc);
 
         class BasicScopedLogGuard
         {
-            context::LogEntry *entry = nullptr;
+            context::LogEntry entry;
 
           protected:
-            CFG_TA_API BasicScopedLogGuard(context::LogEntry *entry);
+            CFG_TA_API BasicScopedLogGuard(context::LogEntry entry);
 
           public:
             BasicScopedLogGuard(const BasicScopedLogGuard &) = delete;
@@ -3579,8 +3608,12 @@ namespace ta_test
             context::LogEntry entry;
 
           public:
-            ScopedLogGuard(std::string &&message)
-                : BasicScopedLogGuard(&entry), entry(GenerateLogId(), std::move(message))
+            template <typename ...P>
+            ScopedLogGuard(const char */*func_name*/, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
+                : BasicScopedLogGuard({GenerateLogId(), context::LogMessage{CFG_TA_FMT_NAMESPACE::format(format, std::forward<P>(args)...)}})
+            {}
+            ScopedLogGuard(std::string_view func_name, const SourceLoc &loc)
+                : BasicScopedLogGuard({GenerateLogId(), context::LogSourceLocContext{loc, func_name}})
             {}
         };
 
@@ -3588,13 +3621,14 @@ namespace ta_test
         class ScopedLogGuardLazy final : BasicScopedLogGuard
         {
             F func;
-            context::LogEntry entry;
 
           public:
             ScopedLogGuardLazy(F &&func)
-                : BasicScopedLogGuard(&entry), func(std::move(func)), entry(GenerateLogId(), this->func)
+                // `this->func` isn't initialized here yet, but we don't read it yet, so it doesn't matter.
+                : BasicScopedLogGuard({GenerateLogId(), context::LogMessage{this->func}}), func(std::move(func))
             {}
         };
+
 
         // --- GENERATORS ---
 
@@ -3629,9 +3663,9 @@ namespace ta_test
             template <typename G>
             SpecificGenerator(G &&make_func) : func(std::forward<G>(make_func)()) {}
 
-            static constexpr auto location = data::SourceLocWithCounter(LocFile.view(), LocLine, LocCounter);
+            static constexpr auto location = SourceLocWithCounter(LocFile.view(), LocLine, LocCounter);
 
-            const data::SourceLocWithCounter &SourceLocation() const override
+            const SourceLocWithCounter &SourceLocation() const override
             {
                 return location;
             }
@@ -3693,7 +3727,7 @@ namespace ta_test
 
           public:
             // This must be filled with the source location.
-            data::SourceLocWithCounter source_loc;
+            SourceLocWithCounter source_loc;
 
             // The caller places the current generator here.
             data::BasicGenerator *untyped_generator = nullptr;
@@ -3702,7 +3736,7 @@ namespace ta_test
             // Note that `HandleGenerator()` moves from this variable, so it's always null in the destructor.
             std::unique_ptr<data::BasicGenerator> created_untyped_generator;
 
-            CFG_TA_API GenerateValueHelper(data::SourceLocWithCounter source_loc);
+            CFG_TA_API GenerateValueHelper(SourceLocWithCounter source_loc);
 
             GenerateValueHelper(const GenerateValueHelper &) = delete;
             GenerateValueHelper &operator=(const GenerateValueHelper &) = delete;
@@ -4290,7 +4324,7 @@ namespace ta_test
             // All high-level functions below do this automatically, and redundant contexts are silently ignored.
             // `index` is the element index (into `GetElems()`) of the element you're examining, or `-1` if not specified.
             // Fails the test if the is index invalid. `flags` affects how this validity check is handled.
-            [[nodiscard]] data::CaughtExceptionContext MakeContextGuard(int index = -1, AssertFlags flags = {}, data::SourceLoc source_loc = {__builtin_FILE(), __builtin_LINE()}) const
+            [[nodiscard]] data::CaughtExceptionContext MakeContextGuard(int index = -1, AssertFlags flags = {}, SourceLoc source_loc = {__builtin_FILE(), __builtin_LINE()}) const
             {
                 if constexpr (IsWrapper)
                     return State().FrameGuard();

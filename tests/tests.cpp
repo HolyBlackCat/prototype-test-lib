@@ -2340,9 +2340,9 @@ TA_TEST(2) {int x = 42; TA_CHECK(false)("x={}", x);} // message with formatting
 TA_TEST(3) {            TA_CHECK(false)(ta_test::hard);}             // flags
 TA_TEST(4) {            TA_CHECK(false)(ta_test::hard, "Msg!");}     // flags, message
 TA_TEST(5) {int x = 42; TA_CHECK(false)(ta_test::hard, "x={}", x);} // flags, message with formatting
-TA_TEST(6) {            TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42));}             // flags, location
-TA_TEST(7) {            TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "Msg!");}     // flags, location, message
-TA_TEST(8) {int x = 42; TA_CHECK(false)(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "x={}", x);} // flags, location, message with formatting
+TA_TEST(6) {            TA_CHECK(false)(ta_test::hard, ta_test::SourceLoc("MY_FILE",42));}             // flags, location
+TA_TEST(7) {            TA_CHECK(false)(ta_test::hard, ta_test::SourceLoc("MY_FILE",42), "Msg!");}     // flags, location, message
+TA_TEST(8) {int x = 42; TA_CHECK(false)(ta_test::hard, ta_test::SourceLoc("MY_FILE",42), "x={}", x);} // flags, location, message with formatting
 #if __cpp_lib_source_location
 TA_TEST(9) {             TA_CHECK(false)(ta_test::hard, std::source_location::current());}              // flags, location
 TA_TEST(10) {            TA_CHECK(false)(ta_test::hard, std::source_location::current(), "Msg!");}     // flags, location, message
@@ -3599,9 +3599,9 @@ TA_TEST(2) {int x = 42; TA_FAIL("x={}", x);} // message with formatting
 TA_TEST(3) {            TA_FAIL(ta_test::hard);}             // flags
 TA_TEST(4) {            TA_FAIL(ta_test::hard, "Msg!");}     // flags, message
 TA_TEST(5) {int x = 42; TA_FAIL(ta_test::hard, "x={}", x);} // flags, message with formatting
-TA_TEST(6) {            TA_FAIL(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42));}             // flags, location
-TA_TEST(7) {            TA_FAIL(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "Msg!");}     // flags, location, message
-TA_TEST(8) {int x = 42; TA_FAIL(ta_test::hard, ta_test::data::SourceLoc("MY_FILE",42), "x={}", x);} // flags, location, message with formatting
+TA_TEST(6) {            TA_FAIL(ta_test::hard, ta_test::SourceLoc("MY_FILE",42));}             // flags, location
+TA_TEST(7) {            TA_FAIL(ta_test::hard, ta_test::SourceLoc("MY_FILE",42), "Msg!");}     // flags, location, message
+TA_TEST(8) {int x = 42; TA_FAIL(ta_test::hard, ta_test::SourceLoc("MY_FILE",42), "x={}", x);} // flags, location, message with formatting
 #if __cpp_lib_source_location
 TA_TEST(9) {             TA_FAIL(ta_test::hard, std::source_location::current());}              // flags, location
 TA_TEST(10) {            TA_FAIL(ta_test::hard, std::source_location::current(), "Msg!");}     // flags, location, message

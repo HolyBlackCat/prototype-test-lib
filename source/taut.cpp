@@ -897,7 +897,7 @@ ta_test::data::BasicGenerator::OverrideStatus ta_test::data::BasicGenerator::Run
 }
 
 ta_test::data::CaughtExceptionContext::CaughtExceptionContext(
-    std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, data::SourceLoc source_loc
+    std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, SourceLoc source_loc
 )
     : FrameGuard([&]() -> std::shared_ptr<const CaughtExceptionContext>
     {
@@ -1631,7 +1631,10 @@ void ta_test::output::PrintLog(Terminal::StyleGuard &cur_style)
 
     // Refresh the messages. Only the scoped log, since the unscoped one should never be lazy.
     for (auto *entry : thread_state.scoped_log)
-        entry->RefreshMessage();
+    {
+        if (auto message = std::get_if<context::LogMessage>(&entry->var))
+            message->RefreshMessage();
+    }
 
     for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicPrintingModule::PrintLogEntries>())
     {
@@ -1975,14 +1978,14 @@ void ta_test::detail::AssertWrapper::EvaluateExtras()
     }
 }
 
-ta_test::detail::AssertWrapper::AssertWrapper(std::string_view name, data::SourceLoc loc, void (*breakpoint_func)())
+ta_test::detail::AssertWrapper::AssertWrapper(std::string_view name, SourceLoc loc, void (*breakpoint_func)())
 {
     macro_name = name;
     break_func = breakpoint_func;
     source_loc = loc;
 }
 
-const ta_test::data::SourceLoc &ta_test::detail::AssertWrapper::SourceLocation() const
+const ta_test::SourceLoc &ta_test::detail::AssertWrapper::SourceLocation() const
 {
     return source_loc;
 }
@@ -2100,8 +2103,8 @@ void ta_test::detail::RegisterTest(const BasicTestImpl *singleton)
         if (it->first == name)
         {
             // This test is already registered. Make sure it comes from the same source file and line, then stop.
-            data::SourceLoc old_loc = state.tests[it->second]->SourceLocation();
-            data::SourceLoc new_loc = singleton->SourceLocation();
+            SourceLoc old_loc = state.tests[it->second]->SourceLocation();
+            SourceLoc new_loc = singleton->SourceLocation();
             if (new_loc != old_loc)
             {
                 HardError(CFG_TA_FMT_NAMESPACE::format(
@@ -2152,21 +2155,29 @@ std::size_t ta_test::detail::GenerateLogId()
     return thread_state.log_id_counter++;
 }
 
-void ta_test::detail::AddLogEntry(std::string &&message)
+void ta_test::detail::AddLogEntryLow(std::string &&message)
 {
     auto &thread_state = ThreadState();
     if (!thread_state.current_test)
         HardError("Can't log when no test is running.", HardErrorKind::user);
-    thread_state.current_test->unscoped_log.emplace_back(GenerateLogId(), std::move(message));
+    thread_state.current_test->unscoped_log.push_back(context::LogEntry{GenerateLogId(), context::LogMessage{std::move(message)}});
 }
 
-ta_test::detail::BasicScopedLogGuard::BasicScopedLogGuard(context::LogEntry *entry)
-    : entry(entry)
+void ta_test::detail::AddLogEntry(const SourceLoc &loc)
 {
     auto &thread_state = ThreadState();
     if (!thread_state.current_test)
         HardError("Can't log when no test is running.", HardErrorKind::user);
-    thread_state.scoped_log.push_back(entry);
+    thread_state.current_test->unscoped_log.push_back(context::LogEntry{GenerateLogId(), context::LogSourceLocReached{loc}});
+}
+
+ta_test::detail::BasicScopedLogGuard::BasicScopedLogGuard(context::LogEntry entry)
+    : entry(std::move(entry))
+{
+    auto &thread_state = ThreadState();
+    if (!thread_state.current_test)
+        HardError("Can't log when no test is running.", HardErrorKind::user);
+    thread_state.scoped_log.push_back(&this->entry);
 }
 
 ta_test::detail::BasicScopedLogGuard::~BasicScopedLogGuard()
@@ -2174,7 +2185,7 @@ ta_test::detail::BasicScopedLogGuard::~BasicScopedLogGuard()
     auto &thread_state = ThreadState();
     if (!thread_state.current_test)
         HardError("A scoped log guard somehow outlived the test.");
-    if (thread_state.scoped_log.empty() || thread_state.scoped_log.back() != entry)
+    if (thread_state.scoped_log.empty() || thread_state.scoped_log.back() != &entry)
         HardError("The scoped log stack got corrupted.");
     thread_state.scoped_log.pop_back();
 }
@@ -2198,7 +2209,7 @@ ta_test::detail::SpecificGeneratorGenerateGuard::~SpecificGeneratorGenerateGuard
     }
 }
 
-ta_test::detail::GenerateValueHelper::GenerateValueHelper(data::SourceLocWithCounter source_loc)
+ta_test::detail::GenerateValueHelper::GenerateValueHelper(SourceLocWithCounter source_loc)
     : source_loc(source_loc)
 {
     if (ThreadState().current_test->currently_in_generator)
@@ -5190,24 +5201,47 @@ bool ta_test::modules::LogPrinter::PrintLogEntries(output::Terminal::StyleGuard 
             else if (scoped_log.empty())
                 use_unscoped = true;
             else
-                use_unscoped = unscoped_log.front().IncrementalId() < scoped_log.front()->IncrementalId();
+                use_unscoped = unscoped_log.front().incremental_id < scoped_log.front()->incremental_id;
 
-            // Since this is lazy, this can throw.
-            std::string_view message = (use_unscoped ? unscoped_log.front() : *scoped_log.front()).Message();
+            const context::LogEntry &entry = use_unscoped ? unscoped_log.front() : *scoped_log.front();
 
             if (use_unscoped)
                 unscoped_log = unscoped_log.last(unscoped_log.size() - 1);
             else
                 scoped_log = scoped_log.last(scoped_log.size() - 1);
 
-            // We reset the style every time in case the `Message()` is lazy and ends up throwing.
-            cur_style.ResetStyle();
-            terminal.Print(cur_style, "{}{}{}\n",
-                style_message,
-                chars_message_prefix,
-                message
-            );
-            cur_style.ResetStyle();
+            std::visit(meta::Overload{
+                [&](const context::LogMessage &entry)
+                {
+                    terminal.Print(cur_style, "{}{}{}\n",
+                        style_message,
+                        chars_message_prefix,
+                        entry.Message()
+                    );
+                },
+                [&](const context::LogSourceLocReached &entry)
+                {
+                    terminal.Print(cur_style, "{}{}{}" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "\n",
+                        style_message,
+                        chars_loc_reached_prefix,
+                        common_data.style_path,
+                        entry.loc.file, entry.loc.line
+                    );
+                },
+                [&](const context::LogSourceLocContext &entry)
+                {
+                    terminal.Print(cur_style, "{}{}{}" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT ":{}{}{}{}\n",
+                        style_message,
+                        chars_loc_context_prefix,
+                        common_data.style_path,
+                        entry.loc.file, entry.loc.line,
+                        style_message,
+                        chars_loc_context_callee,
+                        common_data.style_func_name,
+                        entry.callee
+                    );
+                },
+            }, entry.var);
         }
         while (!unscoped_log.empty() || !scoped_log.empty());
 

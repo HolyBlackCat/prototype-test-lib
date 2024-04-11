@@ -923,6 +923,8 @@ namespace ta_test
             TextStyle style_note = {.color = TextColor::light_blue, .bold = true};
             // File paths.
             TextStyle style_path = {.color = TextColor::none};
+            // Function names.
+            TextStyle style_func_name = {.color = TextColor::dark_magenta};
             // The offending macro call.
             TextStyle style_failed_macro = {.color = TextColor::none, .bold = true};
             // Highlighted expressions.
@@ -1020,7 +1022,7 @@ namespace ta_test
             }
 
             // Converts a source location to a string in the current preferred format.
-            [[nodiscard]] std::string LocationToString(const data::SourceLoc &loc) const
+            [[nodiscard]] std::string LocationToString(const SourceLoc &loc) const
             {
                 return CFG_TA_FMT_NAMESPACE::format("{}{}{}{}", loc.file, filename_linenumber_separator, loc.line, filename_linenumber_suffix);
             }
@@ -1767,7 +1769,7 @@ namespace ta_test
                         std::size_t index = 0; // 1-based
                         bool is_custom_value = false;
                         std::optional<std::string> value;
-                        data::SourceLocWithCounter location;
+                        SourceLocWithCounter location;
 
                         // This should be unique enough.
                         [[nodiscard]] friend bool operator==(const FailedGenerator &a, const FailedGenerator &b)
@@ -1971,7 +1973,14 @@ namespace ta_test
         {
             output::TextStyle style_message = {.color = output::TextColor::dark_cyan};
 
+            // Prefix for user messages.
             std::string chars_message_prefix = "// ";
+            // Prefix for source locations passed to `TA_LOG`.
+            std::string chars_loc_reached_prefix = "Reached ";
+            // Prefix for source locations passed to `TA_CONTEXT`.
+            std::string chars_loc_context_prefix = "At ";
+            // A separator between the source location passed to `TA_CONTEXT` and the callee function name.
+            std::string chars_loc_context_callee = "\nIn function: ";
 
             // The current position in the unscoped log vector, to avoid printing the same stuff twice. We reset this when we start a new test.
             // We intentionally re-print the scoped logs every time they're needed.
