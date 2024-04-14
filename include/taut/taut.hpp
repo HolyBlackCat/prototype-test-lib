@@ -368,6 +368,7 @@
 // Unlike `TA_LOG()`, the message can be printed multiple times, if there are multiple failures in this scope.
 // The trailing `\n`, if any, is ignored.
 // Can also accept `std::source_location` (or `ta_test::SourceLoc`) directly. Then also prints the current function name (not the one in `source_location`).
+// Source location can be followed by a function name, which defaults to __PRETTY_FUNCTION__/__FUNCSIG__.
 // The code calls this a "scoped log", and "context" means something else in the code.
 #define TA_CONTEXT DETAIL_TA_CONTEXT
 // Like `TA_CONTEXT`, but only evaluates the message when needed.
@@ -806,6 +807,15 @@ namespace ta_test
         #if __cpp_lib_source_location
         SourceLoc(std::source_location loc) : file(loc.file_name()), line(int(loc.line())) {}
         #endif
+
+        struct Current
+        {
+            explicit Current() = default;
+        };
+        // The current source location. Pass `ta_test::SourceLoc::Current{}`.
+        constexpr SourceLoc(Current, std::string_view file = __builtin_FILE(), int line = __builtin_LINE())
+            : SourceLoc(file, line)
+        {}
 
         friend auto operator<=>(const SourceLoc &, const SourceLoc &) = default;
     };
@@ -2413,17 +2423,12 @@ namespace ta_test
             }
         };
 
-        // A single logged source location (unscoped).
-        struct LogSourceLocReached
-        {
-            SourceLoc loc;
-        };
-
-        // A single logged source location (scoped).
-        struct LogSourceLocContext
+        // A single logged source location.
+        struct LogSourceLoc
         {
             SourceLoc loc;
             // The function name where the `TA_CONTEXT` call appears, regardless of what source location was passed to it.
+            // Optional.
             std::string_view callee;
         };
 
@@ -2431,7 +2436,7 @@ namespace ta_test
         struct LogEntry
         {
             std::size_t incremental_id = 0;
-            std::variant<LogMessage, LogSourceLocReached, LogSourceLocContext> var;
+            std::variant<LogMessage, LogSourceLoc> var;
         };
 
         // The current scoped log. The unscoped log sits in the `BasicModule::RunSingleTestResults`.
@@ -3127,129 +3132,6 @@ namespace ta_test
     }
 
 
-    // --- STACK TRACE HELPERS ---
-
-    // Don't use this, use `Trace<...>` defined below.
-    class BasicTrace : public context::BasicFrame, public context::FrameGuard
-    {
-        bool accept_args = false;
-        SourceLoc loc;
-        std::string_view func;
-        struct Args
-        {
-            std::vector<std::string> func_args;
-            std::vector<std::string> template_args;
-        };
-        Args arg_storage;
-        // If specified, we don't use `arg_storage` and write everything to this.
-        Args *arg_override = nullptr;
-
-        Args &GetArgs() {return arg_override ? *arg_override : arg_storage;}
-        const Args &GetArgs() const {return const_cast<BasicTrace &>(*this).GetArgs();}
-
-      protected:
-        BasicTrace() : FrameGuard(nullptr) {}
-
-        BasicTrace(bool push_to_stack, bool accept_args, Args *write_args_to, std::string_view file, int line, std::string_view func)
-            : FrameGuard(push_to_stack ? std::shared_ptr<const BasicFrame>(std::shared_ptr<void>{}, this) : nullptr), // A non-owning shared pointer.
-            accept_args(accept_args), loc{file, line}, func(func), arg_override(write_args_to)
-        {}
-
-        BasicTrace(std::string_view file, int line, std::string_view func)
-            : BasicTrace(true, true, nullptr, file, line, func)
-        {}
-
-        struct HideParams
-        {
-            const BasicTrace *target = nullptr;
-        };
-
-        BasicTrace(HideParams hide)
-            : BasicTrace(false, false, nullptr, hide.target->loc.file, hide.target->loc.line, hide.target->func)
-        {}
-
-        struct ExtractArgsParams
-        {
-            BasicTrace *target = nullptr;
-        };
-
-        BasicTrace(ExtractArgsParams extract)
-            : BasicTrace(false, extract.target->accept_args, &extract.target->GetArgs(), extract.target->loc.file, extract.target->loc.line, extract.target->func)
-        {}
-
-      public:
-        BasicTrace &operator=(const BasicTrace &) = delete;
-        BasicTrace &operator=(BasicTrace &&) = delete;
-
-        // `operator bool` is inherited. It returns false when constructed from `.Hide()` or `.ExtractArgs()`.
-
-        [[nodiscard]] const SourceLoc &GetSourceLocation() const {return loc;}
-        [[nodiscard]] const std::vector<std::string> &GetFuncArgs() const {return GetArgs().func_args;}
-        [[nodiscard]] const std::vector<std::string> &GetTemplateArgs() const {return GetArgs().template_args;}
-        [[nodiscard]] std::string_view GetFuncName() const {return func;}
-
-        // Pass this to the constructor of `Trace` to disable tracing the callee.
-        // This also copies the location information to the callee.
-        [[nodiscard]] HideParams Hide() const
-        {
-            return {this};
-        }
-
-        // Pass this to the constructor of `Trace` to disable the tracing of the callee and make it write its arguments into the current object.
-        // This also copies the location information to the callee.
-        [[nodiscard]] ExtractArgsParams ExtractArgs()
-        {
-            return {this};
-        }
-
-        template <typename ...P>
-        BasicTrace &AddArgs(const P &... args)
-        {
-            if (accept_args)
-                (void(GetArgs().func_args.push_back(string_conv::ToString(args))), ...);
-            return *this;
-        }
-
-        template <typename ...P>
-        BasicTrace &AddTemplateTypes()
-        {
-            if (accept_args)
-                (void(GetArgs().template_args.push_back(std::string(text::TypeName<P>()))), ...);
-            return *this;
-        }
-        template <typename ...P>
-        BasicTrace &AddTemplateValues(const P &... args)
-        {
-            if (accept_args)
-                (void(GetArgs().template_args.push_back(string_conv::ToString(args))), ...);
-            return *this;
-        }
-    };
-    // Add this as the last function parameter: `Trace<"MyFunc"> trace = {}` to show this function call as the context when a test fails.
-    // You can optionally do `trace.AddArgs/AddTemplateTypes/AddTemplateValues()` to also display information about the function arguments.
-    // Those functions are not lazy, and calculate the new strings immediately, so don't overuse them.
-    // You can construct from a different trace in several different ways:
-    // * From `outer_trace.Hide()`. This will disable tracing the callee.
-    // * From `outer_trace.ExtractArgs()`. This will disable tracing the callee, and will redirect all arguments from it to `outer_trace`.
-    // You can call the inherited `Reset()` to disarm a `Trace` to remove it from the stack.
-    template <meta::ConstString FuncName>
-    class Trace : public BasicTrace
-    {
-      public:
-        // Default constructor - traces normally.
-        // Don't pass any arguments manually.
-        Trace(std::string_view file = __builtin_FILE(), int line = __builtin_LINE(), std::string_view func = FuncName.view())
-            : BasicTrace(file, line, func)
-        {}
-        // This doesn't trace, but copies the location information to the callee.
-        // Usage: `foo(..., /*.trace=*/trace.ExtractArgs())`.
-        Trace(HideParams hide) : BasicTrace(hide) {}
-        // This doesn't trace, but writes function arguments to the specified instace of `Trace`. Also copies the location information to the callee.
-        // Usage: `foo(..., /*.trace=*/trace.ExtractArgs())`.
-        Trace(ExtractArgsParams extract) : BasicTrace(extract) {}
-    };
-
-
     // Macro internals, except `TA_MUST_THROW(...)`.
     namespace detail
     {
@@ -3591,10 +3473,10 @@ namespace ta_test
 
         class BasicScopedLogGuard
         {
-            context::LogEntry entry;
+            std::optional<context::LogEntry> entry;
 
           protected:
-            CFG_TA_API BasicScopedLogGuard(context::LogEntry entry);
+            CFG_TA_API BasicScopedLogGuard(context::LogEntry new_entry);
 
           public:
             BasicScopedLogGuard(const BasicScopedLogGuard &) = delete;
@@ -3608,12 +3490,18 @@ namespace ta_test
             context::LogEntry entry;
 
           public:
+            // User message.
             template <typename ...P>
             ScopedLogGuard(const char */*func_name*/, CFG_TA_FMT_NAMESPACE::format_string<P...> format, P &&... args)
                 : BasicScopedLogGuard({GenerateLogId(), context::LogMessage{CFG_TA_FMT_NAMESPACE::format(format, std::forward<P>(args)...)}})
             {}
+            // Source location.
             ScopedLogGuard(std::string_view func_name, const SourceLoc &loc)
-                : BasicScopedLogGuard({GenerateLogId(), context::LogSourceLocContext{loc, func_name}})
+                : BasicScopedLogGuard({GenerateLogId(), context::LogSourceLoc{loc, func_name}})
+            {}
+            // Source location with function name override.
+            ScopedLogGuard(const char */*orig_func_name*/, const SourceLoc &loc, std::string_view func_name)
+                : BasicScopedLogGuard({GenerateLogId(), context::LogSourceLoc{loc, func_name}})
             {}
         };
 
@@ -4324,7 +4212,7 @@ namespace ta_test
             // All high-level functions below do this automatically, and redundant contexts are silently ignored.
             // `index` is the element index (into `GetElems()`) of the element you're examining, or `-1` if not specified.
             // Fails the test if the is index invalid. `flags` affects how this validity check is handled.
-            [[nodiscard]] data::CaughtExceptionContext MakeContextGuard(int index = -1, AssertFlags flags = {}, SourceLoc source_loc = {__builtin_FILE(), __builtin_LINE()}) const
+            [[nodiscard]] data::CaughtExceptionContext MakeContextGuard(int index = -1, AssertFlags flags = {}, SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 if constexpr (IsWrapper)
                     return State().FrameGuard();
@@ -4374,17 +4262,15 @@ namespace ta_test
             }
 
             // Checks that the exception message is equal to a string.
-            Ref CheckMessage(/* elem = top_level, */ std::string_view expected_message, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessage"> trace = {}) const
+            Ref CheckMessage(/* elem = top_level, */ std::string_view expected_message, AssertFlags flags = AssertFlags::hard, SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 // No need to wrap this.
-                trace.AddArgs(expected_message, flags);
-                return CheckMessage(ExceptionElem::top_level, expected_message, flags, trace.Hide());
+                return CheckMessage(ExceptionElem::top_level, expected_message, flags, source_loc);
             }
             // Checks that the exception expected_message is equal to a string.
-            Ref CheckMessage(ExceptionElemVar elem, std::string_view expected_message, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessage"> trace = {}) const
+            Ref CheckMessage(ExceptionElemVar elem, std::string_view expected_message, AssertFlags flags = AssertFlags::hard, SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 // No need to wrap this.
-                trace.AddArgs(elem, expected_message, flags);
                 return CheckElemLow(elem,
                     [&](const SingleException &elem)
                     {
@@ -4394,35 +4280,32 @@ namespace ta_test
                     {
                         return CFG_TA_FMT_NAMESPACE::format("The exception message is not equal to `{}`.", expected_message);
                     },
-                    flags, trace.Hide()
+                    flags, source_loc
                 );
             }
             // Checks that the combined exception message is equal to a string.
-            Ref CheckMessage(ExceptionElemsCombinedTag tag, std::string_view expected_message, AssertFlags flags = AssertFlags::hard, std::string_view separator = "\n", Trace<"CheckMessage"> trace = {}) const
+            Ref CheckMessage(ExceptionElemsCombinedTag, std::string_view expected_message, AssertFlags flags = AssertFlags::hard, std::string_view separator = "\n", SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 // No need to wrap this.
-                trace.AddArgs(tag, expected_message, flags, separator);
-                if (auto guard = MakeContextGuard(-1, flags))
+                if (auto guard = MakeContextGuard(-1, flags, source_loc))
                 {
                     if (CombinedMessage(separator) != expected_message)
-                        TA_FAIL("The combined exception message is not equal to `{}`.", expected_message);
+                        TA_FAIL(source_loc, "The combined exception message is not equal to `{}`.", expected_message);
                 }
             }
 
             // Checks that the exception message matches the regex.
             // The entire message must match, not just a part of it.
-            Ref CheckMessageRegex(/* elem = top_level, */ std::string_view regex, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessageRegex"> trace = {}) const
+            Ref CheckMessageRegex(/* elem = top_level, */ std::string_view regex, AssertFlags flags = AssertFlags::hard, SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 // No need to wrap this.
-                trace.AddArgs(regex, flags);
-                return CheckMessageRegex(ExceptionElem::top_level, regex, flags, trace.Hide());
+                return CheckMessageRegex(ExceptionElem::top_level, regex, flags, source_loc);
             }
             // Checks that the exception message matches the regex.
             // The entire message must match, not just a part of it.
-            Ref CheckMessageRegex(ExceptionElemVar elem, std::string_view regex, AssertFlags flags = AssertFlags::hard, Trace<"CheckMessageRegex"> trace = {}) const
+            Ref CheckMessageRegex(ExceptionElemVar elem, std::string_view regex, AssertFlags flags = AssertFlags::hard, SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 // No need to wrap this.
-                trace.AddArgs(elem, regex, flags);
                 std::regex r(text::regex::ConstructRegex(regex));
                 return CheckElemLow(elem,
                     [&](const SingleException &elem)
@@ -4433,31 +4316,28 @@ namespace ta_test
                     {
                         return CFG_TA_FMT_NAMESPACE::format("The exception message doesn't match the regex `{}`.", regex);
                     },
-                    flags, trace.Hide()
+                    flags, source_loc
                 );
             }
             // Checks that the combined exception message matches the regex.
             // The entire message must match, not just a part of it.
-            Ref CheckMessageRegex(ExceptionElemsCombinedTag tag, std::string_view regex, AssertFlags flags = AssertFlags::hard, std::string_view separator = "\n", Trace<"CheckMessage"> trace = {}) const
+            Ref CheckMessageRegex(ExceptionElemsCombinedTag, std::string_view regex, AssertFlags flags = AssertFlags::hard, std::string_view separator = "\n", SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 // No need to wrap this.
                 std::regex r(text::regex::ConstructRegex(regex));
-                trace.AddArgs(tag, regex, flags, separator);
-                if (auto guard = MakeContextGuard(-1, flags))
+                if (auto guard = MakeContextGuard(-1, flags, source_loc))
                 {
                     if (!text::regex::WholeStringMatchesRegex(CombinedMessage(separator), r))
-                        TA_FAIL("The combined exception message doesn't match the regex `{}`.", regex);
+                        TA_FAIL(source_loc, "The combined exception message doesn't match the regex `{}`.", regex);
                 }
             }
 
             // Checks that the exception type is exactly `T`.
             template <typename T>
             requires std::is_same_v<T, std::remove_cvref_t<T>>
-            Ref CheckExactType(ExceptionElemVar elem = ExceptionElem::top_level, AssertFlags flags = AssertFlags::hard, Trace<"CheckExactType"> trace = {}) const
+            Ref CheckExactType(ExceptionElemVar elem = ExceptionElem::top_level, AssertFlags flags = AssertFlags::hard, SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 // No need to wrap this.
-                trace.AddTemplateTypes<T>();
-                trace.AddArgs(elem, flags);
                 return CheckElemLow(elem,
                     [&](const SingleException &elem)
                     {
@@ -4468,7 +4348,7 @@ namespace ta_test
                         return CFG_TA_FMT_NAMESPACE::format("The exception type is not `{}`.", text::TypeName<T>());
                     },
                     flags,
-                    trace.Hide()
+                    source_loc
                 );
             }
 
@@ -4476,11 +4356,9 @@ namespace ta_test
             // This also permits some minor implicit conversions, like adding constness to a pointer. Anything that `catch` can do.
             template <typename T>
             requires std::is_same_v<T, std::remove_cvref_t<T>>
-            Ref CheckDerivedType(ExceptionElemVar elem = ExceptionElem::top_level, AssertFlags flags = AssertFlags::hard, Trace<"CheckDerivedType"> trace = {}) const
+            Ref CheckDerivedType(ExceptionElemVar elem = ExceptionElem::top_level, AssertFlags flags = AssertFlags::hard, SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 // No need to wrap this.
-                trace.AddTemplateTypes<T>();
-                trace.AddArgs(elem, flags);
                 return CheckElemLow(elem,
                     [&](const SingleException &elem)
                     {
@@ -4504,7 +4382,7 @@ namespace ta_test
                         return CFG_TA_FMT_NAMESPACE::format("The exception type is not derived from `{}`.", text::TypeName<T>());
                     },
                     flags,
-                    trace.Hide()
+                    source_loc
                 );
             }
 
@@ -4514,12 +4392,13 @@ namespace ta_test
             // `message_func` returns the error message. It's only called on failure.
             // When you wrap this into your own function, you
             template <typename F, typename G>
-            Ref CheckElemLow(ExceptionElemVar elem, F &&func, G &&message_func, AssertFlags flags = AssertFlags::hard, Trace<"CheckElemLow"> trace = {}) const
+            Ref CheckElemLow(ExceptionElemVar elem, F &&func, G &&message_func, AssertFlags flags = AssertFlags::hard, SourceLoc source_loc = SourceLoc::Current{}) const
             {
+                // Don't really need `TA_CONTEXT` here, since we pass `source_loc` directly to `TA_FAIL`.
                 if constexpr (IsWrapper)
                 {
                     decltype(auto) state = State();
-                    state.CheckElemLow(elem, std::forward<F>(func), std::forward<G>(message_func), flags, trace.ExtractArgs());
+                    state.CheckElemLow(elem, std::forward<F>(func), std::forward<G>(message_func), flags, source_loc);
                     return ReturnedRef(state);
                 }
                 else
@@ -4527,16 +4406,16 @@ namespace ta_test
                     if (elem.valueless_by_exception())
                         HardError("Invalid `ExceptionElemVar` variant.");
                     if (!State())
-                        TA_FAIL(flags, trace.GetSourceLocation(), "Attempt to analyze a null `CaughtException`.");
+                        TA_FAIL(flags, source_loc, "Attempt to analyze a null `CaughtException`.");
                     if (State()->elems.empty())
                         return ReturnedRef(*this); // This was returned from a failed soft `TA_MUST_THROW`, silently pass all checks.
                     const auto &elems = State()->elems;
                     auto CheckIndex = [&](int index)
                     {
                         // This validates the index for us, and fails the test if out of range.
-                        auto context = MakeContextGuard(index, flags);
+                        auto context = MakeContextGuard(index, flags, source_loc);
                         if (context && !bool(std::forward<F>(func)(elems[std::size_t(index)])))
-                            TA_FAIL(flags, trace.GetSourceLocation(), "{}", std::forward<G>(message_func)());
+                            TA_FAIL(flags, source_loc, "{}", std::forward<G>(message_func)());
                     };
                     std::visit(meta::Overload{
                         [&](ExceptionElem elem)
@@ -4555,9 +4434,9 @@ namespace ta_test
                                 return;
                               case ExceptionElem::any:
                                 {
-                                    auto context = MakeContextGuard(-1, flags);
+                                    auto context = MakeContextGuard(-1, flags, source_loc);
                                     if (std::none_of(elems.begin(), elems.end(), func))
-                                        TA_FAIL(flags, trace.GetSourceLocation(), "{}", std::forward<G>(message_func)());
+                                        TA_FAIL(flags, source_loc, "{}", std::forward<G>(message_func)());
                                 }
                                 return;
                             }

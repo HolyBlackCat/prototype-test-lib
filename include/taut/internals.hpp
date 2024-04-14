@@ -2056,14 +2056,6 @@ namespace ta_test
             ) const;
         };
 
-        // Prints stack traces coming from `ta_test::Trace`.
-        struct TracePrinter : BasicPrintingModule
-        {
-            std::u32string chars_func_name_prefix = U"In function: ";
-
-            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept override;
-        };
-
         // Detects whether the debugger is attached in a platform-specific way.
         // Responds to `--debug`, `--break`, `--catch` to override the debugger detection.
         struct DebuggerDetector : BasicModule

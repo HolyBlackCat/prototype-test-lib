@@ -832,7 +832,7 @@ void ta_test::AnalyzeException(const std::exception_ptr &e, const std::function<
     }
 
     // Unknown exception type.
-    func({});
+    func({.exception = e, .type = typeid(void), .message = {}});
 }
 
 ta_test::data::AssertionExprDynamicInfo::ArgState ta_test::data::AssertionExprDynamicInfo::CurrentArgState(std::size_t index) const
@@ -2165,27 +2165,35 @@ void ta_test::detail::AddLogEntryLow(std::string &&message)
 
 void ta_test::detail::AddLogEntry(const SourceLoc &loc)
 {
+    if (loc == SourceLoc{})
+        return;
     auto &thread_state = ThreadState();
     if (!thread_state.current_test)
         HardError("Can't log when no test is running.", HardErrorKind::user);
-    thread_state.current_test->unscoped_log.push_back(context::LogEntry{GenerateLogId(), context::LogSourceLocReached{loc}});
+    thread_state.current_test->unscoped_log.push_back(context::LogEntry{GenerateLogId(), context::LogSourceLoc{.loc = loc, .callee = {}}});
 }
 
-ta_test::detail::BasicScopedLogGuard::BasicScopedLogGuard(context::LogEntry entry)
-    : entry(std::move(entry))
+ta_test::detail::BasicScopedLogGuard::BasicScopedLogGuard(context::LogEntry new_entry)
 {
+    if (auto loc = std::get_if<context::LogSourceLoc>(&new_entry.var); loc && loc->loc == SourceLoc{})
+        return; // Skip null source locations. (Intentionally not checking the callee, since it's set automatically and will never be null.)
+
+    entry = std::move(new_entry);
     auto &thread_state = ThreadState();
     if (!thread_state.current_test)
         HardError("Can't log when no test is running.", HardErrorKind::user);
-    thread_state.scoped_log.push_back(&this->entry);
+    thread_state.scoped_log.push_back(&*entry);
 }
 
 ta_test::detail::BasicScopedLogGuard::~BasicScopedLogGuard()
 {
+    if (!entry)
+        return;
+
     auto &thread_state = ThreadState();
     if (!thread_state.current_test)
         HardError("A scoped log guard somehow outlived the test.");
-    if (thread_state.scoped_log.empty() || thread_state.scoped_log.back() != &entry)
+    if (thread_state.scoped_log.empty() || thread_state.scoped_log.back() != &*entry)
         HardError("The scoped log stack got corrupted.");
     thread_state.scoped_log.pop_back();
 }
@@ -2520,7 +2528,6 @@ void ta_test::Runner::SetDefaultModules()
     modules.push_back(MakeModule<modules::DefaultExceptionAnalyzer>());
     modules.push_back(MakeModule<modules::ExceptionPrinter>());
     modules.push_back(MakeModule<modules::MustThrowPrinter>());
-    modules.push_back(MakeModule<modules::TracePrinter>());
     modules.push_back(MakeModule<modules::DebuggerDetector>());
     modules.push_back(MakeModule<modules::DebuggerStatePrinter>());
 }
@@ -5219,27 +5226,42 @@ bool ta_test::modules::LogPrinter::PrintLogEntries(output::Terminal::StyleGuard 
                         entry.Message()
                     );
                 },
-                [&](const context::LogSourceLocReached &entry)
+                [&](const context::LogSourceLoc &entry)
                 {
-                    terminal.Print(cur_style, "{}{}{}" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT "\n",
-                        style_message,
-                        chars_loc_reached_prefix,
-                        common_data.style_path,
-                        entry.loc.file, entry.loc.line
-                    );
-                },
-                [&](const context::LogSourceLocContext &entry)
-                {
-                    terminal.Print(cur_style, "{}{}{}" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT ":{}{}{}{}\n",
-                        style_message,
-                        chars_loc_context_prefix,
-                        common_data.style_path,
-                        entry.loc.file, entry.loc.line,
-                        style_message,
-                        chars_loc_context_callee,
-                        common_data.style_func_name,
-                        entry.callee
-                    );
+                    // Source location.
+                    if (use_unscoped)
+                    {
+                        terminal.Print(cur_style, "{}{}{}" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT,
+                            style_message,
+                            chars_loc_reached_prefix,
+                            common_data.style_path,
+                            entry.loc.file, entry.loc.line
+                        );
+                    }
+                    else
+                    {
+                        terminal.Print(cur_style, "{}{}{}" DETAIL_TA_INTERNAL_ERROR_LOCATION_FORMAT ":",
+                            style_message,
+                            chars_loc_context_prefix,
+                            common_data.style_path,
+                            entry.loc.file, entry.loc.line
+                        );
+                    }
+
+                    // Callee.
+                    if (entry.callee.empty())
+                    {
+                        terminal.Print("\n");
+                    }
+                    else
+                    {
+                        terminal.Print(cur_style, "{}{}{}{}\n",
+                            style_message,
+                            chars_loc_context_callee,
+                            common_data.style_func_name,
+                            entry.callee
+                        );
+                    }
                 },
             }, entry.var);
         }
@@ -5375,76 +5397,6 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
     column += canvas.DrawString(0, column, ")", {.style = common_data.style_failed_macro, .important = true});
     canvas.InsertLineBefore(canvas.NumLines());
     canvas.Print(terminal, cur_style);
-}
-
-// --- modules::TracePrinter ---
-
-bool ta_test::modules::TracePrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept
-{
-    if (auto ptr = dynamic_cast<const BasicTrace *>(&frame))
-    {
-        output::TextCanvas canvas(&common_data);
-
-        std::size_t column = 0;
-
-        // Path.
-        column += canvas.DrawString(0, column, common_data.LocationToString(ptr->GetSourceLocation()), {.style = common_data.style_path, .important = true});
-        column += canvas.DrawString(0, column, ":", {.style = common_data.style_path, .important = true});
-
-        // Prefix.
-        column = 0;
-        column += canvas.DrawString(1, column, chars_func_name_prefix, {.style = common_data.style_stack_frame, .important = true});
-
-        std::string expr;
-        { // Generate the function call string.
-            expr += ptr->GetFuncName();
-
-            // Template arguments.
-            if (!ptr->GetTemplateArgs().empty())
-            {
-                expr += "<";
-                for (bool first = true; const auto &elem : ptr->GetTemplateArgs())
-                {
-                    if (first)
-                        first = false;
-                    else
-                        expr += common_data.spaced_comma;
-                    expr += elem;
-                }
-                expr += ">";
-            }
-
-            // Function arguments.
-            expr += '(';
-            if (!ptr->GetFuncArgs().empty())
-            {
-                if (common_data.spaces_in_func_call_parentheses)
-                    expr += ' ';
-
-                for (bool first = true; const auto &elem : ptr->GetFuncArgs())
-                {
-                    if (first)
-                        first = false;
-                    else
-                        expr += common_data.spaced_comma;
-                    expr += elem;
-                }
-
-                if (common_data.spaces_in_func_call_parentheses)
-                    expr += ' ';
-            }
-            expr += ')';
-        }
-
-        output::expr::DrawToCanvas(canvas, 1, column, expr);
-
-        canvas.InsertLineBefore(canvas.NumLines());
-        canvas.Print(terminal, cur_style);
-
-        return true;
-    }
-
-    return false;
 }
 
 // --- modules::DebuggerDetector ---
