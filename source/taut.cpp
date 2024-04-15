@@ -4469,6 +4469,11 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const data::RunTestsResul
         std::size_t indentation_width = text::chars::NumUtf8Chars(chars_indentation);
         std::size_t prefix_width = text::chars::NumUtf8Chars(chars_test_prefix);
 
+        // Trim trailing whitespace from `chars_summary_path_separator`.
+        std::string_view summary_path_separator_trimmed = chars_summary_path_separator;
+        if (auto pos = summary_path_separator_trimmed.find_last_not_of(' '); pos != std::string_view::npos)
+            summary_path_separator_trimmed = summary_path_separator_trimmed.substr(0, pos + 1);
+
         // Determine how much space to leave for the test name tree.
         for (const data::BasicTest *test : data.failed_tests)
         {
@@ -4515,7 +4520,11 @@ void ta_test::modules::ProgressPrinter::OnPostRunTests(const data::RunTestsResul
                     is_last_segment ? "" : "/",
                     "", int(gap_to_separator),
                     style_summary_path_separator,
-                    chars_summary_path_separator
+                    is_last_segment
+                        ? chars_summary_path_separator
+                        // Strip trailing whitespace if we're not going to print a path after this.
+                        // We avoid trailing whitespace in general to make editing the testcases easier.
+                        : summary_path_separator_trimmed
                 );
 
                 // Print the file path for the last segment.

@@ -4314,7 +4314,7 @@ namespace ta_test
                     },
                     [&]
                     {
-                        return CFG_TA_FMT_NAMESPACE::format("The exception message doesn't match the regex `{}`.", regex);
+                        return CFG_TA_FMT_NAMESPACE::format("The exception message doesn't match regex `{}`.", regex);
                     },
                     flags, source_loc
                 );
@@ -4328,7 +4328,7 @@ namespace ta_test
                 if (auto guard = MakeContextGuard(-1, flags, source_loc))
                 {
                     if (!text::regex::WholeStringMatchesRegex(CombinedMessage(separator), r))
-                        TA_FAIL(source_loc, "The combined exception message doesn't match the regex `{}`.", regex);
+                        TA_FAIL(source_loc, "The combined exception message doesn't match regex `{}`.", regex);
                 }
             }
 

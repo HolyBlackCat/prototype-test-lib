@@ -180,15 +180,17 @@ struct TryCompileParams
 }
 
 // Check that `code` compiles (even with `-Werror`).
-void MustCompile(std::string_view code, ta_test::Trace<"MustCompile"> = {})
+void MustCompile(std::string_view code, ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
 {
+    TA_CONTEXT(source_loc);
     TA_CHECK( TryCompile(code, {.werror = true}) == 0 );
 }
 
 // Check that `code` fails with a compilation error (even with all warnings disabled).
 // If `regex` isn't empty, also validates the compiler output against the regex.
-void MustNotCompile(std::string_view code, std::string_view regex = "", ta_test::Trace<"MustNotCompile"> = {})
+void MustNotCompile(std::string_view code, std::string_view regex = "", ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
 {
+    TA_CONTEXT(source_loc);
     std::string output;
 
     TryCompileParams params{.no_warnings = true};
@@ -298,8 +300,9 @@ struct CodeRunner
     }
 };
 // Compile the code and then run some checks on the exe.
-[[nodiscard]] CodeRunner MustCompileAndThen(std::string_view code, ta_test::Trace<"MustCompileAndThen"> = {})
+[[nodiscard]] CodeRunner MustCompileAndThen(std::string_view code, ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
 {
+    TA_CONTEXT(source_loc);
     CodeRunner runner;
     TryCompileParams params{.werror = true};
     params.exe_filename = &runner.exe_filename;
@@ -742,8 +745,10 @@ TA_TEST( string_conv/to_string )
 
 TA_TEST( string_conv/from_string )
 {
-    constexpr auto FromStringPasses = [&]<typename T>(const char *source, const T &expected, int unused_trailing_characters = 0, ta_test::Trace<"FromStringPasses"> = {})
+    constexpr auto FromStringPasses = [&]<typename T>(const char *source, const T &expected, int unused_trailing_characters = 0, ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
     {
+        TA_CONTEXT(source_loc, "FromStringPasses");
+
         const char *orig_source = source;
 
         T value;
@@ -771,8 +776,10 @@ TA_TEST( string_conv/from_string )
             TA_CHECK( $[value] == $[expected] );
     };
 
-    constexpr auto FromStringFails = [&]<typename T>(const char *source, int pos, std::string_view expected_error, ta_test::Trace<"FromStringFails"> = {})
+    constexpr auto FromStringFails = [&]<typename T>(const char *source, int pos, std::string_view expected_error, ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
     {
+        TA_CONTEXT(source_loc, "FromStringFails");
+
         const char *orig_source = source;
 
         T value;
@@ -2853,13 +2860,38 @@ TA_TEST(blah)
     TA_CHECK( ( throw ta_test::InterruptTestException{}, false ) );
     std::cout << "b\n";
 }
+TA_TEST(bleh)
+{
+    std::cout << "c\n";
+    TA_CHECK( ( throw ta_test::InterruptTestException{}, false ) )(ta_test::soft);
+    std::cout << "d\n";
+}
+)").RunWithExactOutput("", R"(
+{
+    // Throwing `ta_test::InterruptTestException` gracefully stops the test.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+TA_TEST(blah)
+{
+    std::cout << "a\n";
+    TA_CHECK( ( throw ta_test::InterruptTestException{}, false ) );
+    std::cout << "b\n";
+}
+TA_TEST(bleh)
+{
+    std::cout << "c\n";
+    TA_CHECK( ( throw ta_test::InterruptTestException{}, false ) )(ta_test::soft);
+    std::cout << "d\n";
+}
 )").RunWithExactOutput("", R"(
 Running tests...
-1/1 │  ● blah
+1/2 │  ● blah
 a
+2/2 │  ● bleh
+c
 
              Tests    Checks
-PASSED           1         1
+PASSED           2         2
 
 )");
 
@@ -4042,36 +4074,250 @@ Passed           0         1
 FAILED           1         1
 
 )");
+
+    // Throwing `ta_test::InterruptTestException` gracefully stops the test.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+TA_TEST(blah)
+{
+    std::cout << "a\n";
+    TA_CHECK( ( throw ta_test::InterruptTestException{}, false ) );
+    std::cout << "b\n";
+}
+TA_TEST(bleh)
+{
+    std::cout << "c\n";
+    TA_CHECK( ( throw ta_test::InterruptTestException{}, false ) )(ta_test::soft);
+    std::cout << "d\n";
+}
+)").RunWithExactOutput("", R"(
+Running tests...
+1/2 │  ● blah
+a
+2/2 │  ● bleh
+c
+
+             Tests    Checks
+PASSED           2         2
+
+)");
 }
 
-#if 0
 TA_TEST( ta_must_throw/checks )
 {
     std::string program = "\n" + common_program_prefix + R"(
 #include <iostream>
-TA_TEST(wrong_message/1)      { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessage("fo"); std::cout << "###\n"; }
-TA_TEST(wrong_message/2)      { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessage("fo."); std::cout << "###\n"; } // A regex would match.
-TA_TEST(wrong_message/3)      { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessage(0, "fo."); std::cout << "###\n"; } // A regex would match.
-TA_TEST(right_message)        { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessage("foo"); }
-TA_TEST(wrong_regex)          { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessageRegex("f."); std::cout << "###\n"; }
-TA_TEST(right_regex/1)        { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessageRegex("f.."); }
-TA_TEST(right_regex/2)        { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckMessageRegex(0, "f.."); }
-TA_TEST(right_exact_type/1)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckExactType<std::runtime_error>(); }
-TA_TEST(right_exact_type/2)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckExactType<std::runtime_error>(0); }
-TA_TEST(wrong_exact_type/1)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckExactType<std::exception>(); std::cout << "###\n"; }
-TA_TEST(wrong_exact_type/2)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckExactType<int>(); std::cout << "###\n"; }
-TA_TEST(right_derived_type/1) { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::runtime_error>(); }
-TA_TEST(right_derived_type/2) { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::runtime_error>(0); }
-TA_TEST(right_derived_type/3) { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::exception>(); }
-TA_TEST(right_derived_type/4) { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::exception>(0); }
-TA_TEST(wrong_derived_type)   { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckDerivedType<std::logic_error>(); std::cout << "###\n"; }
-TA_TEST(right_low_check)      { FOO( TA_MUST_THROW( std::runtime_error("foo") ) ).CheckElemLow(0, [&](const ta_test::SingleException &) {return true;}, [&]{return "foo";}); }
+TA_TEST(wrong_message/1)      { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckMessage("fo"); std::cout << "###\n"; }
+TA_TEST(wrong_message/2)      { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckMessage("fo."); std::cout << "###\n"; } // A regex would match.
+TA_TEST(wrong_message/3)      { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckMessage(0, "fo."); std::cout << "###\n"; } // A regex would match.
+TA_TEST(right_message)        { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckMessage("foo"); }
+TA_TEST(wrong_regex)          { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckMessageRegex("f."); std::cout << "###\n"; }
+TA_TEST(right_regex/1)        { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckMessageRegex("f.."); }
+TA_TEST(right_regex/2)        { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckMessageRegex(0, "f.."); }
+TA_TEST(right_exact_type/1)   { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckExactType<std::runtime_error>(); }
+TA_TEST(right_exact_type/2)   { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckExactType<std::runtime_error>(0); }
+TA_TEST(wrong_exact_type/1)   { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckExactType<std::exception>(); std::cout << "###\n"; }
+TA_TEST(wrong_exact_type/2)   { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckExactType<int>(); std::cout << "###\n"; }
+TA_TEST(right_derived_type/1) { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckDerivedType<std::runtime_error>(); }
+TA_TEST(right_derived_type/2) { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckDerivedType<std::runtime_error>(0); }
+TA_TEST(right_derived_type/3) { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckDerivedType<std::exception>(); }
+TA_TEST(right_derived_type/4) { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckDerivedType<std::exception>(0); }
+TA_TEST(wrong_derived_type)   { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckDerivedType<std::logic_error>(); std::cout << "###\n"; }
+TA_TEST(right_low_check)      { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckElemLow(0, [&](const ta_test::SingleException &) {return true;}, [&]{return "foo";}); }
 )";
-    MustCompileAndThen("#define FOO(x) x" + program).FailWithExactOutput("", "f");
 
-    #error this is blocked by the new scoping mechanism
+    std::string output = R"(
+Running tests...
+      │  ● wrong_message/
+ 1/17 │  ·   ● 1
+
+dir/subdir/file.cpp:6:
+TEST FAILED: wrong_message/1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:6:
+Failure: The exception message is not equal to `fo`.
+
+While analyzing exception:
+    std::runtime_error:
+        "foo"
+
+dir/subdir/file.cpp:6:
+Thrown here:
+
+    TA_MUST_THROW( throw std::runtime_error("foo") )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+          │  ○ wrong_message/
+ 2/17 [1] │  ·   ● 2
+
+dir/subdir/file.cpp:7:
+TEST FAILED: wrong_message/2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:7:
+Failure: The exception message is not equal to `fo.`.
+
+While analyzing exception:
+    std::runtime_error:
+        "foo"
+
+dir/subdir/file.cpp:7:
+Thrown here:
+
+    TA_MUST_THROW( throw std::runtime_error("foo") )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+          │  ○ wrong_message/
+ 3/17 [2] │  ·   ● 3
+
+dir/subdir/file.cpp:8:
+TEST FAILED: wrong_message/3 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:8:
+Failure: The exception message is not equal to `fo.`.
+
+While analyzing exception:
+    std::runtime_error:
+        "foo"
+
+dir/subdir/file.cpp:8:
+Thrown here:
+
+    TA_MUST_THROW( throw std::runtime_error("foo") )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+ 4/17 [3] │  ● right_message
+ 5/17 [3] │  ● wrong_regex
+
+dir/subdir/file.cpp:10:
+TEST FAILED: wrong_regex ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:10:
+Failure: The exception message doesn't match regex `f.`.
+
+While analyzing exception:
+    std::runtime_error:
+        "foo"
+
+dir/subdir/file.cpp:10:
+Thrown here:
+
+    TA_MUST_THROW( throw std::runtime_error("foo") )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+          │  ● right_regex/
+ 6/17 [4] │  ·   ● 1
+ 7/17 [4] │  ·   ● 2
+          │  ● right_exact_type/
+ 8/17 [4] │  ·   ● 1
+ 9/17 [4] │  ·   ● 2
+          │  ● wrong_exact_type/
+10/17 [4] │  ·   ● 1
+
+dir/subdir/file.cpp:15:
+TEST FAILED: wrong_exact_type/1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:15:
+Failure: The exception type is not `std::exception`.
+
+While analyzing exception:
+    std::runtime_error:
+        "foo"
+
+dir/subdir/file.cpp:15:
+Thrown here:
+
+    TA_MUST_THROW( throw std::runtime_error("foo") )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+          │  ○ wrong_exact_type/
+11/17 [5] │  ·   ● 2
+
+dir/subdir/file.cpp:16:
+TEST FAILED: wrong_exact_type/2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:16:
+Failure: The exception type is not `int`.
+
+While analyzing exception:
+    std::runtime_error:
+        "foo"
+
+dir/subdir/file.cpp:16:
+Thrown here:
+
+    TA_MUST_THROW( throw std::runtime_error("foo") )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+          │  ● right_derived_type/
+12/17 [6] │  ·   ● 1
+13/17 [6] │  ·   ● 2
+14/17 [6] │  ·   ● 3
+15/17 [6] │  ·   ● 4
+16/17 [6] │  ● wrong_derived_type
+
+dir/subdir/file.cpp:21:
+TEST FAILED: wrong_derived_type ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:21:
+Failure: The exception type is not derived from `std::logic_error`.
+
+While analyzing exception:
+    std::runtime_error:
+        "foo"
+
+dir/subdir/file.cpp:21:
+Thrown here:
+
+    TA_MUST_THROW( throw std::runtime_error("foo") )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+17/17 [7] │  ● right_low_check
+
+FOLLOWING TESTS FAILED:
+
+● wrong_message/          │
+·   ● 1                   │ dir/subdir/file.cpp:6
+·   ● 2                   │ dir/subdir/file.cpp:7
+·   ● 3                   │ dir/subdir/file.cpp:8
+● wrong_regex             │ dir/subdir/file.cpp:10
+● wrong_exact_type/       │
+·   ● 1                   │ dir/subdir/file.cpp:15
+·   ● 2                   │ dir/subdir/file.cpp:16
+● wrong_derived_type      │ dir/subdir/file.cpp:21
+)";
+    std::string output_suffix_a = R"(
+             Tests    Checks
+Executed        17        41
+Passed          10        34
+FAILED           7         7
+
+)";
+    std::string output_suffix_b = R"(
+             Tests    Checks
+Executed        17        58
+Passed          10        51
+FAILED           7         7
+
+)";
+
+    MustCompileAndThen("#define FOO(x) (void)(ta_test::CaughtException) x" + program).FailWithExactOutput("", output + output_suffix_a);
+    MustCompileAndThen("#define FOO(x) (void)(ta_test::CaughtException) x.CheckMessageRegex(\".*\")" + program).FailWithExactOutput("", output + output_suffix_b);
+    MustCompileAndThen("#define FOO(x) auto c = x; (void)(ta_test::CaughtException) c" + program).FailWithExactOutput("", output + output_suffix_a);
 }
-#endif
 
 int main(int argc, char **argv)
 {
