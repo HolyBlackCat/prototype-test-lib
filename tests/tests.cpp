@@ -2867,23 +2867,6 @@ TA_TEST(bleh)
     std::cout << "d\n";
 }
 )").RunWithExactOutput("", R"(
-{
-    // Throwing `ta_test::InterruptTestException` gracefully stops the test.
-    MustCompileAndThen(common_program_prefix + R"(
-#include <iostream>
-TA_TEST(blah)
-{
-    std::cout << "a\n";
-    TA_CHECK( ( throw ta_test::InterruptTestException{}, false ) );
-    std::cout << "b\n";
-}
-TA_TEST(bleh)
-{
-    std::cout << "c\n";
-    TA_CHECK( ( throw ta_test::InterruptTestException{}, false ) )(ta_test::soft);
-    std::cout << "d\n";
-}
-)").RunWithExactOutput("", R"(
 Running tests...
 1/2 │  ● blah
 a

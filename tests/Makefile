@@ -274,7 +274,7 @@ test_$(_config): $(if $(AUTO_REBUILD_TESTS),$(_all_exes))
 	$$(call,$$(shell LD_LIBRARY_PATH=$(BUILD_DIR)/$(_config) $(EXE_RUNNER) ./$(BUILD_DIR)/$(_config)/_sanity_check$(EXT_EXE) $(if $(tracing),,>/dev/null 2>/dev/null) --throw-exception))$$(if $$(filter 0,$$(.SHELLSTATUS)),$$(error Sanity check failed for `$(_config)` (thrown exception)))
 	$$(info [$(_config)] Sanity check passed)
 	$(call, ### Run main tests.)
-	@$(_tests_env) $(EXE_RUNNER) $(BUILD_DIR)/$(_config)/tests$(EXT_EXE) $(ARGS) >$(_tests_log) 2>$(_tests_log) || (cat $(_tests_log) && false)
+	@$(_tests_env) $(EXE_RUNNER) bash -c $(call quote,$(BUILD_DIR)/$(_config)/tests$(EXT_EXE) $(ARGS) 2>&1 | tee $(_tests_log))
 	@echo '[$(_config)] Main tests passed'
 	@true
 
