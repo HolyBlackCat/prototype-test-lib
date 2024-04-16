@@ -3384,6 +3384,41 @@ FAILED           1         1
     MustCompileAndThen(common_program_prefix + "TA_TEST(blah) {TA_CHECK(true)(\"x = {}\", (std::exit(1), 42));}")
         .Run();
 
+    // The message must be evaluated at most once.
+    MustCompileAndThen(common_program_prefix + "TA_TEST(blah) {int i = 0; TA_CHECK((TA_CHECK(false)(ta_test::soft), false))(\"x = {}\", ((i ? std::exit(1) : void(i = 1)), 42));}")
+        .FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:4:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:4:
+Assertion failed:
+
+    TA_CHECK( false )
+
+dir/subdir/file.cpp:4:
+While checking assertion: x = 42
+
+    TA_CHECK( (TA_CHECK(false)(ta_test::soft), false) )
+
+dir/subdir/file.cpp:4:
+Assertion failed: x = 42
+
+    TA_CHECK( (TA_CHECK(false)(ta_test::soft), false) )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:4
+
+             Tests    Checks
+FAILED           1         2
+
+)");
+
     // Arguments are not moved into the `$[...]`, but their value category is preserved.
     MustCompileAndThen(common_program_prefix + R"(
 bool foo(std::string &&x) {return !x.empty();}
@@ -4088,6 +4123,8 @@ PASSED           2         2
 
 TA_TEST( ta_must_throw/checks )
 {
+    // Various `CaughtException::Check...()` functions.
+
     std::string program = "\n" + common_program_prefix + R"(
 #include <iostream>
 TA_TEST(wrong_message/1)      { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckMessage("fo"); std::cout << "###\n"; }
@@ -4300,6 +4337,16 @@ FAILED           7         7
     MustCompileAndThen("#define FOO(x) (void)(ta_test::CaughtException) x" + program).FailWithExactOutput("", output + output_suffix_a);
     MustCompileAndThen("#define FOO(x) (void)(ta_test::CaughtException) x.CheckMessageRegex(\".*\")" + program).FailWithExactOutput("", output + output_suffix_b);
     MustCompileAndThen("#define FOO(x) auto c = x; (void)(ta_test::CaughtException) c" + program).FailWithExactOutput("", output + output_suffix_a);
+}
+
+TA_TEST( ta_must_throw/context )
+{
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    TA_MUST_THROW( TA_CHECK(false)(ta_test::soft, "outer") )("inner");
+}
+)").FailWithExactOutput("", "f");
 }
 
 int main(int argc, char **argv)
