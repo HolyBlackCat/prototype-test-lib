@@ -526,7 +526,7 @@
 #define DETAIL_TA_MUST_THROW(macro_name_, str_, ...) \
     /* `~` is what actually performs the asesrtion. We need something with a high precedence. */\
     ~::ta_test::detail::MustThrowWrapper::Make<__FILE__, __LINE__, macro_name_, str_>(\
-        [&]{CFG_TA_IGNORE_UNUSED_VALUE(__VA_ARGS__;)},\
+        [&]{CFG_TA_IGNORE_UNUSED_VALUE(DETAIL_TA_NONEMPTY_IDENTITY(__VA_ARGS__);)},\
         []{CFG_TA_BREAKPOINT(); ::std::terminate();}\
     )\
     .DETAIL_TA_ADD_EXTRAS
@@ -3247,9 +3247,13 @@ namespace ta_test
             };
 
             // This is invoked when the assertion finishes evaluating.
-            struct Evaluator
+            class Evaluator
             {
+                friend AssertWrapper;
                 AssertWrapper &self;
+                Evaluator(AssertWrapper &self) : self(self) {}
+
+              public:
                 CFG_TA_API bool operator~();
             };
 
@@ -4540,6 +4544,10 @@ namespace ta_test
                 body_data(&func),
                 break_func(break_func)
             {}
+
+            // Evaluates the user message and other extra parameters, if any.
+            // Repeated calls hae no effect.
+            CFG_TA_API void EvaluateExtras();
 
             class Evaluator;
 

@@ -942,9 +942,6 @@ namespace ta_test
             // When printing a path with a line number, this comes after the line number.
             std::string filename_linenumber_suffix;
 
-            // A comma with optional spacing around it.
-            std::string spaced_comma = ", ";
-
             // Vertical bars, either standalone or in brackets.
             char32_t bar{};
             // Bottom brackets.

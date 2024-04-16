@@ -2443,10 +2443,29 @@ ta_test::CaughtException::CaughtException(
 
 std::optional<std::string_view> ta_test::detail::MustThrowWrapper::Info::UserMessage() const
 {
+    self.EvaluateExtras();
+
     if (self.user_message)
         return *self.user_message;
     else
         return {};
+}
+
+void ta_test::detail::MustThrowWrapper::EvaluateExtras()
+{
+    if (extras_func)
+    {
+        try
+        {
+            extras_func(*this, extras_data);
+        }
+        catch (...)
+        {
+            user_message = "[uncaught exception while evaluating the message]";
+        }
+
+        extras_func = nullptr;
+    }
 }
 
 ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~() const
@@ -2473,17 +2492,7 @@ ta_test::CaughtException ta_test::detail::MustThrowWrapper::Evaluator::operator~
         );
     }
 
-    if (self.extras_func)
-    {
-        try
-        {
-            self.extras_func(self, self.extras_data);
-        }
-        catch (...)
-        {
-            self.user_message = "[uncaught exception while evaluating the message]";
-        }
-    }
+    self.EvaluateExtras();
 
     thread_state.FailCurrentTest();
 

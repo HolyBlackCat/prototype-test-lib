@@ -153,20 +153,10 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 --- TA_MUST_THROW:
-    Outer TA_MUST_THROW must still show the message.
-    Don't evaluate the user message on success
-    Opening two same context frames deduplicates them.
-    When doing a oneliner: `TA_MUST_THROW(...).Check...()`, make sure that the frame guard from the macro doesn't extend into the check.
+    Opening two same context frames deduplicates them. (or not?)
     Element index out of range is a test fail, not a hard error. (check also the flags)
-    correctly breaks on the call site
     usable without (...) in fold expressions
-    Gracefully fail the test if the lazy message throws?
-    Error if outlives the test. Error if destroyed out of order?
     Error if context guard is destroyed out of order?
-
-    call ABSOLUTELY ALL methods in three contexts: inline, inline after another method, out of line
-        We must check all this due to the weird way TA_MUST_THROW is written.
-        Make sure the stacks are printed correctly, including the function argments.
 
     Checking unknown exceptions. All functions must fail.
 
@@ -181,6 +171,7 @@ TA_TEST
     Moved-from CaughtException should fail all checks.
 
 --- TA_LOG
+    multiline user messages?
     \n suffix is silently stripped, but at most once.
     Don't break if an argument throws.
     Usable in fold expressions without parentheses.
@@ -438,32 +429,11 @@ TA_TEST
 
     Pastable reproducer strings should print the proper values (if short enough), not # indices
 
---- All the macros nicely no-op when tests are disabled
-    TA_CHECK validates the arguments (crash on call?)
-    $[...] only works inside of TA_CHECK
-    TA_TEST generates a dummy function to validate stuff
-    TA_LOG and TA_CONTEXT - crash on call??? (disable crash with a macro?)
-
---- `Trace` type
-    All the ten thousand constructor overloads.
-    Reset()
-    NoTrace{}
 
 --- Exception printer
 Known and unknown exception types.
 Nested exceptions (containing known and unknown types in them).
 
---- Assertion stack
-Due to failed assertion.
-Due to exception.
-
-User messages in assertions.
-    But not in assertion stack, since it's hard to do with our current implementation.
-
---- Build errors when:
-    $[...] lexically outside of ASSERT().
-    No error when ASSERT() is lexically outside of a test.
-    Unformattable $[...] type
 
 --- Runtime errors when:
     Same test name registered from two different places
@@ -478,13 +448,6 @@ User messages in assertions.
     Try duplicating $[...] with a macro, what then?
 
 --- Formatting errors shouldn't compile.
-
---- Various flag styles:
-    --include foo
-    --include=foo
-    -ifoo
-    -i foo
-    But not -i=foo
 
 --- Command line flags
     Nice error on bad --include regex, same for `--generate` regex

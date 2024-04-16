@@ -4341,12 +4341,83 @@ FAILED           7         7
 
 TA_TEST( ta_must_throw/context )
 {
+    // User message is not evaluated on success.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah) {TA_MUST_THROW(throw 42)("foo {}", (std::exit(1), 42));}
+    )").Run();
+
+    // User message is evaluated at most once.
     MustCompileAndThen(common_program_prefix + R"(
 TA_TEST(blah)
 {
-    TA_MUST_THROW( TA_CHECK(false)(ta_test::soft, "outer") )("inner");
+    int i = 42;
+    TA_MUST_THROW( TA_CHECK(false)(ta_test::soft, "outer") )("inner {}", i++);
 }
-)").FailWithExactOutput("", "f");
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:8:
+Assertion failed: outer
+
+    TA_CHECK( false )
+
+dir/subdir/file.cpp:8:
+While expecting exception here: inner 42
+
+    TA_MUST_THROW( TA_CHECK(false)(ta_test::soft, "outer") )
+
+dir/subdir/file.cpp:8:
+Expected exception: inner 42
+
+    TA_MUST_THROW( TA_CHECK(false)(ta_test::soft, "outer") )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+FAILED           1         2
+
+)");
+
+    // Exception in user message.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+TA_TEST(blah)
+{
+    std::cout << "a\n";
+    TA_MUST_THROW(42)(ta_test::soft, "foo = {}", (throw 42, 43));
+    std::cout << "b\n"; // This isn't evaluated, because we don't see the "soft" flag because of the exception.
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+a
+
+dir/subdir/file.cpp:6:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:9:
+Expected exception: [uncaught exception while evaluating the message]
+
+    TA_MUST_THROW( 42 )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:6
+
+             Tests    Checks
+FAILED           1         1
+
+)");
 }
 
 int main(int argc, char **argv)
