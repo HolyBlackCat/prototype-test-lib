@@ -2,6 +2,8 @@
 
 #include <taut/taut.hpp>
 
+#include <any>
+
 // You only need to include this header if you want to access the individual modules, or write your own ones.
 
 namespace ta_test
@@ -1121,8 +1123,11 @@ namespace ta_test
         // Uses the current modules to print the context stack. See `namespace context` above.
         // If `skip_last_frame` is specified and is the last frame, that frame is not printed.
         CFG_TA_API void PrintContext(Terminal::StyleGuard &cur_style, const context::BasicFrame *skip_last_frame = nullptr, context::Context con = context::CurrentContext());
+
+        using ContextFrameState = std::map<std::type_index, std::any>;
         // Same, but only prints a single context frame.
-        CFG_TA_API void PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame);
+        // `state` is arbitrary, it's preserved between frames when printing a stack, and modules can interpret it in whatever way they want.
+        CFG_TA_API void PrintContextFrame(Terminal::StyleGuard &cur_style, const context::BasicFrame &frame, ContextFrameState &state);
 
         // Prints the current log, using the current modules.
         // Returns true if at least one module has printed something.
@@ -1153,7 +1158,7 @@ namespace ta_test
         // This is called whenever the context information needs to be printed.
         // Return true if this type of context frame is known to you and you handled it, then the other modules won't receive this call.
         // Do nothing and return false if you don't know this context frame type.
-        virtual bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept {(void)cur_style; (void)frame; return false;}
+        virtual bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame, output::ContextFrameState &state) noexcept {(void)cur_style; (void)frame; (void)state; return false;}
         // This is called to print the log.
         // Return true to prevent other modules from receiving this call.
         // `unscoped_log` can alternatively be obtained from `BasicModule::RunSingleTestResults`.
@@ -1959,7 +1964,7 @@ namespace ta_test
             std::u32string chars_in_this_subexpr_weird = U"in here?";
 
             void OnAssertionFailed(const data::BasicAssertion &data) noexcept override;
-            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept override;
+            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame, output::ContextFrameState &state) noexcept override;
 
             CFG_TA_API void PrintAssertionFrameLow(output::Terminal::StyleGuard &cur_style, const data::BasicAssertion &data, bool is_most_nested) const;
         };
@@ -2042,7 +2047,7 @@ namespace ta_test
             std::string chars_throw_location = "Thrown here:";
 
             void OnMissingException(const data::MustThrowInfo &data) noexcept override;
-            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept override;
+            bool PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame, output::ContextFrameState &state) noexcept override;
 
             CFG_TA_API void PrintFrame(
                 output::Terminal::StyleGuard &cur_style,

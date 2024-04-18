@@ -1598,6 +1598,8 @@ std::size_t ta_test::output::expr::DrawToCanvas(output::TextCanvas &canvas, std:
 
 void ta_test::output::PrintContext(Terminal::StyleGuard &cur_style, const context::BasicFrame *skip_last_frame, context::Context con)
 {
+    ContextFrameState state;
+
     bool first = true;
     for (auto it = con.end(); it != con.begin();)
     {
@@ -1606,11 +1608,11 @@ void ta_test::output::PrintContext(Terminal::StyleGuard &cur_style, const contex
             continue;
 
         first = false;
-        PrintContextFrame(cur_style, **it);
+        PrintContextFrame(cur_style, **it, state);
     }
 }
 
-void ta_test::output::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame)
+void ta_test::output::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame, ContextFrameState &state)
 {
     auto &thread_state = detail::ThreadState();
     if (!thread_state.current_test)
@@ -1618,7 +1620,7 @@ void ta_test::output::PrintContextFrame(output::Terminal::StyleGuard &cur_style,
 
     for (const auto &m : thread_state.current_test->all_tests->modules->GetModulesImplementing<&BasicPrintingModule::PrintContextFrame>())
     {
-        if (m->PrintContextFrame(cur_style, frame))
+        if (m->PrintContextFrame(cur_style, frame, state))
             break;
     }
 }
@@ -4958,8 +4960,10 @@ void ta_test::modules::AssertionPrinter::OnAssertionFailed(const data::BasicAsse
     output::PrintContext(cur_style, &data);
 }
 
-bool ta_test::modules::AssertionPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept
+bool ta_test::modules::AssertionPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame, output::ContextFrameState &state) noexcept
 {
+    (void)state;
+
     if (auto assertion_frame = dynamic_cast<const data::BasicAssertion *>(&frame))
     {
         PrintAssertionFrameLow(cur_style, *assertion_frame, false);
@@ -5324,7 +5328,7 @@ void ta_test::modules::MustThrowPrinter::OnMissingException(const data::MustThro
     output::PrintContext(cur_style, &data);
 }
 
-bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame) noexcept
+bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::StyleGuard &cur_style, const context::BasicFrame &frame, output::ContextFrameState &state) noexcept
 {
     if (auto ptr = dynamic_cast<const data::MustThrowInfo *>(&frame))
     {
@@ -5333,7 +5337,16 @@ bool ta_test::modules::MustThrowPrinter::PrintContextFrame(output::Terminal::Sty
     }
     if (auto ptr = dynamic_cast<const data::CaughtExceptionContext *>(&frame))
     {
-        PrintFrame(cur_style, *ptr->state->static_info, ptr->state->dynamic_info.lock().get(), ptr, false);
+        // We deduplicate those frames.
+        struct VisitedExceptions
+        {
+            std::set<const data::CaughtExceptionInfo *> set;
+        };
+        auto [iter, state_is_new] = state.try_emplace(typeid(VisitedExceptions));
+        VisitedExceptions &visited = state_is_new ? iter->second.emplace<VisitedExceptions>() : std::any_cast<VisitedExceptions &>(iter->second);
+        bool elem_is_new = visited.set.insert(ptr->state.get()).second; // We don't care about the active element.
+        if (elem_is_new)
+            PrintFrame(cur_style, *ptr->state->static_info, ptr->state->dynamic_info.lock().get(), ptr, false);
         return true;
     }
 
