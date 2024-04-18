@@ -4418,6 +4418,58 @@ FOLLOWING TESTS FAILED:
 FAILED           1         1
 
 )");
+
+    // Deduplicate context frames.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah)
+{
+    auto c = TA_MUST_THROW(
+        try
+        {
+            throw std::runtime_error("Inner!");
+        }
+        catch (...)
+        {
+            std::throw_with_nested(std::runtime_error("Outer!"));
+        }
+    );
+    auto g1 = c.MakeContextGuard(0);
+    auto g2 = c.MakeContextGuard(1); // This one takes priority.
+    TA_FAIL;
+}
+)").FailWithExactOutput("", R"(
+Running tests...
+1/1 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:19:
+Failure.
+
+While analyzing exception:
+    std::_Nested_exception<std::runtime_error>:
+        "Outer!"
+ ▶  std::runtime_error:
+ ▶      "Inner!"
+
+dir/subdir/file.cpp:16:
+Thrown here:
+
+    TA_MUST_THROW( try { throw std::runtime_error("Inner!"); } catch (...) { std::throw_with_nested(std::runtime_error("Outer!")); } )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+
+             Tests    Checks
+Executed         1         4
+Passed           0         3
+FAILED           1         1
+
+)");
 }
 
 int main(int argc, char **argv)

@@ -153,10 +153,8 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 --- TA_MUST_THROW:
-    Opening two same context frames deduplicates them. (or not?)
     Element index out of range is a test fail, not a hard error. (check also the flags)
     usable without (...) in fold expressions
-    Error if context guard is destroyed out of order?
 
     Checking unknown exceptions. All functions must fail.
 
