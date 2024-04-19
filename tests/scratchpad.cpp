@@ -153,8 +153,7 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 --- TA_MUST_THROW:
-    Element index out of range is a test fail, not a hard error. (check also the flags)
-    usable without (...) in fold expressions
+    how combining messages works
 
     Checking unknown exceptions. All functions must fail.
 

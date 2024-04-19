@@ -3919,6 +3919,13 @@ FOLLOWING TESTS FAILED:
 FAILED           1         1
 
 )");
+
+    // Usable in fold expressions without parenthesis.
+    auto lambda = [](auto ...x)
+    {
+        (TA_MUST_THROW(throw x), ...);
+    };
+    lambda( true, 1, 42 );
 }
 
 TA_TEST( ta_must_throw/overloads )
@@ -4468,6 +4475,174 @@ FOLLOWING TESTS FAILED:
 Executed         1         4
 Passed           0         3
 FAILED           1         1
+
+)");
+}
+
+TA_TEST( ta_must_throw/misc_softness )
+{
+    // Check that element index being out of range is checked with the same softness as the whole check.
+    MustCompileAndThen(common_program_prefix + R"(
+#include <iostream>
+TA_TEST( hard/1 ) { TA_MUST_THROW(throw std::runtime_error("foo")).CheckMessage(1, "foo"); std::cout << "###\n"; }
+TA_TEST( hard/2 ) { TA_MUST_THROW(throw std::runtime_error("foo")).CheckMessageRegex(1, "foo"); std::cout << "###\n"; }
+TA_TEST( hard/3 ) { TA_MUST_THROW(throw std::runtime_error("foo")).CheckExactType<std::runtime_error>(1); std::cout << "###\n"; }
+TA_TEST( hard/4 ) { TA_MUST_THROW(throw std::runtime_error("foo")).CheckDerivedType<std::runtime_error>(1); std::cout << "###\n"; }
+
+TA_TEST( soft/1 ) { TA_MUST_THROW(throw std::runtime_error("foo")).CheckMessage(1, "foo", ta_test::soft); std::cout << "###\n"; }
+TA_TEST( soft/2 ) { TA_MUST_THROW(throw std::runtime_error("foo")).CheckMessageRegex(1, "foo", ta_test::soft); std::cout << "###\n"; }
+TA_TEST( soft/3 ) { TA_MUST_THROW(throw std::runtime_error("foo")).CheckExactType<std::runtime_error>(1, ta_test::soft); std::cout << "###\n"; }
+TA_TEST( soft/4 ) { TA_MUST_THROW(throw std::runtime_error("foo")).CheckDerivedType<std::runtime_error>(1, ta_test::soft); std::cout << "###\n"; }
+)").FailWithExactOutput("", R"(
+Running tests...
+    │  ● hard/
+1/8 │  ·   ● 1
+
+dir/subdir/file.cpp:6:
+TEST FAILED: hard/1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:6:
+Assertion failed: Exception element index is out of range.
+
+    TA_CHECK( $[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()] )
+               ╰────────┬────────╯     ╰───────────┬────────────╯    ╰─────────┬─────────╯
+                      false                        1                           1
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+        │  ○ hard/
+2/8 [1] │  ·   ● 2
+
+dir/subdir/file.cpp:7:
+TEST FAILED: hard/2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:7:
+Assertion failed: Exception element index is out of range.
+
+    TA_CHECK( $[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()] )
+               ╰────────┬────────╯     ╰───────────┬────────────╯    ╰─────────┬─────────╯
+                      false                        1                           1
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+        │  ○ hard/
+3/8 [2] │  ·   ● 3
+
+dir/subdir/file.cpp:8:
+TEST FAILED: hard/3 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:8:
+Assertion failed: Exception element index is out of range.
+
+    TA_CHECK( $[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()] )
+               ╰────────┬────────╯     ╰───────────┬────────────╯    ╰─────────┬─────────╯
+                      false                        1                           1
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+        │  ○ hard/
+4/8 [3] │  ·   ● 4
+
+dir/subdir/file.cpp:9:
+TEST FAILED: hard/4 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:9:
+Assertion failed: Exception element index is out of range.
+
+    TA_CHECK( $[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()] )
+               ╰────────┬────────╯     ╰───────────┬────────────╯    ╰─────────┬─────────╯
+                      false                        1                           1
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+        │  ● soft/
+5/8 [4] │  ·   ● 1
+
+dir/subdir/file.cpp:11:
+TEST FAILED: soft/1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:11:
+Assertion failed: Exception element index is out of range.
+
+    TA_CHECK( $[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()] )
+               ╰────────┬────────╯     ╰───────────┬────────────╯    ╰─────────┬─────────╯
+                      false                        1                           1
+
+###
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+        │  ○ soft/
+6/8 [5] │  ·   ● 2
+
+dir/subdir/file.cpp:12:
+TEST FAILED: soft/2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:12:
+Assertion failed: Exception element index is out of range.
+
+    TA_CHECK( $[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()] )
+               ╰────────┬────────╯     ╰───────────┬────────────╯    ╰─────────┬─────────╯
+                      false                        1                           1
+
+###
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+        │  ○ soft/
+7/8 [6] │  ·   ● 3
+
+dir/subdir/file.cpp:13:
+TEST FAILED: soft/3 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:13:
+Assertion failed: Exception element index is out of range.
+
+    TA_CHECK( $[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()] )
+               ╰────────┬────────╯     ╰───────────┬────────────╯    ╰─────────┬─────────╯
+                      false                        1                           1
+
+###
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+        │  ○ soft/
+8/8 [7] │  ·   ● 4
+
+dir/subdir/file.cpp:14:
+TEST FAILED: soft/4 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:14:
+Assertion failed: Exception element index is out of range.
+
+    TA_CHECK( $[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()] )
+               ╰────────┬────────╯     ╰───────────┬────────────╯    ╰─────────┬─────────╯
+                      false                        1                           1
+
+###
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● hard/      │
+·   ● 1      │ dir/subdir/file.cpp:6
+·   ● 2      │ dir/subdir/file.cpp:7
+·   ● 3      │ dir/subdir/file.cpp:8
+·   ● 4      │ dir/subdir/file.cpp:9
+● soft/      │
+·   ● 1      │ dir/subdir/file.cpp:11
+·   ● 2      │ dir/subdir/file.cpp:12
+·   ● 3      │ dir/subdir/file.cpp:13
+·   ● 4      │ dir/subdir/file.cpp:14
+
+             Tests    Checks
+Executed         8        16
+Passed           0         8
+FAILED           8         8
 
 )");
 }
