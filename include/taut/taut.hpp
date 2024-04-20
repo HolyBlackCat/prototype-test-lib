@@ -311,7 +311,7 @@
 //     TA_CHECK(condition)(flags, source_loc)
 //     TA_CHECK(condition)(flags, source_loc, message...)
 // Where:
-// * `message...` is a string literal, possibly followed by format arguments (as for `std::format`).
+// * `message...` is a string literal, possibly followed by format arguments (as for `std::format`) (trailing `\n`, if any, is automatically stripped).
 // * `flags` is an instance of `ta_test::AssertFlags`. In particular, passing `ta_test::soft` disables throwing on failure.
 // * `source_loc` should rarely be used. It's an instance of `SourceLoc`,
 //     which lets you override the filename and line number that will be displayed in the error message.
@@ -351,7 +351,7 @@
 //     TA_MUST_THROW(body)(flags)
 //     TA_MUST_THROW(body)(flags, message...)
 // Where:
-// * `message...` is a string literal, possibly followed by format arguments (as for `std::format`).
+// * `message...` is a string literal, possibly followed by format arguments (as for `std::format`) (trailing `\n`, if any, is automatically stripped).
 // * `flags` is an instance of `ta_test::AssertFlags`. In particular, passing `ta_test::soft` disables throwing on failure.
 // Unlike `TA_CHECK(...)`, `TA_MUST_THROW` doesn't support overriding the source location information.
 #define TA_MUST_THROW(...) \
@@ -2466,6 +2466,23 @@ namespace ta_test
     // If `e` is null, does nothing (doesn't not run the callback).
     CFG_TA_API void AnalyzeException(const std::exception_ptr &e, const std::function<void(SingleException elem)> &func);
 
+    // Designates or more components of `CaughtException`.
+    enum class ExceptionElem
+    {
+        // The exception itself, not something nested in it.
+        // This should be zero, to keep it the default.
+        top_level = 0,
+        // The most-nested exception.
+        most_nested,
+        // The exception itself and all nested exceptions.
+        all,
+        // At least one exception (the top-level one or one of the nested).
+        any,
+    };
+    using enum ExceptionElem;
+    // Either an index of an exception element in `CaughtException`, or a enum designating one or more elements.
+    using ExceptionElemVar = std::variant<ExceptionElem, int>;
+
 
     // --- DATA TYPES ---
 
@@ -2671,7 +2688,7 @@ namespace ta_test
             // `state` can be null.
             // `active_elem` is either -1 or an index into `state->elems`.
             // `flags` affect how we check the correctness of `active_elem` (on soft failure a null instance is constructed).
-            CFG_TA_API CaughtExceptionContext(std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, SourceLoc source_loc);
+            CFG_TA_API CaughtExceptionContext(std::shared_ptr<const CaughtExceptionInfo> state, ExceptionElemVar active_elem, AssertFlags flags, SourceLoc source_loc);
         };
 
         // Describes a generator created with `TA_GENERATE(...)`.
@@ -4137,23 +4154,6 @@ namespace ta_test
 
     // --- ANALYZING EXCEPTIONS ---
 
-    // Designates or more components of `CaughtException`.
-    enum class ExceptionElem
-    {
-        // The exception itself, not something nested in it.
-        // This should be zero, to keep it the default.
-        top_level = 0,
-        // The most-nested exception.
-        most_nested,
-        // The exception itself and all nested exceptions.
-        all,
-        // At least one exception (the top-level one or one of the nested).
-        any,
-    };
-    using enum ExceptionElem;
-    // Either an index of an exception element in `CaughtException`, or a enum designating one or more elements.
-    using ExceptionElemVar = std::variant<ExceptionElem, int>;
-
     struct ExceptionElemsCombinedTag {explicit ExceptionElemsCombinedTag() = default;};
     // The functions checking exception message accept this in addition to `ExceptionElem` to check the whole message.
     inline constexpr ExceptionElemsCombinedTag combined;
@@ -4214,16 +4214,16 @@ namespace ta_test
             // If you're manually examining this exception with `TA_CHECK(...)`, create an instance of this object first.
             // While it exists, all failed assertions will mention that they happened while examining this exception.
             // All high-level functions below do this automatically, and redundant contexts are silently ignored.
-            // `index` is the element index (into `GetElems()`) of the element you're examining, or `-1` if not specified.
-            // Fails the test if the is index invalid. `flags` affects how this validity check is handled.
-            [[nodiscard]] data::CaughtExceptionContext MakeContextGuard(int index = -1, AssertFlags flags = {}, SourceLoc source_loc = SourceLoc::Current{}) const
+            // `elem` is the subexception we should highlight, or `all`/`any` if none (those two have the same effect).
+            // Fails the test if the `elem` index invalid. `flags` affects how this validity check is handled.
+            [[nodiscard]] data::CaughtExceptionContext MakeContextGuard(ExceptionElemVar elem, AssertFlags flags = {}, SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 if constexpr (IsWrapper)
                     return State().FrameGuard();
                 else
                 {
                     // This nicely handles null state and/or bad indices.
-                    return data::CaughtExceptionContext(State(), index, flags, source_loc);
+                    return data::CaughtExceptionContext(State(), elem, flags, source_loc);
                 }
             }
 
@@ -4291,7 +4291,7 @@ namespace ta_test
             Ref CheckMessage(ExceptionElemsCombinedTag, std::string_view expected_message, AssertFlags flags = AssertFlags::hard, std::string_view separator = "\n", SourceLoc source_loc = SourceLoc::Current{}) const
             {
                 // No need to wrap this.
-                if (auto guard = MakeContextGuard(-1, flags, source_loc))
+                if (auto guard = MakeContextGuard(ExceptionElem::all, flags, source_loc))
                 {
                     if (CombinedMessage(separator) != expected_message)
                         TA_FAIL(source_loc, "The combined exception message is not equal to `{}`.", expected_message);
@@ -4329,7 +4329,7 @@ namespace ta_test
             {
                 // No need to wrap this.
                 std::regex r(text::regex::ConstructRegex(regex));
-                if (auto guard = MakeContextGuard(-1, flags, source_loc))
+                if (auto guard = MakeContextGuard(ExceptionElem::all, flags, source_loc))
                 {
                     if (!text::regex::WholeStringMatchesRegex(CombinedMessage(separator), r))
                         TA_FAIL(source_loc, "The combined exception message doesn't match regex `{}`.", regex);
@@ -4438,7 +4438,7 @@ namespace ta_test
                                 return;
                               case ExceptionElem::any:
                                 {
-                                    auto context = MakeContextGuard(-1, flags, source_loc);
+                                    auto context = MakeContextGuard(ExceptionElem::any, flags, source_loc);
                                     if (std::none_of(elems.begin(), elems.end(), func))
                                         TA_FAIL(flags, source_loc, "{}", std::forward<G>(message_func)());
                                 }

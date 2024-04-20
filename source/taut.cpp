@@ -897,7 +897,7 @@ ta_test::data::BasicGenerator::OverrideStatus ta_test::data::BasicGenerator::Run
 }
 
 ta_test::data::CaughtExceptionContext::CaughtExceptionContext(
-    std::shared_ptr<const CaughtExceptionInfo> state, int active_elem, AssertFlags flags, SourceLoc source_loc
+    std::shared_ptr<const CaughtExceptionInfo> state, ExceptionElemVar active_elem, AssertFlags flags, SourceLoc source_loc
 )
     : FrameGuard([&]() -> std::shared_ptr<const CaughtExceptionContext>
     {
@@ -908,11 +908,37 @@ ta_test::data::CaughtExceptionContext::CaughtExceptionContext(
         if (state->elems.empty())
             return nullptr;
 
-        if (!TA_CHECK($[active_elem == -1] || $[std::size_t(active_elem)] < $[state->elems.size()])(flags, source_loc, "Exception element index is out of range."))
-            return nullptr;
+        // Validate the elem index.
+        // When it's a enum (rather than an int), there's nothing to validate, just the vector being non-empty (as we checked above).
+        if (int *index = std::get_if<int>(&active_elem))
+        {
+            if (!TA_CHECK($[std::size_t(*index)] < $[state->elems.size()])(flags, source_loc, "Exception element index is out of range."))
+                return nullptr;
+        }
+
         return std::shared_ptr<const CaughtExceptionContext>(std::shared_ptr<void>{}, this);
     }()),
-    state(std::move(state)), active_elem(active_elem)
+    state(std::move(state)),
+    // We don't care about the validity of this when the lambda above returns null.
+    active_elem(this->state ? std::visit(meta::Overload{
+        [&](ExceptionElem e)
+        {
+            switch (e)
+            {
+              case ExceptionElem::top_level:
+                return 0;
+              case ExceptionElem::most_nested:
+                return int(this->state->elems.size()) - 1;
+              case ExceptionElem::all:
+              case ExceptionElem::any:
+                return -1;
+            }
+        },
+        [&](int i)
+        {
+            return i;
+        },
+    }, active_elem) : -1)
 {}
 
 // Gracefully fails the current test, if not already failed.
@@ -1270,7 +1296,11 @@ ta_test::output::TextCanvas::CellInfo &ta_test::output::TextCanvas::CellInfoAt(s
 
 std::size_t ta_test::output::TextCanvas::DrawString(std::size_t line, std::size_t start, std::u32string_view text, const CellInfo &info)
 {
-    EnsureNumLines(line + 1);
+    EnsureNumLines(line + 1); // This should run even if the string is empty.
+
+    if (text.empty())
+        return 0;
+
     EnsureLineSize(line, start + text.size());
 
     auto out = lines[line].text.begin() + (std::ptrdiff_t)start;
@@ -1970,6 +2000,10 @@ void ta_test::detail::AssertWrapper::EvaluateExtras()
         try
         {
             extras_func(*this, extras_data);
+
+            // Strip at most one trailing `\n`.
+            if (user_message && user_message->ends_with('\n'))
+                user_message->pop_back();
         }
         catch (...)
         {
@@ -2460,6 +2494,10 @@ void ta_test::detail::MustThrowWrapper::EvaluateExtras()
         try
         {
             extras_func(*this, extras_data);
+
+            // Strip at most one trailing `\n`.
+            if (user_message && user_message->ends_with('\n'))
+                user_message->pop_back();
         }
         catch (...)
         {
@@ -5410,7 +5448,7 @@ void ta_test::modules::MustThrowPrinter::PrintFrame(
                 }
                 else
                 {
-                    terminal.Print(cur_style, "\n{:{}}{}", "", gap, segment);
+                    terminal.Print(cur_style, "\n{:{}}{}", "", gap * !segment.empty(), segment);
                 }
                 return false;
             });

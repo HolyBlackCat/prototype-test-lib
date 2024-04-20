@@ -261,28 +261,32 @@ struct CodeRunner
     }
 
   public:
-    CodeRunner &Run(std::string_view flags = "")
+    CodeRunner &Run(std::string_view flags = "", ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
     {
+        TA_CONTEXT(source_loc);
         TA_CHECK( RunLow(flags) == 0 );
         return *this;
     }
-    CodeRunner &Fail(std::string_view flags = "", std::optional<int> error_code = {})
+    CodeRunner &Fail(std::string_view flags = "", std::optional<int> error_code = {}, ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
     {
+        TA_CONTEXT(source_loc);
         if (error_code)
             TA_CHECK( $[RunLow(flags)] != $[*error_code] );
         else
             TA_CHECK( RunLow(flags) != 0 );
         return *this;
     }
-    CodeRunner &RunWithExactOutput(std::string_view flags, std::string_view expected_output)
+    CodeRunner &RunWithExactOutput(std::string_view flags, std::string_view expected_output, ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
     {
+        TA_CONTEXT(source_loc);
         std::string output;
         TA_CHECK( RunLow(flags, &output) == 0 );
         CheckStringEquality(output, expected_output);
         return *this;
     }
-    CodeRunner &FailWithExactOutput(std::string_view flags, std::string_view expected_output, std::optional<int> error_code = {})
+    CodeRunner &FailWithExactOutput(std::string_view flags, std::string_view expected_output, std::optional<int> error_code = {}, ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
     {
+        TA_CONTEXT(source_loc);
         std::string output;
         if (error_code)
             TA_CHECK( $[RunLow(flags, &output)] == $[*error_code] );
@@ -291,8 +295,9 @@ struct CodeRunner
         CheckStringEquality(output, expected_output);
         return *this;
     }
-    CodeRunner &FailWithOutputMatching(std::string_view flags, std::regex regex)
+    CodeRunner &FailWithOutputMatching(std::string_view flags, std::regex regex, ta_test::SourceLoc source_loc = ta_test::SourceLoc::Current{})
     {
+        TA_CONTEXT(source_loc);
         std::string output;
         TA_CHECK( RunLow(flags, &output) != 0 );
         TA_CHECK( std::regex_search(output, regex) );
@@ -3426,6 +3431,49 @@ bool foo(std::string &&x) {return !x.empty();}
 TA_TEST(blah) {TA_CHECK(foo($[std::string("1234567890123456789012345678901234567890123456789012345678901234567890")]));}
 )")
     .Run();
+
+    // Strip trailing `\n`, but at most one.
+    MustCompileAndThen(common_program_prefix + R"(
+TA_TEST(blah) {TA_CHECK(false)("foo\n");}
+TA_TEST(bleh) {TA_CHECK(false)("foo\n\n");}
+)")
+    .FailWithExactOutput("", R"(
+Running tests...
+1/2 │  ● blah
+
+dir/subdir/file.cpp:5:
+TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:5:
+Assertion failed: foo
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+2/2 [1] │  ● bleh
+
+dir/subdir/file.cpp:6:
+TEST FAILED: bleh ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:6:
+Assertion failed: foo
+
+
+    TA_CHECK( false )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+FOLLOWING TESTS FAILED:
+
+● blah      │ dir/subdir/file.cpp:5
+● bleh      │ dir/subdir/file.cpp:6
+
+             Tests    Checks
+FAILED           2         2
+
+)");
 }
 
 TA_TEST( ta_check/laziness )
@@ -3895,9 +3943,11 @@ PASSED           3         3
     // A multiline user message.
     MustCompileAndThen(common_program_prefix + R"(
 TA_TEST(blah) {TA_MUST_THROW(42)("foo\nbar\ncarrrr");}
+TA_TEST(bleh) {TA_MUST_THROW(42)("foo\n");} // Strip trailing \n
+TA_TEST(bluh) {TA_MUST_THROW(42)("foo\n\n");} // ...but at most once.
 )").FailWithExactOutput("", R"(
 Running tests...
-1/1 │  ● blah
+1/3 │  ● blah
 
 dir/subdir/file.cpp:5:
 TEST FAILED: blah ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3911,12 +3961,41 @@ Expected exception: foo
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 
+Continuing...
+2/3 [1] │  ● bleh
+
+dir/subdir/file.cpp:6:
+TEST FAILED: bleh ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:6:
+Expected exception: foo
+
+    TA_MUST_THROW( 42 )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+3/3 [2] │  ● bluh
+
+dir/subdir/file.cpp:7:
+TEST FAILED: bluh ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:7:
+Expected exception: foo
+
+
+    TA_MUST_THROW( 42 )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
 FOLLOWING TESTS FAILED:
 
 ● blah      │ dir/subdir/file.cpp:5
+● bleh      │ dir/subdir/file.cpp:6
+● bluh      │ dir/subdir/file.cpp:7
 
              Tests    Checks
-FAILED           1         1
+FAILED           3         3
 
 )");
 

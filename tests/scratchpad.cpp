@@ -155,6 +155,8 @@ TA_TEST
 --- TA_MUST_THROW:
     how combining messages works
 
+    destroying context out of order must be detected
+
     Checking unknown exceptions. All functions must fail.
 
     Specifying wrong index for ANY function (or MakeContextGuard()) fails the test
