@@ -25,6 +25,7 @@ int main(int argc, char **argv)
 // Add a flag to change the output stream. How do I name it?
 
 // Support namespaces as test groups?
+// Support tests in classes as methods? Not sure.
 
 // Investigate forceinline + artificial for things that must not be debugged.
 
@@ -153,7 +154,7 @@ TA_TEST
     Duplicate names in different files = either no error (if source locations match = in header) or a runtime error otherwise
 
 --- TA_MUST_THROW:
-    how combining messages works
+    check CombinedMessage is accessible
 
     destroying context out of order must be detected
 

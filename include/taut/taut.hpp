@@ -4208,8 +4208,7 @@ namespace ta_test
             }
 
           protected:
-            // This is initially `protected` because it makes no sense to call it directly on rvalues. (While it won't dangle, doing it shouldn't be necessary.)
-            // Derived classes can make it public.
+            // Anything that doesn't return a reference to self must be protected, otherwise calling it in a macro will fail, due to our unary `~`.
 
             // If you're manually examining this exception with `TA_CHECK(...)`, create an instance of this object first.
             // While it exists, all failed assertions will mention that they happened while examining this exception.
@@ -4227,7 +4226,6 @@ namespace ta_test
                 }
             }
 
-          public:
             // Returns all stored nested exceptions, in case you want to examine them manually.
             // Prefer the high-level functions below.
             [[nodiscard]] const std::vector<SingleException> &GetElems() const
@@ -4247,7 +4245,7 @@ namespace ta_test
             [[nodiscard]] std::string CombinedMessage(std::string_view separator = "\n") const
             {
                 if constexpr (IsWrapper)
-                    return State().GetElems();
+                    return State().CombinedMessage(separator);
                 else
                 {
                     std::string ret;
@@ -4262,9 +4260,11 @@ namespace ta_test
                             ret += separator;
                         ret += elem.message;
                     }
+                    return ret;
                 }
             }
 
+          public:
             // Checks that the exception message is equal to a string.
             Ref CheckMessage(/* elem = top_level, */ std::string_view expected_message, AssertFlags flags = AssertFlags::hard, SourceLoc source_loc = SourceLoc::Current{}) const
             {
@@ -4290,11 +4290,21 @@ namespace ta_test
             // Checks that the combined exception message is equal to a string.
             Ref CheckMessage(ExceptionElemsCombinedTag, std::string_view expected_message, AssertFlags flags = AssertFlags::hard, std::string_view separator = "\n", SourceLoc source_loc = SourceLoc::Current{}) const
             {
-                // No need to wrap this.
-                if (auto guard = MakeContextGuard(ExceptionElem::all, flags, source_loc))
+                if constexpr (IsWrapper)
                 {
-                    if (CombinedMessage(separator) != expected_message)
-                        TA_FAIL(source_loc, "The combined exception message is not equal to `{}`.", expected_message);
+                    decltype(auto) state = State();
+                    state.CheckMessage(combined, expected_message, flags, separator, source_loc);
+                    return ReturnedRef(state);
+                }
+                else
+                {
+                    if (auto guard = MakeContextGuard(ExceptionElem::all, flags, source_loc))
+                    {
+                        if (CombinedMessage(separator) != expected_message)
+                            TA_FAIL(flags, source_loc, "The combined exception message is not equal to `{}`.", expected_message);
+                    }
+
+                    return ReturnedRef(*this);
                 }
             }
 
@@ -4327,12 +4337,22 @@ namespace ta_test
             // The entire message must match, not just a part of it.
             Ref CheckMessageRegex(ExceptionElemsCombinedTag, std::string_view regex, AssertFlags flags = AssertFlags::hard, std::string_view separator = "\n", SourceLoc source_loc = SourceLoc::Current{}) const
             {
-                // No need to wrap this.
-                std::regex r(text::regex::ConstructRegex(regex));
-                if (auto guard = MakeContextGuard(ExceptionElem::all, flags, source_loc))
+                if constexpr (IsWrapper)
                 {
-                    if (!text::regex::WholeStringMatchesRegex(CombinedMessage(separator), r))
-                        TA_FAIL(source_loc, "The combined exception message doesn't match regex `{}`.", regex);
+                    decltype(auto) state = State();
+                    state.CheckMessageRegex(combined, regex, flags, separator, source_loc);
+                    return ReturnedRef(state);
+                }
+                else
+                {
+                    std::regex r(text::regex::ConstructRegex(regex));
+                    if (auto guard = MakeContextGuard(ExceptionElem::all, flags, source_loc))
+                    {
+                        if (!text::regex::WholeStringMatchesRegex(CombinedMessage(separator), r))
+                            TA_FAIL(flags, source_loc, "The combined exception message doesn't match regex `{}`.", regex);
+                    }
+
+                    return ReturnedRef(*this);
                 }
             }
 
@@ -4495,6 +4515,8 @@ namespace ta_test
         // Expose protected members:
 
         using base::MakeContextGuard;
+        using base::CombinedMessage;
+        using base::GetElems;
     };
 
     // Internals of `TA_MUST_THROW(...)`.

@@ -4230,12 +4230,32 @@ TA_TEST(right_derived_type/3) { FOO( TA_MUST_THROW( throw std::runtime_error("fo
 TA_TEST(right_derived_type/4) { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckDerivedType<std::exception>(0); }
 TA_TEST(wrong_derived_type)   { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckDerivedType<std::logic_error>(); std::cout << "###\n"; }
 TA_TEST(right_low_check)      { FOO( TA_MUST_THROW( throw std::runtime_error("foo") ) ).CheckElemLow(0, [&](const ta_test::SingleException &) {return true;}, [&]{return "foo";}); }
+
+// Combined message:
+
+void ThrowNested()
+{
+    try
+    {
+        try { throw std::runtime_error("33"); }
+        catch (...) { std::throw_with_nested(std::logic_error("22")); }
+    }
+    catch (...) { std::throw_with_nested(std::domain_error("11")); }
+}
+TA_TEST(combined/string/fail/notregex)   {FOO( TA_MUST_THROW(ThrowNested()) ).CheckMessage(ta_test::combined, "11\n22\n3."); std::cout << "###\n";} // Regex would match.
+TA_TEST(combined/string/fail/soft)       {FOO( TA_MUST_THROW(ThrowNested()) ).CheckMessage(ta_test::combined, "11\n22\n3", ta_test::soft); std::cout << "###\n";}
+TA_TEST(combined/string/pass/normal)     {FOO( TA_MUST_THROW(ThrowNested()) ).CheckMessage(ta_test::combined, "11\n22\n33");}
+TA_TEST(combined/string/pass/custom_sep) {FOO( TA_MUST_THROW(ThrowNested()) ).CheckMessage(ta_test::combined, "11--22--33", ta_test::hard, "--");}
+TA_TEST(combined/regex/fail/hard)       {FOO( TA_MUST_THROW(ThrowNested()) ).CheckMessageRegex(ta_test::combined, "11\n22\n3"); std::cout << "###\n";}
+TA_TEST(combined/regex/fail/soft)       {FOO( TA_MUST_THROW(ThrowNested()) ).CheckMessageRegex(ta_test::combined, "11\n22\n3", ta_test::soft); std::cout << "###\n";}
+TA_TEST(combined/regex/pass/normal)     {FOO( TA_MUST_THROW(ThrowNested()) ).CheckMessageRegex(ta_test::combined, "11\n22\n3.");}
+TA_TEST(combined/regex/pass/custom_sep) {FOO( TA_MUST_THROW(ThrowNested()) ).CheckMessageRegex(ta_test::combined, "11oo2..o33", ta_test::hard, "oo");}
 )";
 
     std::string output = R"(
 Running tests...
       │  ● wrong_message/
- 1/17 │  ·   ● 1
+ 1/25 │  ·   ● 1
 
 dir/subdir/file.cpp:6:
 TEST FAILED: wrong_message/1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4256,7 +4276,7 @@ Thrown here:
 
 Continuing...
           │  ○ wrong_message/
- 2/17 [1] │  ·   ● 2
+ 2/25 [1] │  ·   ● 2
 
 dir/subdir/file.cpp:7:
 TEST FAILED: wrong_message/2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4277,7 +4297,7 @@ Thrown here:
 
 Continuing...
           │  ○ wrong_message/
- 3/17 [2] │  ·   ● 3
+ 3/25 [2] │  ·   ● 3
 
 dir/subdir/file.cpp:8:
 TEST FAILED: wrong_message/3 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4297,8 +4317,8 @@ Thrown here:
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 Continuing...
- 4/17 [3] │  ● right_message
- 5/17 [3] │  ● wrong_regex
+ 4/25 [3] │  ● right_message
+ 5/25 [3] │  ● wrong_regex
 
 dir/subdir/file.cpp:10:
 TEST FAILED: wrong_regex ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4319,13 +4339,13 @@ Thrown here:
 
 Continuing...
           │  ● right_regex/
- 6/17 [4] │  ·   ● 1
- 7/17 [4] │  ·   ● 2
+ 6/25 [4] │  ·   ● 1
+ 7/25 [4] │  ·   ● 2
           │  ● right_exact_type/
- 8/17 [4] │  ·   ● 1
- 9/17 [4] │  ·   ● 2
+ 8/25 [4] │  ·   ● 1
+ 9/25 [4] │  ·   ● 2
           │  ● wrong_exact_type/
-10/17 [4] │  ·   ● 1
+10/25 [4] │  ·   ● 1
 
 dir/subdir/file.cpp:15:
 TEST FAILED: wrong_exact_type/1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4346,7 +4366,7 @@ Thrown here:
 
 Continuing...
           │  ○ wrong_exact_type/
-11/17 [5] │  ·   ● 2
+11/25 [5] │  ·   ● 2
 
 dir/subdir/file.cpp:16:
 TEST FAILED: wrong_exact_type/2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4367,11 +4387,11 @@ Thrown here:
 
 Continuing...
           │  ● right_derived_type/
-12/17 [6] │  ·   ● 1
-13/17 [6] │  ·   ● 2
-14/17 [6] │  ·   ● 3
-15/17 [6] │  ·   ● 4
-16/17 [6] │  ● wrong_derived_type
+12/25 [6] │  ·   ● 1
+13/25 [6] │  ·   ● 2
+14/25 [6] │  ·   ● 3
+15/25 [6] │  ·   ● 4
+16/25 [6] │  ● wrong_derived_type
 
 dir/subdir/file.cpp:21:
 TEST FAILED: wrong_derived_type ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4391,32 +4411,168 @@ Thrown here:
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 Continuing...
-17/17 [7] │  ● right_low_check
+17/25 [7] │  ● right_low_check
+          │  ● combined/
+          │  ·   ● string/
+          │  ·   ·   ● fail/
+18/25 [7] │  ·   ·   ·   ● notregex
+
+dir/subdir/file.cpp:35:
+TEST FAILED: combined/string/fail/notregex ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:35:
+Failure: The combined exception message is not equal to `11
+         22
+         3.`.
+
+While analyzing exception:
+    std::_Nested_exception<std::domain_error>:
+        "11"
+    std::_Nested_exception<std::logic_error>:
+        "22"
+    std::runtime_error:
+        "33"
+
+dir/subdir/file.cpp:35:
+Thrown here:
+
+    TA_MUST_THROW( ThrowNested() )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+          │  ○ combined/
+          │  ·   ○ string/
+          │  ·   ·   ○ fail/
+19/25 [8] │  ·   ·   ·   ● soft
+
+dir/subdir/file.cpp:36:
+TEST FAILED: combined/string/fail/soft ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:36:
+Failure: The combined exception message is not equal to `11
+         22
+         3`.
+
+While analyzing exception:
+    std::_Nested_exception<std::domain_error>:
+        "11"
+    std::_Nested_exception<std::logic_error>:
+        "22"
+    std::runtime_error:
+        "33"
+
+dir/subdir/file.cpp:36:
+Thrown here:
+
+    TA_MUST_THROW( ThrowNested() )
+
+###
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+          │  ○ combined/
+          │  ·   ○ string/
+          │  ·   ·   ● pass/
+20/25 [9] │  ·   ·   ·   ● normal
+21/25 [9] │  ·   ·   ·   ● custom_sep
+          │  ·   ● regex/
+          │  ·   ·   ● fail/
+22/25 [9] │  ·   ·   ·   ● hard
+
+dir/subdir/file.cpp:39:
+TEST FAILED: combined/regex/fail/hard ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:39:
+Failure: The combined exception message doesn't match regex `11
+         22
+         3`.
+
+While analyzing exception:
+    std::_Nested_exception<std::domain_error>:
+        "11"
+    std::_Nested_exception<std::logic_error>:
+        "22"
+    std::runtime_error:
+        "33"
+
+dir/subdir/file.cpp:39:
+Thrown here:
+
+    TA_MUST_THROW( ThrowNested() )
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+           │  ○ combined/
+           │  ·   ○ regex/
+           │  ·   ·   ○ fail/
+23/25 [10] │  ·   ·   ·   ● soft
+
+dir/subdir/file.cpp:40:
+TEST FAILED: combined/regex/fail/soft ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dir/subdir/file.cpp:40:
+Failure: The combined exception message doesn't match regex `11
+         22
+         3`.
+
+While analyzing exception:
+    std::_Nested_exception<std::domain_error>:
+        "11"
+    std::_Nested_exception<std::logic_error>:
+        "22"
+    std::runtime_error:
+        "33"
+
+dir/subdir/file.cpp:40:
+Thrown here:
+
+    TA_MUST_THROW( ThrowNested() )
+
+###
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Continuing...
+           │  ○ combined/
+           │  ·   ○ regex/
+           │  ·   ·   ● pass/
+24/25 [11] │  ·   ·   ·   ● normal
+25/25 [11] │  ·   ·   ·   ● custom_sep
 
 FOLLOWING TESTS FAILED:
 
-● wrong_message/          │
-·   ● 1                   │ dir/subdir/file.cpp:6
-·   ● 2                   │ dir/subdir/file.cpp:7
-·   ● 3                   │ dir/subdir/file.cpp:8
-● wrong_regex             │ dir/subdir/file.cpp:10
-● wrong_exact_type/       │
-·   ● 1                   │ dir/subdir/file.cpp:15
-·   ● 2                   │ dir/subdir/file.cpp:16
-● wrong_derived_type      │ dir/subdir/file.cpp:21
+● wrong_message/            │
+·   ● 1                     │ dir/subdir/file.cpp:6
+·   ● 2                     │ dir/subdir/file.cpp:7
+·   ● 3                     │ dir/subdir/file.cpp:8
+● wrong_regex               │ dir/subdir/file.cpp:10
+● wrong_exact_type/         │
+·   ● 1                     │ dir/subdir/file.cpp:15
+·   ● 2                     │ dir/subdir/file.cpp:16
+● wrong_derived_type        │ dir/subdir/file.cpp:21
+● combined/                 │
+·   ● string/               │
+·   ·   ● fail/             │
+·   ·   ·   ● notregex      │ dir/subdir/file.cpp:35
+·   ·   ·   ● soft          │ dir/subdir/file.cpp:36
+·   ● regex/                │
+·   ·   ● fail/             │
+·   ·   ·   ● hard          │ dir/subdir/file.cpp:39
+·   ·   ·   ● soft          │ dir/subdir/file.cpp:40
 )";
     std::string output_suffix_a = R"(
              Tests    Checks
-Executed        17        41
-Passed          10        34
-FAILED           7         7
+Executed        25        53
+Passed          14        42
+FAILED          11        11
 
 )";
     std::string output_suffix_b = R"(
              Tests    Checks
-Executed        17        58
-Passed          10        51
-FAILED           7         7
+Executed        25        78
+Passed          14        67
+FAILED          11        11
 
 )";
 
