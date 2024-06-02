@@ -1176,11 +1176,11 @@ namespace ta_test
                 auto RemoveTypePrefix = [&](std::string_view to_remove)
                 {
                     std::size_t region_start = 0;
-                    std::size_t source_pos = 0;
+                    std::size_t source_pos = std::size_t(-1);
                     std::size_t target_pos = 0;
                     while (true)
                     {
-                        source_pos = view.find(to_remove, source_pos);
+                        source_pos = view.find(to_remove, source_pos + 1);
                         if (source_pos == std::string_view::npos)
                             break;
                         if (source_pos == 0 || !chars::IsIdentifierCharStrict(view[source_pos - 1]))
@@ -1202,6 +1202,19 @@ namespace ta_test
                 RemoveTypePrefix("class ");
                 RemoveTypePrefix("union ");
                 RemoveTypePrefix("enum ");
+
+                { // Condense `> >` into `>>`.
+                    std::size_t target_pos = 1;
+                    for (std::size_t i = 1; i + 1 < size; i++)
+                    {
+                        if (buffer[i] == ' ' && buffer[i-1] == '>' && buffer[i+1] == '>')
+                            continue;
+                        buffer[target_pos++] = buffer[i];
+                    }
+                    if (size > 0)
+                        buffer[target_pos++] = buffer[size-1];
+                    view = std::string_view(view.data(), target_pos);
+                }
 
                 return view.size();
                 #endif
