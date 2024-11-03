@@ -2025,6 +2025,8 @@ namespace ta_test
 
                     return std::move(ret);
                 }
+
+                return {};
             }
         };
         // Analyzes exceptions derived from `std::exception`.
